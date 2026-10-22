@@ -2,8 +2,11 @@
 
 namespace App\Providers;
 
+use App\Domain\Capture\EventProducer;
+use App\Domain\Capture\PayloadDecoder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
+use App\Infrastructure\Kafka\KafkaEventProducer;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 
@@ -26,6 +29,16 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
             $app->make(ClickHouseClient::class),
             database_path('clickhouse/migrations'),
+        ));
+
+        $this->app->singleton(EventProducer::class, fn () => new KafkaEventProducer(
+            config('capture.kafka_brokers'),
+            config('capture.events_topic'),
+        ));
+
+        $this->app->singleton(PayloadDecoder::class, fn () => new PayloadDecoder(
+            (int) config('capture.max_decoded_bytes'),
+            (int) config('capture.max_batch_size'),
         ));
     }
 

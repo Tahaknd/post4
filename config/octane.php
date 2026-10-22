@@ -132,6 +132,7 @@ return [
 
     'warm' => [
         ...Octane::defaultServicesToWarm(),
+        \App\Domain\Capture\EventProducer::class,
     ],
 
     'flush' => [
