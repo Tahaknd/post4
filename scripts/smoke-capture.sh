@@ -16,9 +16,16 @@ cd "$(dirname "$0")/.."
 
 usage() {
   cat <<'EOF'
-Usage: scripts/smoke-capture.sh [-h|--help]
+Usage: scripts/smoke-capture.sh [--with-wedge-check] [-h|--help]
 
 End-to-end capture smoke test against the running docker compose stack.
+
+Options:
+  --with-wedge-check
+                    also send 7 back-to-back /batch/ requests (24 events each, 168 distinct calendar
+                    months going back from the current month) and assert that ClickHouse ingests all
+                    of them without a TOO_MANY_PARTS stall of the Kafka consumer (opt-in; the
+                    default run is unchanged)
 
 Environment:
   HOST              capture endpoint, http://localhost[:port] or http://127.0.0.1[:port]
@@ -36,9 +43,11 @@ Exit codes:
 EOF
 }
 
+WITH_WEDGE=0
 for arg in "$@"; do
   case "$arg" in
     -h | --help) usage; exit 0 ;;
+    --with-wedge-check) WITH_WEDGE=1 ;;
     *) echo "unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -190,12 +199,13 @@ if [[ "$PRE" != "0" ]]; then
   exit 2
 fi
 
-# post <body-or-@file> -> sets HTTP_CODE and HTTP_BODY
+# post <body-or-@file> -> sets HTTP_CODE and HTTP_BODY (POST_PATH selects the endpoint, default /e/)
+POST_PATH="/e/"
 post() {
   local code
   rm -f "$TMP/body"
   # curl may exit non-zero (55/56) after the server answered early; the printed status is still the answer.
-  code="$(curl -sS --max-time 15 -o "$TMP/body" -w '%{http_code}' -X POST "$HOST/e/" \
+  code="$(curl -sS --max-time 15 -o "$TMP/body" -w '%{http_code}' -X POST "$HOST$POST_PATH" \
     -H 'Content-Type: application/json' --data-binary "$1" 2>"$TMP/curl_err" || true)"
   HTTP_CODE="${code:-000}"
   HTTP_BODY="$(cat "$TMP/body" 2>/dev/null || true)"
@@ -256,23 +266,31 @@ fi
 
 # --- (d) Kafka consumer healthy --------------------------------------------------------------
 # system.kafka_consumers keeps its last 10 exceptions in a ring buffer that survives until the
-# consumer is recreated, so only exceptions newer than this script's start count. The commit
-# must also be newer than the start (a commit happens after our event was flushed), so this is
-# only meaningful when our event actually arrived.
+# consumer is recreated, so only exceptions newer than the given start count. The commit
+# must also be newer than the given start (a commit happens after our event was flushed), so this is
+# only meaningful when our events actually arrived.
+# consumer_health <arrived 0|1> <exceptions-since epoch> <commit-since epoch>
+# -> sets CONSUMER_OK and CONSUMER_MSG
 CONSUMER_OK=0
-CONSUMER_MSG="no row for posthog.kafka_events in system.kafka_consumers"
-for i in $(seq 1 "$WAIT_SECONDS"); do
-  [[ $ARRIVED -eq 1 ]] || { CONSUMER_MSG="our event never arrived, no commit to verify"; break; }
-  ROW="$(ch "SELECT count(), sum(arrayCount(t -> toUnixTimestamp(t) >= $T0, \`exceptions.time\`)), max(toUnixTimestamp(last_commit_time)) FROM system.kafka_consumers WHERE database = 'posthog' AND \`table\` = 'kafka_events' FORMAT TSV" 2>/dev/null || true)"
-  ROWS=""; EXC=""; COMMIT=""
-  read -r ROWS EXC COMMIT <<<"$ROW" || true
-  if [[ "$ROWS" =~ ^[0-9]+$ && "$EXC" =~ ^[0-9]+$ && "$COMMIT" =~ ^[0-9]+$ && "$ROWS" -ge 1 ]]; then
-    CONSUMER_MSG="consumers=$ROWS new_exceptions=$EXC last_commit=$COMMIT start=$T0"
-    if [[ "$EXC" -gt 0 ]]; then break; fi
-    if [[ "$COMMIT" -ge "$T0" ]]; then CONSUMER_OK=1; break; fi
-  fi
-  sleep 1
-done
+CONSUMER_MSG=""
+consumer_health() {
+  local arrived="$1" exc_since="$2" commit_since="$3" i row rows exc commit
+  CONSUMER_OK=0
+  CONSUMER_MSG="no row for posthog.kafka_events in system.kafka_consumers"
+  for i in $(seq 1 "$WAIT_SECONDS"); do
+    [[ "$arrived" -eq 1 ]] || { CONSUMER_MSG="our event never arrived, no commit to verify"; break; }
+    row="$(ch "SELECT count(), sum(arrayCount(t -> toUnixTimestamp(t) >= $exc_since, \`exceptions.time\`)), max(toUnixTimestamp(last_commit_time)) FROM system.kafka_consumers WHERE database = 'posthog' AND \`table\` = 'kafka_events' FORMAT TSV" 2>/dev/null || true)"
+    rows=""; exc=""; commit=""
+    read -r rows exc commit <<<"$row" || true
+    if [[ "$rows" =~ ^[0-9]+$ && "$exc" =~ ^[0-9]+$ && "$commit" =~ ^[0-9]+$ && "$rows" -ge 1 ]]; then
+      CONSUMER_MSG="consumers=$rows new_exceptions=$exc last_commit=$commit start=$commit_since"
+      if [[ "$exc" -gt 0 ]]; then break; fi
+      if [[ "$commit" -ge "$commit_since" ]]; then CONSUMER_OK=1; break; fi
+    fi
+    sleep 1
+  done
+}
+consumer_health "$ARRIVED" "$T0" "$T0"
 if [[ $CONSUMER_OK -eq 1 ]]; then
   pass "kafka_events consumer healthy ($CONSUMER_MSG)"
 else
@@ -295,6 +313,88 @@ if [[ "$HTTP_CODE" == "413" ]]; then pass "~${BIG_BYTES} byte body -> 413"; else
 
 post '{"api_key": not json'
 if [[ "$HTTP_CODE" == "400" ]]; then pass "invalid JSON -> 400"; else fail "invalid JSON: expected 400, got $HTTP_CODE"; fi
+
+# --- (e) opt-in: wide-timestamp batches must not stall ingest ---------------------------------
+# `events` is partitioned by month; one Kafka block touching more than max_partitions_per_insert_block
+# months used to fail with TOO_MANY_PARTS and wedge the consumer. 7 requests x 24 months = 168 distinct
+# months (first day of each, going back from the current month, all inside the 2000..now timestamp clamp).
+if [[ $WITH_WEDGE -eq 1 ]]; then
+  WEDGE_NAME="${MARK}_wedge"
+  WEDGE_EVENTS=168
+  if ! T1="$(ch 'SELECT toUnixTimestamp(now())' 2>/dev/null)" || [[ ! "$T1" =~ ^[0-9]+$ ]]; then
+    T1="$(date +%s)"
+  fi
+  python3 - "$KEY" "$WEDGE_NAME" "$TMP" <<'PY'
+import datetime, json, sys
+key, name, out = sys.argv[1:4]
+today = datetime.datetime.now(datetime.timezone.utc)
+y, m = today.year, today.month
+months = []
+for _ in range(168):
+    months.append("%04d-%02d-01T12:00:00Z" % (y, m))
+    m -= 1
+    if m == 0:
+        y, m = y - 1, 12
+for r in range(7):
+    batch = [{"event": name, "distinct_id": "smoke-wedge", "timestamp": ts} for ts in months[r * 24:(r + 1) * 24]]
+    with open("%s/wedge_%d.json" % (out, r), "w") as f:
+        json.dump({"api_key": key, "batch": batch}, f)
+PY
+  WEDGE_SENT=0
+  POST_PATH="/batch/"
+  for r in 0 1 2 3 4 5 6; do
+    post "@$TMP/wedge_$r.json"
+    if [[ "$HTTP_CODE" == "200" ]]; then
+      WEDGE_SENT=$((WEDGE_SENT + 1))
+    else
+      fail "wedge request $((r + 1))/7: expected 200, got HTTP $HTTP_CODE body '${HTTP_BODY:0:200}'"
+    fi
+  done
+  POST_PATH="/e/"
+  if [[ $WEDGE_SENT -eq 7 ]]; then
+    pass "7 wide-timestamp batch requests accepted (HTTP 200)"
+  fi
+
+  WEDGE_ARRIVED=0
+  WEDGE_COUNT=0
+  WEDGE_MONTHS=0
+  if [[ $WEDGE_SENT -eq 7 ]]; then
+    for i in $(seq 1 "$WAIT_SECONDS"); do
+      ROW="$(ch "SELECT count(), uniqExact(toYYYYMM(timestamp)) FROM posthog.events WHERE event = '$WEDGE_NAME' AND project_id = $PROJECT_ID FORMAT TSV" 2>/dev/null || true)"
+      read -r WEDGE_COUNT WEDGE_MONTHS <<<"$ROW" || true
+      [[ "$WEDGE_COUNT" =~ ^[0-9]+$ ]] || WEDGE_COUNT=0
+      [[ "$WEDGE_MONTHS" =~ ^[0-9]+$ ]] || WEDGE_MONTHS=0
+      if [[ "$WEDGE_COUNT" -ge "$WEDGE_EVENTS" ]]; then WEDGE_ARRIVED=1; break; fi
+      sleep 1
+    done
+    if [[ $WEDGE_ARRIVED -eq 1 && "$WEDGE_COUNT" -eq "$WEDGE_EVENTS" ]]; then
+      pass "all ${WEDGE_EVENTS} wedge events in posthog.events"
+    else
+      fail "wedge events in posthog.events: ${WEDGE_COUNT}/${WEDGE_EVENTS} after ${WAIT_SECONDS}s"
+    fi
+    if [[ "$WEDGE_MONTHS" -eq 168 ]]; then
+      pass "wedge events span 168 distinct months"
+    else
+      fail "wedge events span ${WEDGE_MONTHS} distinct months, expected 168"
+    fi
+  else
+    fail "wedge events not checked in ClickHouse: not all requests were accepted"
+  fi
+
+  consumer_health "$WEDGE_ARRIVED" "$T0" "$T1"
+  if [[ $CONSUMER_OK -eq 1 ]]; then
+    pass "kafka_events consumer healthy after wedge batches ($CONSUMER_MSG)"
+  else
+    fail "kafka_events consumer unhealthy after wedge batches ($CONSUMER_MSG)"
+  fi
+  if chv "SELECT count() FROM posthog.events_errors WHERE received_at >= toDateTime($T0) AND raw LIKE '%${MARK}%'"; then
+    if [[ "$CH_OUT" == "0" ]]; then
+      pass "events_errors still has no rows for this run after wedge batches"
+    else
+      fail "events_errors has $CH_OUT rows for this run after wedge batches"
+    fi
+  fi
+fi
 
 echo "----"
 echo "smoke-capture: $PASSED passed, $FAILED failed"
