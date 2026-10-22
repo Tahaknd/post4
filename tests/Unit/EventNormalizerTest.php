@@ -144,3 +144,146 @@ it('falls back to now for unparseable timestamps', function () {
 
     expect($m['timestamp'])->toBe('2026-10-22 12:00:00.000');
 });
+
+it('drops events whose properties cannot be json encoded', function () {
+    $properties = json_decode('{"a":1e999}', true);
+    expect(is_infinite($properties['a']))->toBeTrue();
+
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => $properties], project: 1, now: $this->now);
+
+    expect($m)->toBeNull();
+});
+
+it('drops events whose properties nest deeper than the encoder allows', function () {
+    $nested = 'x';
+    for ($i = 0; $i < 600; $i++) {
+        $nested = [$nested];
+    }
+
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => $nested]], project: 1, now: $this->now);
+
+    expect($m)->toBeNull();
+});
+
+it('drops events with an over-long event name or distinct id instead of truncating', function (array $raw) {
+    expect($this->normalizer->normalize($raw, project: 1, now: $this->now))->toBeNull();
+})->with([
+    '201 character event' => [['event' => str_repeat('a', 201), 'distinct_id' => 'u']],
+    '201 character distinct_id' => [['event' => 'e', 'distinct_id' => str_repeat('a', 201)]],
+    '201 multibyte characters in event' => [['event' => str_repeat('ü', 201), 'distinct_id' => 'u']],
+    '201 multibyte characters in distinct_id' => [['event' => 'e', 'distinct_id' => str_repeat('日', 201)]],
+    'far too long distinct_id' => [['event' => 'e', 'distinct_id' => str_repeat('a', 100_000)]],
+]);
+
+it('keeps an event name and distinct id of exactly 200 characters', function (string $char) {
+    $m = $this->normalizer->normalize(
+        ['event' => str_repeat($char, 200), 'distinct_id' => str_repeat($char, 200)],
+        project: 1, now: $this->now,
+    );
+
+    expect($m['event'])->toBe(str_repeat($char, 200))->and($m['distinct_id'])->toBe(str_repeat($char, 200));
+})->with(['ascii' => 'a', 'two-byte' => 'ü', 'four-byte' => '😀']);
+
+it('drops whitespace-only event names and distinct ids', function (array $raw) {
+    expect($this->normalizer->normalize($raw, project: 1, now: $this->now))->toBeNull();
+})->with([
+    'spaces event' => [['event' => '   ', 'distinct_id' => 'u']],
+    'spaces distinct_id' => [['event' => 'e', 'distinct_id' => '   ']],
+    'int-like whitespace distinct_id' => [['event' => 'e', 'distinct_id' => " \t\n"]],
+]);
+
+it('drops NUL and control characters in event and distinct id', function (array $raw) {
+    expect($this->normalizer->normalize($raw, project: 1, now: $this->now))->toBeNull();
+})->with([
+    'NUL in event' => [['event' => "ev\0il", 'distinct_id' => 'u']],
+    'NUL in distinct_id' => [['event' => 'e', 'distinct_id' => "u\0"]],
+    'newline in event' => [['event' => "a\nb", 'distinct_id' => 'u']],
+    'tab in distinct_id' => [['event' => 'e', 'distinct_id' => "a\tb"]],
+    'escape in event' => [['event' => "a\x1Bb", 'distinct_id' => 'u']],
+    'DEL in distinct_id' => [['event' => 'e', 'distinct_id' => "a\x7Fb"]],
+]);
+
+it('drops events whose properties exceed the message size cap', function () {
+    $normalizer = new EventNormalizer(maxPropertiesBytes: 100);
+
+    $small = $normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => 'b']], project: 1, now: $this->now);
+    $big = $normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 200)]], project: 1, now: $this->now);
+
+    expect($small)->not->toBeNull()->and($big)->toBeNull();
+});
+
+it('accepts properties of exactly the size cap', function () {
+    $json = json_encode(['a' => str_repeat('x', 50)]);
+    $normalizer = new EventNormalizer(maxPropertiesBytes: strlen($json));
+
+    $m = $normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 50)]], project: 1, now: $this->now);
+
+    expect($m['properties'])->toBe($json);
+});
+
+it('defaults the properties cap to 900000 bytes', function () {
+    $normalizer = new EventNormalizer();
+
+    $ok = $normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 899_000)]], project: 1, now: $this->now);
+    $big = $normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 900_000)]], project: 1, now: $this->now);
+
+    expect($ok)->not->toBeNull()->and($big)->toBeNull();
+});
+
+it('replaces the nil uuid with a fresh one', function () {
+    $m = $this->normalizer->normalize(
+        ['event' => 'e', 'distinct_id' => 'u', 'uuid' => '00000000-0000-0000-0000-000000000000'],
+        project: 1, now: $this->now,
+    );
+
+    expect($m['uuid'])->not->toBe('00000000-0000-0000-0000-000000000000')->and($m['uuid'])->toMatch('/^[0-9a-f-]{36}$/');
+});
+
+it('lowercases a valid client uuid', function () {
+    $m = $this->normalizer->normalize(
+        ['event' => 'e', 'distinct_id' => 'u', 'uuid' => '0197C3A2-1111-7222-8333-44445555ABCD'],
+        project: 1, now: $this->now,
+    );
+
+    expect($m['uuid'])->toBe('0197c3a2-1111-7222-8333-44445555abcd');
+});
+
+it('generates a fresh uuid for invalid client uuids', function (mixed $uuid) {
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'uuid' => $uuid], project: 1, now: $this->now);
+
+    expect($m['uuid'])->toMatch('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/');
+})->with(['garbage' => 'nope', 'integer' => 5, 'array' => [['x']], 'empty' => '']);
+
+it('casts an integer distinct id to a string', function () {
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 123], project: 1, now: $this->now);
+
+    expect($m['distinct_id'])->toBe('123');
+});
+
+it('drops events with a bool, float or array distinct id', function (mixed $distinctId) {
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => $distinctId], project: 1, now: $this->now);
+
+    expect($m)->toBeNull();
+})->with(['bool' => true, 'float' => 1.5, 'array' => [['a']]]);
+
+it('ignores relative timestamp strings and uses the injected now', function (string $timestamp) {
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'timestamp' => $timestamp], project: 1, now: $this->now);
+
+    expect($m['timestamp'])->toBe('2026-10-22 12:00:00.000');
+})->with(['tomorrow', '+1 day', 'now', '@1700000000', 'yesterday noon', '2026']);
+
+it('accepts a space separated date time timestamp', function () {
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'timestamp' => '2026-10-22 11:30:00'], project: 1, now: $this->now);
+
+    expect($m['timestamp'])->toBe('2026-10-22 11:30:00.000');
+});
+
+it('rejects project ids outside the UInt32 range', function (int $project) {
+    $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u'], project: $project, now: $this->now);
+})->with(['zero' => 0, 'negative' => -1, 'above UInt32' => 4294967296])->throws(InvalidArgumentException::class);
+
+it('accepts the largest UInt32 project id', function () {
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u'], project: 4294967295, now: $this->now);
+
+    expect($m['project_id'])->toBe(4294967295);
+});

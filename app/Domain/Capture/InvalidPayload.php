@@ -2,4 +2,4 @@
 
 namespace App\Domain\Capture;
 
-final class InvalidPayload extends \RuntimeException {}
+class InvalidPayload extends \RuntimeException {}

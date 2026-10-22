@@ -6,7 +6,23 @@ use Illuminate\Http\Request;
 
 final class PayloadDecoder
 {
-    public function __construct(private readonly int $maxDecodedBytes = 5_000_000) {}
+    /**
+     * @param  int  $maxDecodedBytes  Upper bound for a gunzipped body. json_decode amplifies memory
+     *                                roughly 33x, so keep this well below memory_limit / 33.
+     * @param  int|null  $maxEvents  Maximum number of top-level events per request (null = unlimited).
+     */
+    public function __construct(
+        private readonly int $maxDecodedBytes = 2_000_000,
+        private readonly ?int $maxEvents = null,
+    ) {
+        // gzdecode(..., 0) means "unlimited": a misconfiguration must not disable the bomb protection.
+        if ($maxDecodedBytes <= 0) {
+            throw new \InvalidArgumentException('maxDecodedBytes must be greater than zero');
+        }
+        if ($maxEvents !== null && $maxEvents <= 0) {
+            throw new \InvalidArgumentException('maxEvents must be greater than zero');
+        }
+    }
 
     public function decode(Request $request): CapturePayload
     {
@@ -47,11 +63,15 @@ final class PayloadDecoder
             $sentAt = $data['sent_at'] ?? $sentAt;
         }
 
+        if ($this->maxEvents !== null && count($events) > $this->maxEvents) {
+            throw new TooManyEvents('Too many events in one request');
+        }
+
         $events = array_values(array_filter($events, 'is_array'));
-        $apiKey ??= $this->apiKeyFromEvents($events);
+        $apiKey = is_string($apiKey) && $apiKey !== '' ? $apiKey : $this->apiKeyFromEvents($events);
 
         return new CapturePayload(
-            is_string($apiKey) ? $apiKey : null,
+            $apiKey,
             $events,
             is_string($sentAt) ? $sentAt : null,
         );
@@ -74,6 +94,9 @@ final class PayloadDecoder
             return $data;
         }
 
+        // A "+" that was not URL-encoded arrives as a space; also accept URL-safe base64.
+        $data = strtr($data, [' ' => '+', '-' => '+', '_' => '/']);
+
         $decoded = base64_decode($data, true);
         if ($decoded === false) {
             throw new InvalidPayload('Invalid base64 data');
@@ -86,9 +109,12 @@ final class PayloadDecoder
     private function apiKeyFromEvents(array $events): ?string
     {
         foreach ($events as $event) {
-            $candidate = $event['api_key'] ?? $event['properties']['token'] ?? null;
-            if (is_string($candidate) && $candidate !== '') {
-                return $candidate;
+            $properties = is_array($event['properties'] ?? null) ? $event['properties'] : [];
+
+            foreach ([$event['api_key'] ?? null, $properties['token'] ?? null] as $candidate) {
+                if (is_string($candidate) && $candidate !== '') {
+                    return $candidate;
+                }
             }
         }
 

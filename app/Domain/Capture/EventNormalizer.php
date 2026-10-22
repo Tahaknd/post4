@@ -13,6 +13,20 @@ final class EventNormalizer
     /** ClickHouse materialized-view guard: upper bound is now + this many days (inclusive). */
     private const MAX_DAYS_AHEAD = 366;
 
+    /** Longest accepted `event` / `distinct_id`, in characters. Longer values are dropped, never truncated. */
+    private const MAX_NAME_LENGTH = 200;
+
+    /** ClickHouse project_id column is UInt32. */
+    private const MAX_PROJECT_ID = 4294967295;
+
+    private const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+
+    /**
+     * @param  int  $maxPropertiesBytes  Kafka's default message.max.bytes is 1 MB and the whole
+     *                                   message (not only properties) must fit.
+     */
+    public function __construct(private readonly int $maxPropertiesBytes = 900_000) {}
+
     /**
      * @param  array<string, mixed>  $raw
      * @return array{uuid:string,project_id:int,event:string,distinct_id:string,properties:string,timestamp:string}|null
@@ -24,14 +38,22 @@ final class EventNormalizer
         ?CarbonImmutable $sentAt = null,
         ?string $ip = null,
     ): ?array {
+        if ($project <= 0 || $project > self::MAX_PROJECT_ID) {
+            throw new \InvalidArgumentException('project must be between 1 and 4294967295');
+        }
+
         $event = $raw['event'] ?? null;
         $properties = is_array($raw['properties'] ?? null) ? $raw['properties'] : [];
         $distinctId = $raw['distinct_id'] ?? $properties['distinct_id'] ?? null;
 
-        if (! is_string($event) || $event === '') {
+        if (! is_string($event) || ! $this->validName($event)) {
             return null;
         }
-        if (! (is_string($distinctId) || is_int($distinctId)) || (string) $distinctId === '') {
+        if (! is_string($distinctId) && ! is_int($distinctId)) {
+            return null;
+        }
+        $distinctId = (string) $distinctId;
+        if (! $this->validName($distinctId)) {
             return null;
         }
 
@@ -40,16 +62,46 @@ final class EventNormalizer
             $properties['$ip'] = $ip;
         }
 
-        $uuid = $raw['uuid'] ?? null;
+        try {
+            $propertiesJson = json_encode((object) $properties, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+        if (strlen($propertiesJson) > $this->maxPropertiesBytes) {
+            return null;
+        }
 
         return [
-            'uuid' => is_string($uuid) && Str::isUuid($uuid) ? $uuid : (string) Str::uuid(),
+            'uuid' => $this->uuid($raw['uuid'] ?? null),
             'project_id' => $project,
             'event' => $event,
-            'distinct_id' => (string) $distinctId,
-            'properties' => json_encode((object) $properties, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'distinct_id' => $distinctId,
+            'properties' => $propertiesJson,
             'timestamp' => $this->clamp($this->timestamp($raw, $now, $sentAt), $now)->utc()->format('Y-m-d H:i:s.v'),
         ];
+    }
+
+    /** Non-blank, at most 200 characters, and free of NUL / C0 control characters. */
+    private function validName(string $value): bool
+    {
+        // 4 bytes per character is the UTF-8 maximum: cheap check before mb_strlen.
+        if ($value === '' || strlen($value) > self::MAX_NAME_LENGTH * 4) {
+            return false;
+        }
+
+        return trim($value) !== ''
+            && mb_strlen($value) <= self::MAX_NAME_LENGTH
+            && ! preg_match('/[\x00-\x1F\x7F]/', $value);
+    }
+
+    /** A client uuid is kept only when valid and not nil (ClickHouse routes nil to events_errors). */
+    private function uuid(mixed $candidate): string
+    {
+        if (is_string($candidate) && Str::isUuid($candidate) && $candidate !== self::NIL_UUID) {
+            return strtolower($candidate);
+        }
+
+        return (string) Str::uuid();
     }
 
     /** @param array<string, mixed> $raw */
@@ -59,7 +111,9 @@ final class EventNormalizer
             return $now->subMilliseconds((int) $raw['offset']);
         }
 
-        if (! is_string($raw['timestamp'] ?? null)) {
+        // Carbon::parse also accepts relative strings ("tomorrow", "+1 day", "@123") that resolve
+        // against the wall clock instead of the injected $now: only ISO-like input is parsed.
+        if (! is_string($raw['timestamp'] ?? null) || ! preg_match('/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/', $raw['timestamp'])) {
             return $now;
         }
 
