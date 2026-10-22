@@ -14,7 +14,15 @@ class ProjectRotateKey extends Command
 
     public function handle(ProjectResolver $resolver): int
     {
-        $project = Project::find($this->argument('id'));
+        $id = (string) $this->argument('id');
+        // Anything else (or a value beyond bigint) would reach Postgres as a query error.
+        if (! ctype_digit($id) || strlen($id) > 18) {
+            $this->error('Geçersiz proje kimliği.');
+
+            return self::FAILURE;
+        }
+
+        $project = Project::find($id);
         if ($project === null) {
             $this->error('Proje bulunamadı.');
 
@@ -25,12 +33,18 @@ class ProjectRotateKey extends Command
         $project->api_key = Project::generateApiKey();
         $project->save();
 
-        // Without this the cached entry would keep authorising the old key for up to the cache TTL.
-        $resolver->forget($oldKey);
-
+        // The new key is already saved: print it first so a failing cache can never hide it.
         $this->option('key-only')
             ? $this->line($project->api_key)
             : $this->info("Proje #{$project->id} için yeni API anahtarı: {$project->api_key}");
+
+        // Without this the cached entry would keep authorising the old key for up to the cache TTL.
+        try {
+            $resolver->forget($oldKey);
+        } catch (\Throwable $e) {
+            // stderr keeps `--key-only` stdout to just the key.
+            $this->getOutput()->getErrorStyle()->warning('Eski anahtarın önbellek girdisi silinemedi; en fazla 5 dakika daha geçerli kalabilir: '.$e->getMessage());
+        }
 
         return self::SUCCESS;
     }
