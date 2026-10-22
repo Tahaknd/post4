@@ -10,10 +10,14 @@ final class PayloadDecoder
      * @param  int  $maxDecodedBytes  Upper bound for a gunzipped body. json_decode amplifies memory
      *                                roughly 33x, so keep this well below memory_limit / 33.
      * @param  int|null  $maxEvents  Maximum number of top-level events per request (null = unlimited).
+     * @param  int  $maxContainers  Upper bound for "[" plus "{" characters in the decoded body. json_decode
+     *                              allocates a whole array per container (~60x the input for "[0],[0],..."),
+     *                              so the byte limit alone cannot bound its memory.
      */
     public function __construct(
         private readonly int $maxDecodedBytes = 2_000_000,
         private readonly ?int $maxEvents = null,
+        private readonly int $maxContainers = 100_000,
     ) {
         // gzdecode(..., 0) means "unlimited": a misconfiguration must not disable the bomb protection.
         if ($maxDecodedBytes <= 0) {
@@ -21,6 +25,9 @@ final class PayloadDecoder
         }
         if ($maxEvents !== null && $maxEvents <= 0) {
             throw new \InvalidArgumentException('maxEvents must be greater than zero');
+        }
+        if ($maxContainers <= 0) {
+            throw new \InvalidArgumentException('maxContainers must be greater than zero');
         }
     }
 
@@ -33,6 +40,11 @@ final class PayloadDecoder
             if ($raw === false) {
                 throw new InvalidPayload('Invalid or oversized gzip body');
             }
+        }
+
+        // Cheap structural cap before json_decode: it over-counts brackets inside strings, which is fine.
+        if (substr_count($raw, '[') + substr_count($raw, '{') > $this->maxContainers) {
+            throw new InvalidPayload('Payload too complex');
         }
 
         try {

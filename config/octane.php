@@ -237,6 +237,30 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | FrankenPHP / Caddy Options
+    |--------------------------------------------------------------------------
+    |
+    | These values are passed to the Caddy process as environment variables and
+    | substituted into Octane's Caddyfile. The extra directives cap request
+    | bodies on the capture endpoints at the proxy: PHP buffers chunked bodies
+    | (no Content-Length) in full before the controller can answer 413. The cap is
+    | capture.max_body_bytes (10^6) plus one byte: Caddy truncates an oversized
+    | chunked body at exactly max_size bytes, so the controller still sees
+    | max_body_bytes + 1 and answers 413 instead of a misleading 400.
+    |
+    */
+
+    'caddy' => [
+        'env' => [
+            'CADDY_SERVER_EXTRA_DIRECTIVES' => "@capture path /e /e/* /batch /batch/* /capture /capture/* /i/*\n"
+                ."\t\trequest_body @capture {\n"
+                ."\t\t\tmax_size 1000001\n"
+                ."\t\t}",
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | RoadRunner Options
     |--------------------------------------------------------------------------
     |

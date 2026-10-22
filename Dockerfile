@@ -6,6 +6,8 @@ RUN apt-get update \
 
 RUN install-php-extensions pdo_pgsql pcntl posix redis rdkafka intl zip opcache bcmath
 
+COPY docker/zz-app.ini $PHP_INI_DIR/conf.d/zz-app.ini
+
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app

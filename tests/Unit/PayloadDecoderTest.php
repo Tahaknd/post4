@@ -192,3 +192,60 @@ it('reads a urlencoded form from the raw body when PHP did not populate the requ
 
     expect($this->decoder->decode($request)->apiKey)->toBe('phc_x');
 });
+
+it('rejects a body of many tiny nested containers without blowing memory', function (bool $gzip) {
+    $body = '['.str_repeat('[0],', 500_000).'[0]]';
+    expect(strlen($body))->toBeGreaterThan(1_999_000);
+    $decoder = new PayloadDecoder(maxDecodedBytes: 2_100_000);
+    $request = jsonRequest($gzip ? gzencode($body) : $body);
+    unset($body);
+
+    $before = memory_get_peak_usage();
+
+    expect(fn () => $decoder->decode($request))->toThrow(InvalidPayload::class, 'Payload too complex');
+
+    expect(memory_get_peak_usage() - $before)->toBeLessThan(40 * 1024 * 1024);
+})->with(['plain' => false, 'gzip' => true]);
+
+it('rejects too many object containers as well', function () {
+    $decoder = new PayloadDecoder(maxContainers: 10);
+
+    $decoder->decode(jsonRequest('['.str_repeat('{"a":1},', 10).'{"a":1}]'));
+})->throws(InvalidPayload::class, 'Payload too complex');
+
+it('accepts exactly the allowed number of containers', function () {
+    $decoder = new PayloadDecoder(maxContainers: 3);
+
+    expect($decoder->decode(jsonRequest('[{"event":"a"},{"event":"b"}]'))->events)->toHaveCount(2);
+});
+
+it('accepts a realistic 500-event batch', function () {
+    $events = [];
+    for ($i = 0; $i < 500; $i++) {
+        $events[] = [
+            'event' => '$pageview',
+            'distinct_id' => "user-$i",
+            'timestamp' => '2026-10-22T12:00:00Z',
+            'properties' => [
+                'token' => 'phc_x',
+                '$current_url' => 'https://example.com/page',
+                '$lib' => 'web',
+                '$set' => ['plan' => 'free', 'tags' => ['a', 'b']],
+                '$screen_height' => 1080,
+            ],
+        ];
+    }
+    $decoder = new PayloadDecoder(maxDecodedBytes: 2_000_000, maxEvents: 500);
+
+    expect($decoder->decode(jsonRequest(gzencode(json_encode(['api_key' => 'phc_x', 'batch' => $events]))))->events)->toHaveCount(500);
+});
+
+it('rejects a non-positive container limit', function (int $limit) {
+    new PayloadDecoder(maxContainers: $limit);
+})->with(['zero' => 0, 'negative' => -5])->throws(InvalidArgumentException::class);
+
+it('defaults to 100000 containers', function () {
+    $limit = (new ReflectionProperty(PayloadDecoder::class, 'maxContainers'))->getValue(new PayloadDecoder());
+
+    expect($limit)->toBe(100_000);
+});

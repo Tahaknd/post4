@@ -42,6 +42,7 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(PayloadDecoder::class, fn () => new PayloadDecoder(
             (int) config('capture.max_decoded_bytes'),
             (int) config('capture.max_batch_size'),
+            (int) config('capture.max_containers', 100000),
         ));
     }
 

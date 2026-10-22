@@ -274,3 +274,12 @@ it('is not behind session, cookie or csrf middleware', function () {
     expect($response->headers->get('Set-Cookie'))->toBeNull()
         ->and($response->headers->getCookies())->toBeEmpty();
 });
+
+it('answers 400 for a gzip body of many tiny containers', function () {
+    $body = gzencode('['.str_repeat('[0],', 500_000).'[0]]');
+
+    $this->call('POST', '/e/?compression=gzip-js', [], [], [], ['CONTENT_TYPE' => 'text/plain'], $body)
+        ->assertStatus(400)->assertJsonPath('code', 'invalid_payload');
+
+    expect($this->producer->messages)->toBeEmpty();
+});
