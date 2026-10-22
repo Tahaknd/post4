@@ -29,6 +29,6 @@
 /database/*.sqlite
 /database/*.sqlite-*
 
-**/caddy
-frankenphp
-frankenphp-worker.php
+/caddy
+/frankenphp
+/public/frankenphp-worker.php
