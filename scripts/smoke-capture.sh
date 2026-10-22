@@ -22,10 +22,13 @@ End-to-end capture smoke test against the running docker compose stack.
 
 Options:
   --with-wedge-check
-                    also send 7 back-to-back /batch/ requests (24 events each, 168 distinct calendar
-                    months going back from the current month) and assert that ClickHouse ingests all
-                    of them without a TOO_MANY_PARTS stall of the Kafka consumer (opt-in; the
-                    default run is unchanged)
+                    also send one event for EVERY month from 2000-01 through the current month
+                    (about 322 today), in /batch/ requests of 24 months each (the per-request cap),
+                    back to back, and assert that ClickHouse ingests all of them without a
+                    TOO_MANY_PARTS stall of the Kafka consumer (opt-in; the default run is unchanged
+                    except for the always-on settings check). Timestamps are the first day of each
+                    month at 12:00Z; the server clamp allows 2000-01-01 .. now+366d, we only use
+                    months up to the current one
 
 Environment:
   HOST              capture endpoint, http://localhost[:port] or http://127.0.0.1[:port]
@@ -166,6 +169,16 @@ echo "smoke-capture: HOST=$HOST project=$NAME wait=${WAIT_SECONDS}s"
 if ! T0="$(ch 'SELECT toUnixTimestamp(now())' 2>"$TMP/ch_err")" || [[ ! "$T0" =~ ^[0-9]+$ ]]; then
   fail "cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
   exit 1
+fi
+
+# --- (0) static: the ingest wedge guard setting is active in the running server -----------------
+# Cheap and always on; placed before anything that can abort the run, so it is always reached.
+if chv "SELECT value FROM system.settings WHERE name = 'max_partitions_per_insert_block'"; then
+  if [[ "$CH_OUT" =~ ^[0-9]+$ && "$CH_OUT" -ge 400 ]]; then
+    pass "max_partitions_per_insert_block=$CH_OUT (ingest wedge guard active)"
+  else
+    fail "max_partitions_per_insert_block='${CH_OUT:0:40}', expected >= 400: ingest wedge guard missing or stale: docker compose up -d --force-recreate clickhouse, see docker/clickhouse/users.d/10-ingest-settings.xml"
+  fi
 fi
 
 # Take only the line that is a well-formed key, so a stray warning cannot hide a project that was created.
@@ -316,51 +329,69 @@ if [[ "$HTTP_CODE" == "400" ]]; then pass "invalid JSON -> 400"; else fail "inva
 
 # --- (e) opt-in: wide-timestamp batches must not stall ingest ---------------------------------
 # `events` is partitioned by month; one Kafka block touching more than max_partitions_per_insert_block
-# months used to fail with TOO_MANY_PARTS and wedge the consumer. 7 requests x 24 months = 168 distinct
-# months (first day of each, going back from the current month, all inside the 2000..now timestamp clamp).
+# months used to fail with TOO_MANY_PARTS and wedge the consumer. The controller caps a request at
+# capture.max_months_per_request (24) distinct months, so we send EVERY month from 2000-01 through the
+# current month (the clamp allows up to now+366d, we stay at the current month), 24 per request, back to
+# back. With ~322 distinct months even a burst split by a poll boundary leaves a block far above 100
+# months, so a limit of 100 fails this check deterministically.
 if [[ $WITH_WEDGE -eq 1 ]]; then
   WEDGE_NAME="${MARK}_wedge"
-  WEDGE_EVENTS=168
+  WEDGE_CHUNK=24
+  FAILED_BEFORE_WEDGE=$FAILED
   if ! T1="$(ch 'SELECT toUnixTimestamp(now())' 2>/dev/null)" || [[ ! "$T1" =~ ^[0-9]+$ ]]; then
     T1="$(date +%s)"
   fi
-  python3 - "$KEY" "$WEDGE_NAME" "$TMP" <<'PY'
-import datetime, json, sys
-key, name, out = sys.argv[1:4]
-today = datetime.datetime.now(datetime.timezone.utc)
-y, m = today.year, today.month
-months = []
-for _ in range(168):
-    months.append("%04d-%02d-01T12:00:00Z" % (y, m))
-    m -= 1
-    if m == 0:
-        y, m = y - 1, 12
-for r in range(7):
-    batch = [{"event": name, "distinct_id": "smoke-wedge", "timestamp": ts} for ts in months[r * 24:(r + 1) * 24]]
-    with open("%s/wedge_%d.json" % (out, r), "w") as f:
-        json.dump({"api_key": key, "batch": batch}, f)
-PY
+  # Months 2000-01 .. current month (UTC) with bash arithmetic only (10# avoids octal parsing of 08/09).
+  NOW_Y="$(date -u +%Y)"
+  NOW_M="$(date -u +%m)"
+  WEDGE_EVENTS=$(( (10#$NOW_Y - 2000) * 12 + 10#$NOW_M ))
+  WEDGE_REQS=$(( (WEDGE_EVENTS + WEDGE_CHUNK - 1) / WEDGE_CHUNK ))
+  w_y=2000
+  w_m=1
+  w_idx=0
+  w_req=0
+  w_in_chunk=0
+  while [[ $w_idx -lt $WEDGE_EVENTS ]]; do
+    if [[ $w_in_chunk -eq 0 ]]; then
+      printf '{"api_key":"%s","batch":[' "$KEY" >"$TMP/wedge_$w_req.json"
+    else
+      printf ',' >>"$TMP/wedge_$w_req.json"
+    fi
+    printf '{"event":"%s","distinct_id":"smoke-wedge","timestamp":"%04d-%02d-01T12:00:00Z"}' \
+      "$WEDGE_NAME" "$w_y" "$w_m" >>"$TMP/wedge_$w_req.json"
+    w_in_chunk=$((w_in_chunk + 1))
+    w_idx=$((w_idx + 1))
+    if [[ $w_in_chunk -eq $WEDGE_CHUNK || $w_idx -eq $WEDGE_EVENTS ]]; then
+      printf ']}' >>"$TMP/wedge_$w_req.json"
+      w_req=$((w_req + 1))
+      w_in_chunk=0
+    fi
+    w_m=$((w_m + 1))
+    if [[ $w_m -gt 12 ]]; then w_m=1; w_y=$((w_y + 1)); fi
+  done
+
   WEDGE_SENT=0
   POST_PATH="/batch/"
-  for r in 0 1 2 3 4 5 6; do
+  for ((r = 0; r < WEDGE_REQS; r++)); do
     post "@$TMP/wedge_$r.json"
     if [[ "$HTTP_CODE" == "200" ]]; then
       WEDGE_SENT=$((WEDGE_SENT + 1))
     else
-      fail "wedge request $((r + 1))/7: expected 200, got HTTP $HTTP_CODE body '${HTTP_BODY:0:200}'"
+      fail "wedge request $((r + 1))/${WEDGE_REQS}: expected 200, got HTTP $HTTP_CODE body '${HTTP_BODY:0:200}'"
     fi
   done
   POST_PATH="/e/"
-  if [[ $WEDGE_SENT -eq 7 ]]; then
-    pass "7 wide-timestamp batch requests accepted (HTTP 200)"
+  if [[ $WEDGE_SENT -eq $WEDGE_REQS ]]; then
+    pass "${WEDGE_REQS} wide-timestamp batch requests accepted (HTTP 200, ${WEDGE_EVENTS} months 2000-01..${NOW_Y}-${NOW_M})"
   fi
 
   WEDGE_ARRIVED=0
   WEDGE_COUNT=0
   WEDGE_MONTHS=0
-  if [[ $WEDGE_SENT -eq 7 ]]; then
+  if [[ $WEDGE_SENT -eq $WEDGE_REQS ]]; then
     for i in $(seq 1 "$WAIT_SECONDS"); do
       ROW="$(ch "SELECT count(), uniqExact(toYYYYMM(timestamp)) FROM posthog.events WHERE event = '$WEDGE_NAME' AND project_id = $PROJECT_ID FORMAT TSV" 2>/dev/null || true)"
+      WEDGE_COUNT=""; WEDGE_MONTHS=""
       read -r WEDGE_COUNT WEDGE_MONTHS <<<"$ROW" || true
       [[ "$WEDGE_COUNT" =~ ^[0-9]+$ ]] || WEDGE_COUNT=0
       [[ "$WEDGE_MONTHS" =~ ^[0-9]+$ ]] || WEDGE_MONTHS=0
@@ -372,10 +403,10 @@ PY
     else
       fail "wedge events in posthog.events: ${WEDGE_COUNT}/${WEDGE_EVENTS} after ${WAIT_SECONDS}s"
     fi
-    if [[ "$WEDGE_MONTHS" -eq 168 ]]; then
-      pass "wedge events span 168 distinct months"
+    if [[ "$WEDGE_MONTHS" -eq "$WEDGE_EVENTS" ]]; then
+      pass "wedge events span ${WEDGE_MONTHS} distinct months"
     else
-      fail "wedge events span ${WEDGE_MONTHS} distinct months, expected 168"
+      fail "wedge events span ${WEDGE_MONTHS} distinct months, expected ${WEDGE_EVENTS}"
     fi
   else
     fail "wedge events not checked in ClickHouse: not all requests were accepted"
@@ -393,6 +424,10 @@ PY
     else
       fail "events_errors has $CH_OUT rows for this run after wedge batches"
     fi
+  fi
+  if [[ $FAILED -gt $FAILED_BEFORE_WEDGE ]]; then
+    echo "HINT: ingest may be wedged. Check the exceptions in system.kafka_consumers (WHERE database='posthog' AND table='kafka_events');"
+    echo "      see the header of docker/clickhouse/users.d/10-ingest-settings.xml for how to recognize it and the reset steps."
   fi
 fi
 
