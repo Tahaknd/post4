@@ -15,6 +15,13 @@ return [
     'auth_fail_window_seconds' => (int) env('CAPTURE_AUTH_FAIL_WINDOW_SECONDS', 60),
 
     /*
+     * Interim per-project ingest cap: producible events accepted per fixed one-minute window (env
+     * CAPTURE_PROJECT_EVENTS_PER_MINUTE). The public key is readable from any web page, so without it
+     * a valid key can post unlimited events. 0 or negative disables the cap.
+     */
+    'project_events_per_minute' => (int) env('CAPTURE_PROJECT_EVENTS_PER_MINUTE', 60000),
+
+    /*
      * Reverse proxies whose X-Forwarded-* headers are trusted (env TRUSTED_PROXIES):
      * unset/empty => null (trust nothing, so a direct client cannot spoof its ip),
      * "*" => every caller, otherwise a comma-separated list of IPs/CIDRs.

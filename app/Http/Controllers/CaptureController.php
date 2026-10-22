@@ -12,6 +12,7 @@ use App\Domain\Capture\TooManyEvents;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 
@@ -111,7 +112,14 @@ final class CaptureController extends Controller
             return $this->error(400, 'too_many_months', 'Events span too many calendar months for one request');
         }
 
-        // 6. Produce.
+        // 6. Per-project event rate, counted in producible messages (dropped events cost nothing).
+        $limited = $this->projectRateLimitedFor($projectId, count($messages), $now->getTimestamp());
+        if ($limited !== null) {
+            return $this->error(503, 'rate_limited', 'Project event rate limit exceeded, retry later')
+                ->header('Retry-After', (string) $limited);
+        }
+
+        // 7. Produce.
         try {
             if ($messages !== []) {
                 $producer->produce($messages);
@@ -122,6 +130,52 @@ final class CaptureController extends Controller
         }
 
         return response()->json(['status' => 1]);
+    }
+
+    /**
+     * Charges $count events to the project's fixed one-minute window and returns the seconds until the
+     * window ends when that exceeds the limit (the charge is then taken back, so rejected retries do not
+     * eat the budget), otherwise null. Fails open if the cache is down.
+     *
+     * Atomic through the cache store (add + increment, never read-modify-write). The key carries a 120 s
+     * ttl so a window outlives its minute and then disappears.
+     */
+    private function projectRateLimitedFor(int $projectId, int $count, int $timestamp): ?int
+    {
+        $limit = (int) config('capture.project_events_per_minute');
+        if ($limit <= 0 || $count === 0) {
+            return null;
+        }
+
+        $window = intdiv($timestamp, 60);
+        $key = "capture-rate:{$projectId}:{$window}";
+
+        try {
+            Cache::add($key, 0, 120);
+            $total = Cache::increment($key, $count);
+            if (! is_int($total)) {
+                throw new \UnexpectedValueException('project rate counter did not increment');
+            }
+            if ($total <= $limit) {
+                return null;
+            }
+
+            Cache::decrement($key, $count);
+            // Once per window and project, whatever the number of rejected requests (counts only, no input).
+            if (Cache::add("capture-rate-warned:{$projectId}:{$window}", 1, 120)) {
+                Log::warning('capture project event rate limit exceeded', [
+                    'project_id' => $projectId,
+                    'limit' => $limit,
+                    'requested' => $count,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            $this->warnLimiterUnavailable($e);
+
+            return null;
+        }
+
+        return max(1, ($window + 1) * 60 - $timestamp);
     }
 
     private function ipDisabled(mixed $value): bool

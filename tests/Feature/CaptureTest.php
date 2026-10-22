@@ -5,10 +5,12 @@ use App\Http\Controllers\CaptureController;
 use App\Models\Project;
 use App\Providers\AppServiceProvider;
 use Illuminate\Http\Middleware\TrustProxies;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
+use Tests\Support\FailingCacheStore;
 use Tests\Support\FakeEventProducer;
 
 beforeEach(function () {
@@ -531,4 +533,161 @@ it('answers CORS preflight on the /i/ prefix', function () {
         'HTTP_ORIGIN' => 'https://app.example.com',
         'HTTP_ACCESS_CONTROL_REQUEST_METHOD' => 'POST',
     ])->assertSuccessful()->assertHeader('Access-Control-Allow-Origin', '*');
+});
+
+function rateKey(Project $project, ?int $at = null): string
+{
+    return "capture-rate:{$project->id}:".intdiv($at ?? now('UTC')->getTimestamp(), 60);
+}
+
+function eventBatch(string $key, int $count, string $name = 'e'): array
+{
+    return ['api_key' => $key, 'batch' => array_map(fn (int $i) => ['event' => $name, 'distinct_id' => 'u'.$i], range(1, $count))];
+}
+
+it('defaults to 60000 events per project per minute', function () {
+    expect(config('capture.project_events_per_minute'))->toBe(60000);
+});
+
+it('accepts requests under the project limit and counts the events', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 10]);
+
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 7))->assertOk();
+
+    expect($this->producer->messages)->toHaveCount(10)
+        ->and((int) Cache::get(rateKey($this->project)))->toBe(10);
+});
+
+it('answers 503 rate_limited with Retry-After and produces nothing over the project limit', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 5]);
+
+    $this->postJson('/batch/', eventBatch($this->key, 4, 'secret-marker'))->assertOk();
+    $response = $this->postJson('/batch/', eventBatch($this->key, 2, 'secret-marker'));
+
+    $response->assertStatus(503)
+        ->assertExactJson(['type' => 'capture_error', 'code' => 'rate_limited', 'detail' => 'Project event rate limit exceeded, retry later'])
+        ->assertHeader('Retry-After', '50');
+    expect($this->producer->messages)->toHaveCount(4)
+        ->and($response->getContent())->not->toContain('secret-marker');
+});
+
+it('restores the budget after a rejection so a smaller request still fits', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 5]);
+
+    $this->postJson('/batch/', eventBatch($this->key, 4))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertStatus(503);
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertStatus(503);
+
+    expect((int) Cache::get(rateKey($this->project)))->toBe(4);
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertOk();
+    expect($this->producer->messages)->toHaveCount(5);
+});
+
+it('rejects a single request that is larger than the limit by itself', function () {
+    config(['capture.project_events_per_minute' => 2]);
+
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertStatus(503)->assertJsonPath('code', 'rate_limited');
+
+    expect($this->producer->messages)->toBeEmpty()
+        ->and((int) Cache::get(rateKey($this->project)))->toBe(0);
+});
+
+it('resets the project budget in the next minute window', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 3]);
+
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertHeader('Retry-After', '50');
+
+    Carbon::setTestNow('2026-10-22 12:00:59');
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertHeader('Retry-After', '1');
+
+    Carbon::setTestNow('2026-10-22 12:01:00');
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
+
+    expect($this->producer->messages)->toHaveCount(6);
+});
+
+it('keeps independent budgets for different projects', function () {
+    config(['capture.project_events_per_minute' => 2]);
+    $other = Project::factory()->create();
+
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503);
+    $this->postJson('/batch/', eventBatch($other->api_key, 2))->assertOk();
+
+    expect($this->producer->messages)->toHaveCount(4);
+});
+
+it('disables the project limit with zero or a negative value', function (int $limit) {
+    config(['capture.project_events_per_minute' => $limit]);
+
+    $this->postJson('/batch/', eventBatch($this->key, 50))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 50))->assertOk();
+
+    expect($this->producer->messages)->toHaveCount(100)
+        ->and(Cache::has(rateKey($this->project)))->toBeFalse();
+})->with([0, -1]);
+
+it('counts only producible messages towards the project limit', function () {
+    config(['capture.project_events_per_minute' => 2]);
+
+    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
+        ['event' => 'good', 'distinct_id' => 'u'],
+        ['event' => '', 'distinct_id' => 'u'],
+        ['event' => 'good2', 'distinct_id' => 'u'],
+        ['distinct_id' => 'u'],
+    ]])->assertOk();
+    expect((int) Cache::get(rateKey($this->project)))->toBe(2);
+
+    // A request in which every event was dropped costs nothing and is not rejected.
+    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [['event' => '', 'distinct_id' => 'u']]])->assertOk();
+    expect((int) Cache::get(rateKey($this->project)))->toBe(2)
+        ->and($this->producer->messages)->toHaveCount(2);
+});
+
+it('does not charge the project budget for requests rejected before production', function () {
+    config(['capture.project_events_per_minute' => 100, 'capture.max_months_per_request' => 1]);
+
+    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
+        ['event' => 'a', 'distinct_id' => 'u', 'timestamp' => '2024-01-05T00:00:00Z'],
+        ['event' => 'b', 'distinct_id' => 'u', 'timestamp' => '2024-03-05T00:00:00Z'],
+    ]])->assertStatus(400)->assertJsonPath('code', 'too_many_months');
+
+    expect(Cache::has(rateKey($this->project)))->toBeFalse();
+});
+
+it('warns once per window and project when the project limit is first exceeded', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 1]);
+    Log::spy();
+
+    foreach (range(1, 3) as $_) {
+        $this->postJson('/batch/', eventBatch($this->key, 2, 'secret-marker'))->assertStatus(503);
+    }
+    Log::shouldHaveReceived('warning')->once()->withArgs(
+        fn (string $message, array $context) => $context === ['project_id' => $this->project->id, 'limit' => 1, 'requested' => 2],
+    );
+
+    Carbon::setTestNow('2026-10-22 12:01:10');
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertStatus(503);
+    Log::shouldHaveReceived('warning')->twice();
+});
+
+it('fails open and warns once when the cache is unavailable for the project limit', function () {
+    config(['capture.project_events_per_minute' => 1]);
+    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
+    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
+    Cache::forgetDriver();
+    Log::spy();
+
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
+
+    expect($this->producer->messages)->toHaveCount(6);
+    Log::shouldHaveReceived('warning')->once();
 });
