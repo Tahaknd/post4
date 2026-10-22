@@ -155,7 +155,7 @@ echo "smoke-capture: HOST=$HOST project=$NAME wait=${WAIT_SECONDS}s"
 
 # Reference time from ClickHouse itself, so host/container clock skew cannot matter.
 if ! T0="$(ch 'SELECT toUnixTimestamp(now())' 2>"$TMP/ch_err")" || [[ ! "$T0" =~ ^[0-9]+$ ]]; then
-  echo "FAIL: cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
+  fail "cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
   exit 1
 fi
 
@@ -164,7 +164,7 @@ CREATED="$(docker compose exec -T app php artisan project:create "$NAME" --key-o
 if [[ -n "$CREATED" ]]; then
   KEY="$CREATED"   # from here on cleanup deletes the project by this key
 else
-  echo "FAIL: could not create throwaway project ($(head -c 200 "$TMP/create_err" | tr '\n' ' '))"
+  fail "could not create throwaway project ($(head -c 200 "$TMP/create_err" | tr '\n' ' '))"
   exit 1
 fi
 
@@ -173,13 +173,13 @@ ID_RAW="$(docker compose exec -T app php artisan tinker --execute="echo App\\Mod
 if [[ "$ID_RAW" =~ ^[0-9]+$ ]]; then
   PROJECT_ID="$ID_RAW"
 else
-  echo "FAIL: could not read throwaway project id (got '${ID_RAW:0:100}')"
+  fail "could not read throwaway project id (got '${ID_RAW:0:100}')"
   exit 1
 fi
 
 # Pre-flight: Postgres ids and ClickHouse rows must agree; a fresh project id must have no events yet.
 if ! PRE="$(ch "SELECT count() FROM posthog.events WHERE project_id = $PROJECT_ID" 2>"$TMP/ch_err")" || [[ ! "$PRE" =~ ^[0-9]+$ ]]; then
-  echo "FAIL: cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
+  fail "cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
   exit 1
 fi
 if [[ "$PRE" != "0" ]]; then
