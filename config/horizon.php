@@ -203,8 +203,9 @@ return [
             'balance' => 'auto',
             'autoScalingStrategy' => 'time',
             'maxProcesses' => 1,
-            'maxTime' => 0,
-            'maxJobs' => 0,
+            'minProcesses' => 1,
+            'maxTime' => 3600,
+            'maxJobs' => 1000,
             'memory' => 128,
             'tries' => 1,
             'timeout' => 60,
@@ -215,7 +216,7 @@ return [
     'environments' => [
         'production' => [
             'supervisor-1' => [
-                'maxProcesses' => 10,
+                'maxProcesses' => (int) env('HORIZON_MAX_PROCESSES', 2),
                 'balanceMaxShift' => 1,
                 'balanceCooldown' => 3,
             ],
@@ -224,6 +225,14 @@ return [
         'local' => [
             'supervisor-1' => [
                 'maxProcesses' => 3,
+            ],
+        ],
+
+        '*' => [
+            'supervisor-1' => [
+                'maxProcesses' => (int) env('HORIZON_MAX_PROCESSES', 2),
+                'balanceMaxShift' => 1,
+                'balanceCooldown' => 3,
             ],
         ],
     ],

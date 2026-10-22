@@ -97,7 +97,8 @@ return [
 
     'cipher' => 'AES-256-CBC',
 
-    'key' => env('APP_KEY'),
+    // docker exec bypasses the entrypoint that exports APP_KEY, so fall back to the persisted key file.
+    'key' => env('APP_KEY') ?: (is_readable($f = storage_path('app/app.key')) ? trim(file_get_contents($f)) : null),
 
     'previous_keys' => [
         ...array_filter(
