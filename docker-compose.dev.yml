@@ -1,0 +1,16 @@
+services:
+  app:
+    volumes:
+      - .:/app
+      - /app/vendor
+      - app-storage:/app/storage
+  worker:
+    volumes:
+      - .:/app
+      - /app/vendor
+      - app-storage:/app/storage
+  scheduler:
+    volumes:
+      - .:/app
+      - /app/vendor
+      - app-storage:/app/storage

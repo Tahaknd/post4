@@ -24,3 +24,5 @@ storage/framework/cache/*
 storage/framework/sessions/*
 storage/framework/views/*
 database/*.sqlite*
+/frankenphp
+public/frankenphp-worker.php
