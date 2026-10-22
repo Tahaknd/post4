@@ -40,32 +40,27 @@ final class CaptureController extends Controller
             return $this->error(413, 'payload_too_large', 'Request body is too large');
         }
 
-        // Cheap per-IP guard against key guessing, before any decoding or lookup.
+        // Per-IP limiter for UNAUTHENTICATED outcomes only (decode failure, too many events, no events,
+        // missing/malformed/unknown key). It bounds Postgres and negative-cache load; it does not protect
+        // the key (43 random chars). A request whose key resolves never consults or hits it: behind a proxy
+        // without TRUSTED_PROXIES every client shares one apparent ip, and the SDKs treat a 429 as
+        // permanent data loss, so one abuser must not be able to lock out legitimate senders.
+        // Cost trade-off: a blocked ip is only told 429 after its body was decoded (we must know whether
+        // it carries a valid key first); that work is bounded by the body/structure caps.
         $limiterKey = 'capture-auth-fail:'.($request->ip() ?? 'unknown');
-        $retryAfter = $this->blockedFor($limiterKey);
-        if ($retryAfter !== null) {
-            return $this->error(429, 'too_many_requests', 'Too many failed attempts, retry later')
-                ->header('Retry-After', (string) $retryAfter);
-        }
 
         // 2. Decode.
         try {
             $payload = $decoder->decode($request);
         } catch (TooManyEvents) {
-            $this->recordFailure($limiterKey);
-
-            return $this->error(413, 'batch_too_large', 'Too many events in one batch');
+            return $this->unauthenticated($limiterKey, 413, 'batch_too_large', 'Too many events in one batch');
         } catch (InvalidPayload $e) {
-            $this->recordFailure($limiterKey);
-
-            return $this->error(400, 'invalid_payload', $e->getMessage());
+            return $this->unauthenticated($limiterKey, 400, 'invalid_payload', $e->getMessage());
         }
 
         // 3. Nothing to do.
         if ($payload->events === []) {
-            $this->recordFailure($limiterKey);
-
-            return $this->error(400, 'no_events', 'No events in payload');
+            return $this->unauthenticated($limiterKey, 400, 'no_events', 'No events in payload');
         }
 
         // 4. Authenticate before normalizing or producing anything.
@@ -78,9 +73,7 @@ final class CaptureController extends Controller
                 ->header('Retry-After', '5');
         }
         if ($projectId === null) {
-            $this->recordFailure($limiterKey);
-
-            return $this->error(401, 'invalid_api_key', 'API key is missing or invalid');
+            return $this->unauthenticated($limiterKey, 401, 'invalid_api_key', 'API key is missing or invalid');
         }
 
         $now = CarbonImmutable::now('UTC');
@@ -134,6 +127,23 @@ final class CaptureController extends Controller
     private function ipDisabled(mixed $value): bool
     {
         return is_string($value) && in_array(strtolower($value), ['0', 'false'], true);
+    }
+
+    /**
+     * Answer for a request that did not authenticate: 429 when this ip has already used up its failure
+     * budget (no further work), otherwise count the failure and answer with the specific error.
+     */
+    private function unauthenticated(string $limiterKey, int $status, string $code, string $detail): JsonResponse
+    {
+        $retryAfter = $this->blockedFor($limiterKey);
+        if ($retryAfter !== null) {
+            return $this->error(429, 'too_many_requests', 'Too many failed attempts, retry later')
+                ->header('Retry-After', (string) $retryAfter);
+        }
+
+        $this->recordFailure($limiterKey);
+
+        return $this->error($status, $code, $detail);
     }
 
     /** Seconds until the caller may retry, or null when it is not blocked. Fails open if the limiter is down. */

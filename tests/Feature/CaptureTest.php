@@ -184,12 +184,83 @@ it('rate limits repeated 401 responses per ip with 429', function () {
     }
 
     $this->postJson('/e/', $bad)->assertStatus(429)
+        ->assertJsonPath('type', 'capture_error')
         ->assertJsonPath('code', 'too_many_requests')
         ->assertHeader('Retry-After');
 
-    // Even a valid key from the blocked ip is refused until the window passes.
-    $this->postJson('/e/', captureEvent($this->key))->assertStatus(429);
-    expect($this->producer->messages)->toBeEmpty();
+    // A valid key from the blocked ip is NOT refused: only unauthenticated requests are limited.
+    $this->postJson('/e/', captureEvent($this->key))->assertOk()->assertExactJson(['status' => 1]);
+    expect($this->producer->messages)->toHaveCount(1);
+});
+
+it('answers 429 with a numeric Retry-After within the window', function () {
+    config(['capture.auth_fail_limit' => 1, 'capture.auth_fail_window_seconds' => 60]);
+
+    $bad = captureEvent(Project::generateApiKey());
+    $this->postJson('/e/', $bad)->assertUnauthorized();
+
+    $retryAfter = $this->postJson('/e/', $bad)->assertStatus(429)->headers->get('Retry-After');
+
+    expect($retryAfter)->toMatch('/^\d+$/')
+        ->and((int) $retryAfter)->toBeGreaterThanOrEqual(1)->toBeLessThanOrEqual(60);
+});
+
+it('answers 429 to every kind of unauthenticated request from a blocked ip', function (string $kind) {
+    config(['capture.auth_fail_limit' => 2, 'capture.max_batch_size' => 1]);
+    RateLimiter::hit('capture-auth-fail:127.0.0.1', 60);
+    RateLimiter::hit('capture-auth-fail:127.0.0.1', 60);
+
+    $json = ['CONTENT_TYPE' => 'application/json'];
+    $response = match ($kind) {
+        'unknown key' => $this->postJson('/e/', captureEvent(Project::generateApiKey())),
+        'malformed key' => $this->postJson('/e/', captureEvent('nope')),
+        'missing key' => $this->postJson('/e/', ['event' => 'e', 'distinct_id' => 'u']),
+        'invalid json' => $this->call('POST', '/e/', [], [], [], $json, 'not json'),
+        'empty array' => $this->call('POST', '/e/', [], [], [], $json, '[]'),
+        'valid key but no events' => $this->postJson('/e/', ['api_key' => $this->key, 'batch' => []]),
+        'oversized batch' => $this->postJson('/e/', ['api_key' => $this->key, 'batch' => [['event' => 'a'], ['event' => 'b']]]),
+    };
+
+    $response->assertStatus(429)->assertJsonPath('code', 'too_many_requests')->assertHeader('Retry-After');
+    expect($this->producer->messages)->toBeEmpty()
+        ->and(RateLimiter::attempts('capture-auth-fail:127.0.0.1'))->toBe(2);
+})->with(['unknown key', 'malformed key', 'missing key', 'invalid json', 'empty array', 'valid key but no events', 'oversized batch']);
+
+it('lets a valid key through from a blocked ip without consulting the limiter', function () {
+    config(['capture.auth_fail_limit' => 1]);
+    RateLimiter::hit('capture-auth-fail:127.0.0.1', 60);
+
+    RateLimiter::partialMock()->shouldNotReceive('tooManyAttempts', 'hit', 'availableIn');
+
+    $this->postJson('/e/', captureEvent($this->key))->assertOk();
+    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [['event' => 'a', 'distinct_id' => 'u']]])->assertOk();
+
+    expect($this->producer->messages)->toHaveCount(2);
+});
+
+it('does not let authenticated requests consume the failure budget', function () {
+    config(['capture.auth_fail_limit' => 2]);
+
+    foreach (range(1, 10) as $_) {
+        $this->postJson('/e/', captureEvent($this->key))->assertOk();
+    }
+    expect(RateLimiter::attempts('capture-auth-fail:127.0.0.1'))->toBe(0);
+
+    // Still a full budget of two failures before the block.
+    $bad = captureEvent(Project::generateApiKey());
+    $this->postJson('/e/', $bad)->assertUnauthorized();
+    $this->postJson('/e/', $bad)->assertUnauthorized();
+    $this->postJson('/e/', $bad)->assertStatus(429);
+});
+
+it('counts unknown keys and decode failures against the same budget', function () {
+    config(['capture.auth_fail_limit' => 2]);
+
+    $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json'], 'not json')->assertStatus(400);
+    $this->postJson('/e/', captureEvent(Project::generateApiKey()))->assertUnauthorized();
+
+    expect(RateLimiter::attempts('capture-auth-fail:127.0.0.1'))->toBe(2);
+    $this->postJson('/e/', captureEvent(Project::generateApiKey()))->assertStatus(429);
 });
 
 it('does not count successful requests towards the 401 limit', function () {
@@ -360,7 +431,9 @@ it('counts decode failures and empty requests towards the failure limit', functi
     $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json'], '[]')->assertStatus(400);
     $this->call('POST', '/e/?compression=gzip-js', [], [], [], ['CONTENT_TYPE' => 'text/plain'], gzencode('['.str_repeat('[0],', 200_000).'[0]]'))->assertStatus(400);
 
-    $this->postJson('/e/', captureEvent($this->key))->assertStatus(429);
+    expect(RateLimiter::attempts('capture-auth-fail:127.0.0.1'))->toBe(3);
+    $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json'], 'not json')->assertStatus(429);
+    $this->postJson('/e/', captureEvent($this->key))->assertOk();
 });
 
 it('counts oversized batches towards the failure limit', function () {
@@ -368,7 +441,8 @@ it('counts oversized batches towards the failure limit', function () {
 
     $this->postJson('/e/', ['api_key' => $this->key, 'batch' => [['event' => 'a'], ['event' => 'b']]])->assertStatus(413);
 
-    $this->postJson('/e/', captureEvent($this->key))->assertStatus(429);
+    $this->postJson('/e/', ['api_key' => $this->key, 'batch' => [['event' => 'a'], ['event' => 'b']]])->assertStatus(429);
+    $this->postJson('/e/', captureEvent($this->key))->assertOk();
 });
 
 it('defaults to a failure limit of 120 per minute', function () {
