@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Infrastructure\ClickHouse\ClickHouseClient;
+use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 
@@ -18,6 +19,11 @@ class AppServiceProvider extends ServiceProvider
             config('clickhouse.database'),
             config('clickhouse.user'),
             config('clickhouse.password'),
+        ));
+
+        $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
+            $app->make(ClickHouseClient::class),
+            database_path('clickhouse/migrations'),
         ));
     }
 
