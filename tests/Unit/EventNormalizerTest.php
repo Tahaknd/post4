@@ -287,3 +287,51 @@ it('accepts the largest UInt32 project id', function () {
 
     expect($m['project_id'])->toBe(4294967295);
 });
+
+/** Backslash-heavy properties: every backslash is escaped again when the message is encoded. */
+function backslashEvent(int $backslashes): array
+{
+    return ['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('\\', $backslashes)]];
+}
+
+it('drops events whose encoded kafka message exceeds the cap even when properties fit', function () {
+    // ~880 KB of properties (each backslash is escaped once already), over 1.7 MB once the message is encoded again.
+    $raw = backslashEvent(440_000);
+
+    $properties = json_encode((object) $raw['properties'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    expect(strlen($properties))->toBeLessThan(900_000);
+
+    expect($this->normalizer->normalize($raw, project: 1, now: $this->now))->toBeNull();
+});
+
+it('keeps an event whose encoded kafka message is just under the cap', function () {
+    $normalizer = new EventNormalizer(maxMessageBytes: 1_000);
+    $raw = ['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 500)]];
+
+    $m = $normalizer->normalize($raw, project: 1, now: $this->now);
+    $size = strlen(json_encode($m, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+
+    // Pin the cap to the exact encoded size: it passes at the limit and is dropped one byte below it.
+    $atLimit = new EventNormalizer(maxMessageBytes: $size);
+    $belowLimit = new EventNormalizer(maxMessageBytes: $size - 1);
+
+    expect($atLimit->normalize($raw, project: 1, now: $this->now))->not->toBeNull()
+        ->and($belowLimit->normalize($raw, project: 1, now: $this->now))->toBeNull();
+});
+
+it('keeps a backslash-heavy event that fits the default message cap', function () {
+    // 200_000 backslashes: 400 KB properties, ~800 KB encoded message.
+    $m = $this->normalizer->normalize(backslashEvent(200_000), project: 1, now: $this->now);
+
+    expect($m)->not->toBeNull();
+});
+
+it('makes the encoded message cap configurable through the constructor', function () {
+    $raw = ['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 500)]];
+
+    $tight = new EventNormalizer(maxMessageBytes: 300);
+    $roomy = new EventNormalizer(maxMessageBytes: 5_000);
+
+    expect($tight->normalize($raw, project: 1, now: $this->now))->toBeNull()
+        ->and($roomy->normalize($raw, project: 1, now: $this->now))->not->toBeNull();
+});

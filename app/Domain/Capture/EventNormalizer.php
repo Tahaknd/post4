@@ -24,8 +24,13 @@ final class EventNormalizer
     /**
      * @param  int  $maxPropertiesBytes  Kafka's default message.max.bytes is 1 MB and the whole
      *                                   message (not only properties) must fit.
+     * @param  int  $maxMessageBytes  Cap on the final JSON-encoded Kafka message: `properties` is
+     *                                encoded again inside it, which escapes every `"` and `\`.
      */
-    public function __construct(private readonly int $maxPropertiesBytes = 900_000) {}
+    public function __construct(
+        private readonly int $maxPropertiesBytes = 900_000,
+        private readonly int $maxMessageBytes = 900_000,
+    ) {}
 
     /**
      * @param  array<string, mixed>  $raw
@@ -71,7 +76,7 @@ final class EventNormalizer
             return null;
         }
 
-        return [
+        $message = [
             'uuid' => $this->uuid($raw['uuid'] ?? null),
             'project_id' => $project,
             'event' => $event,
@@ -79,6 +84,18 @@ final class EventNormalizer
             'properties' => $propertiesJson,
             'timestamp' => $this->clamp($this->timestamp($raw, $now, $sentAt), $now)->utc()->format('Y-m-d H:i:s.v'),
         ];
+
+        // Same flags as the Kafka producer: this is the size that actually goes on the wire.
+        try {
+            $messageBytes = strlen(json_encode($message, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+        } catch (\JsonException) {
+            return null;
+        }
+        if ($messageBytes > $this->maxMessageBytes) {
+            return null;
+        }
+
+        return $message;
     }
 
     /** Non-blank, at most 200 characters, and free of NUL / C0 control characters. */
