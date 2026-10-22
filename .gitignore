@@ -29,3 +29,7 @@
 .vscode/
 .claude/
 .phpunit.result.cache
+
+# Laravel varsayılan sqlite dosyası
+/database/*.sqlite
+/database/*.sqlite-*
