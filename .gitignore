@@ -28,3 +28,7 @@
 # Laravel varsayılan sqlite dosyası
 /database/*.sqlite
 /database/*.sqlite-*
+
+**/caddy
+frankenphp
+frankenphp-worker.php
