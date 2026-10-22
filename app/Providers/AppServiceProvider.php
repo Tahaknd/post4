@@ -34,6 +34,9 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(EventProducer::class, fn () => new KafkaEventProducer(
             config('capture.kafka_brokers'),
             config('capture.events_topic'),
+            messageTimeoutMs: (int) config('capture.kafka_message_timeout_ms'),
+            flushTimeoutMs: (int) config('capture.kafka_flush_timeout_ms'),
+            breakerCooldownSeconds: (float) config('capture.kafka_breaker_cooldown_seconds'),
         ));
 
         $this->app->singleton(PayloadDecoder::class, fn () => new PayloadDecoder(

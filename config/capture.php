@@ -3,6 +3,9 @@
 return [
     'kafka_brokers' => env('KAFKA_BROKERS', 'kafka:9092'),
     'events_topic' => env('KAFKA_EVENTS_TOPIC', 'events'),
+    'kafka_message_timeout_ms' => (int) env('KAFKA_MESSAGE_TIMEOUT_MS', 2500),
+    'kafka_flush_timeout_ms' => (int) env('KAFKA_FLUSH_TIMEOUT_MS', 3000),
+    'kafka_breaker_cooldown_seconds' => (float) env('KAFKA_BREAKER_COOLDOWN_SECONDS', 10),
     'max_body_bytes' => 1_000_000,
     'max_decoded_bytes' => 2_000_000,
     'max_batch_size' => 500,
