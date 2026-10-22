@@ -19,6 +19,8 @@ class AppServiceProvider extends ServiceProvider
             config('clickhouse.database'),
             config('clickhouse.user'),
             config('clickhouse.password'),
+            (int) config('clickhouse.timeout'),
+            (int) config('clickhouse.connect_timeout'),
         ));
 
         $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
