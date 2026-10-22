@@ -34,7 +34,5 @@
 /frankenphp
 /public/frankenphp-worker.php
 
-# posthog-node compatibility test: installed packages
+# posthog-node compatibility test: installed packages (package.json and package-lock.json ARE committed: the SDK is pinned)
 /tests/compat/node_modules/
-/tests/compat/package.json
-/tests/compat/package-lock.json

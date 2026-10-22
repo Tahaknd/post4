@@ -1,0 +1,9 @@
+{
+  "name": "post4-compat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "posthog-node wire-compatibility test (run via tests/compat/run.sh)",
+  "dependencies": {
+    "posthog-node": "5.56.4"
+  }
+}
