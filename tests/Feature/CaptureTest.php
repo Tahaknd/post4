@@ -1,9 +1,14 @@
 <?php
 
 use App\Domain\Capture\EventProducer;
+use App\Http\Controllers\CaptureController;
 use App\Models\Project;
+use App\Providers\AppServiceProvider;
+use Illuminate\Http\Middleware\TrustProxies;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
 use Tests\Support\FakeEventProducer;
 
 beforeEach(function () {
@@ -12,6 +17,18 @@ beforeEach(function () {
     $this->project = Project::factory()->create();
     $this->key = $this->project->api_key;
 });
+
+afterEach(function () {
+    TrustProxies::flushState();
+    (new ReflectionProperty(CaptureController::class, 'lastLimiterWarningAt'))->setValue(null, 0);
+});
+
+/** The trusted proxies are applied when the provider boots, so re-boot it after changing the config. */
+function bootTrustedProxies(string|array|null $proxies): void
+{
+    config(['capture.trusted_proxies' => $proxies]);
+    app()->getProvider(AppServiceProvider::class)->boot();
+}
 
 function captureEvent(string $key, array $extra = []): array
 {
@@ -282,4 +299,162 @@ it('answers 400 for a gzip body of many tiny containers', function () {
         ->assertStatus(400)->assertJsonPath('code', 'invalid_payload');
 
     expect($this->producer->messages)->toBeEmpty();
+});
+
+it('records the forwarded client ip and limits per client when proxies are trusted', function () {
+    bootTrustedProxies('*');
+    $server = ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'];
+
+    $this->call('POST', '/e/', [], [], [], $server, json_encode(captureEvent($this->key)))->assertOk();
+    $this->call('POST', '/e/', [], [], [], $server, json_encode(captureEvent(Project::generateApiKey())))->assertUnauthorized();
+
+    expect(json_decode($this->producer->messages[0]['properties'], true)['$ip'])->toBe('1.2.3.4')
+        ->and(RateLimiter::attempts('capture-auth-fail:1.2.3.4'))->toBe(1)
+        ->and(RateLimiter::attempts('capture-auth-fail:10.0.0.1'))->toBe(0);
+});
+
+it('ignores X-Forwarded-For when no proxy is trusted', function () {
+    bootTrustedProxies(null);
+    $server = ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'];
+
+    $this->call('POST', '/e/', [], [], [], $server, json_encode(captureEvent($this->key)))->assertOk();
+    $this->call('POST', '/e/', [], [], [], $server, json_encode(captureEvent(Project::generateApiKey())))->assertUnauthorized();
+
+    expect(json_decode($this->producer->messages[0]['properties'], true)['$ip'])->toBe('10.0.0.1')
+        ->and(RateLimiter::attempts('capture-auth-fail:10.0.0.1'))->toBe(1)
+        ->and(RateLimiter::attempts('capture-auth-fail:1.2.3.4'))->toBe(0);
+});
+
+it('only trusts X-Forwarded-For from the listed proxies', function () {
+    bootTrustedProxies(['10.0.0.0/8']);
+
+    $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'], json_encode(captureEvent($this->key)))->assertOk();
+    $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '192.0.2.9', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'], json_encode(captureEvent($this->key)))->assertOk();
+
+    expect(json_decode($this->producer->messages[0]['properties'], true)['$ip'])->toBe('1.2.3.4')
+        ->and(json_decode($this->producer->messages[1]['properties'], true)['$ip'])->toBe('192.0.2.9');
+});
+
+it('parses TRUSTED_PROXIES into the config value', function (string $env, mixed $expected) {
+    putenv("TRUSTED_PROXIES=$env");
+    $_ENV['TRUSTED_PROXIES'] = $env;
+    $_SERVER['TRUSTED_PROXIES'] = $env;
+
+    try {
+        expect((require config_path('capture.php'))['trusted_proxies'])->toBe($expected);
+    } finally {
+        putenv('TRUSTED_PROXIES');
+        unset($_ENV['TRUSTED_PROXIES'], $_SERVER['TRUSTED_PROXIES']);
+    }
+})->with([
+    'unset' => ['', null],
+    'blank' => ['   ', null],
+    'star' => ['*', '*'],
+    'list' => ['10.0.0.1, 172.16.0.0/12,,', ['10.0.0.1', '172.16.0.0/12']],
+]);
+
+it('counts decode failures and empty requests towards the failure limit', function () {
+    config(['capture.auth_fail_limit' => 3]);
+
+    $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json'], 'not json')->assertStatus(400);
+    $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json'], '[]')->assertStatus(400);
+    $this->call('POST', '/e/?compression=gzip-js', [], [], [], ['CONTENT_TYPE' => 'text/plain'], gzencode('['.str_repeat('[0],', 200_000).'[0]]'))->assertStatus(400);
+
+    $this->postJson('/e/', captureEvent($this->key))->assertStatus(429);
+});
+
+it('counts oversized batches towards the failure limit', function () {
+    config(['capture.auth_fail_limit' => 1, 'capture.max_batch_size' => 1]);
+
+    $this->postJson('/e/', ['api_key' => $this->key, 'batch' => [['event' => 'a'], ['event' => 'b']]])->assertStatus(413);
+
+    $this->postJson('/e/', captureEvent($this->key))->assertStatus(429);
+});
+
+it('defaults to a failure limit of 120 per minute', function () {
+    expect(config('capture.auth_fail_limit'))->toBe(120)->and(config('capture.auth_fail_window_seconds'))->toBe(60);
+});
+
+it('warns once when the failure limit is first reached', function () {
+    config(['capture.auth_fail_limit' => 2]);
+    Log::spy();
+
+    $bad = captureEvent(Project::generateApiKey());
+    $this->postJson('/e/', $bad)->assertUnauthorized();
+    $this->postJson('/e/', $bad)->assertUnauthorized();
+    $this->postJson('/e/', $bad)->assertStatus(429);
+    $this->postJson('/e/', $bad)->assertStatus(429);
+
+    Log::shouldHaveReceived('warning')->once();
+});
+
+it('fails open and warns when the rate limiter is unavailable', function () {
+    Log::spy();
+    RateLimiter::shouldReceive('tooManyAttempts')->andThrow(new RuntimeException('redis down'));
+    RateLimiter::shouldReceive('hit')->andThrow(new RuntimeException('redis down'));
+
+    $this->postJson('/e/', captureEvent($this->key))->assertOk();
+    $this->postJson('/e/', captureEvent(Project::generateApiKey()))->assertUnauthorized();
+    $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json'], 'not json')->assertStatus(400);
+
+    expect($this->producer->messages)->toHaveCount(1);
+    // At most one warning per minute, however many requests fail.
+    Log::shouldHaveReceived('warning')->once();
+});
+
+it('falls back to the database when the cache is unavailable', function () {
+    Cache::shouldReceive('get', 'has', 'put', 'forget')->andThrow(new RuntimeException('redis down'));
+
+    $this->postJson('/e/', captureEvent($this->key))->assertOk();
+    $this->postJson('/e/', captureEvent(Project::generateApiKey()))->assertUnauthorized();
+
+    expect($this->producer->messages)->toHaveCount(1);
+});
+
+it('answers 503 with Retry-After when the project lookup fails', function () {
+    Log::spy();
+    DB::beforeExecuting(fn (string $query) => str_contains($query, '"projects"') ? throw new RuntimeException('db down') : null);
+
+    $this->postJson('/e/', captureEvent(Project::generateApiKey()))->assertStatus(503)
+        ->assertJsonPath('code', 'service_unavailable')
+        ->assertHeader('Retry-After', '5');
+
+    expect($this->producer->messages)->toBeEmpty();
+});
+
+it('warns when every event of a request was dropped but only debugs partial drops', function () {
+    Log::spy();
+
+    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
+        ['event' => '', 'distinct_id' => 'u'],
+        ['distinct_id' => 'u'],
+    ]])->assertOk();
+
+    Log::shouldHaveReceived('warning')->once()->withArgs(fn (string $message, array $context) => $context === ['project_id' => $this->project->id, 'received' => 2, 'dropped' => 2]);
+    Log::shouldNotHaveReceived('debug');
+});
+
+it('treats ip=false and ip=0 alike, case-insensitively', function (string $value) {
+    $this->postJson("/e/?ip=$value", captureEvent($this->key))->assertOk();
+
+    expect(json_decode($this->producer->messages[0]['properties'], true))->not->toHaveKey('$ip');
+})->with(['0', 'false', 'FALSE', 'False']);
+
+it('keeps the ip for other ip values and array-valued ip', function (string $query) {
+    $this->postJson("/e/?$query", captureEvent($this->key))->assertOk();
+
+    expect(json_decode($this->producer->messages[0]['properties'], true))->toHaveKey('$ip');
+})->with(['ip=1' => 'ip=1', 'ip[]=x' => 'ip[]=x', 'ip=true' => 'ip=true']);
+
+it('accepts the posthog-js /i/v0/e path', function (string $path) {
+    $this->postJson($path, captureEvent($this->key, ['event' => 'via_i']))->assertOk();
+
+    expect($this->producer->messages[0]['event'])->toBe('via_i');
+})->with(['/i/v0/e', '/i/v0/e/']);
+
+it('answers CORS preflight on the /i/ prefix', function () {
+    $this->call('OPTIONS', '/i/v0/e/', [], [], [], [
+        'HTTP_ORIGIN' => 'https://app.example.com',
+        'HTTP_ACCESS_CONTROL_REQUEST_METHOD' => 'POST',
+    ])->assertSuccessful()->assertHeader('Access-Control-Allow-Origin', '*');
 });

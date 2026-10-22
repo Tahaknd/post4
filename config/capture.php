@@ -11,6 +11,24 @@ return [
     'max_batch_size' => 500,
     'max_containers' => 100_000,
     'max_months_per_request' => 24,
-    'auth_fail_limit' => (int) env('CAPTURE_AUTH_FAIL_LIMIT', 30),
+    'auth_fail_limit' => (int) env('CAPTURE_AUTH_FAIL_LIMIT', 120),
     'auth_fail_window_seconds' => (int) env('CAPTURE_AUTH_FAIL_WINDOW_SECONDS', 60),
+
+    /*
+     * Reverse proxies whose X-Forwarded-* headers are trusted (env TRUSTED_PROXIES):
+     * unset/empty => null (trust nothing, so a direct client cannot spoof its ip),
+     * "*" => every caller, otherwise a comma-separated list of IPs/CIDRs.
+     */
+    'trusted_proxies' => (static function (): array|string|null {
+        $raw = trim((string) env('TRUSTED_PROXIES', ''));
+
+        if ($raw === '') {
+            return null;
+        }
+        if ($raw === '*') {
+            return '*';
+        }
+
+        return array_values(array_filter(array_map('trim', explode(',', $raw)), static fn (string $p): bool => $p !== ''));
+    })(),
 ];

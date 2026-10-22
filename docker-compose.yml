@@ -20,6 +20,7 @@ x-app: &app
     CACHE_STORE: redis
     QUEUE_CONNECTION: redis
     SESSION_DRIVER: redis
+    TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     KAFKA_BROKERS: kafka:9092
     CLICKHOUSE_URL: http://clickhouse:8123
     CLICKHOUSE_DATABASE: posthog

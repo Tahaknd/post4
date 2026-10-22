@@ -12,10 +12,16 @@ class Project extends Model
     /** @use HasFactory<ProjectFactory> */
     use HasFactory;
 
+    public const API_KEY_PREFIX = 'phc_';
+
+    public const API_KEY_RANDOM_LENGTH = 43;
+
+    public const API_KEY_PATTERN = '/^'.self::API_KEY_PREFIX.'[A-Za-z0-9]{'.self::API_KEY_RANDOM_LENGTH.'}\z/';
+
     protected $fillable = ['name', 'api_key', 'timezone'];
 
     public static function generateApiKey(): string
     {
-        return 'phc_'.Str::random(43);
+        return self::API_KEY_PREFIX.Str::random(self::API_KEY_RANDOM_LENGTH);
     }
 }

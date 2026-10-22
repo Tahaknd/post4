@@ -7,6 +7,8 @@ use App\Domain\Capture\PayloadDecoder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\Kafka\KafkaEventProducer;
+use Illuminate\Http\Middleware\TrustProxies;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\ServiceProvider;
 
@@ -52,5 +54,27 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         DB::prohibitDestructiveCommands($this->app->isProduction());
+
+        $this->configureTrustedProxies();
+    }
+
+    /**
+     * Read here (not in bootstrap/app.php) because config is not loaded yet while middleware is configured.
+     * With nothing configured the middleware trusts no proxy, so forwarded headers are ignored.
+     */
+    protected function configureTrustedProxies(): void
+    {
+        $proxies = config('capture.trusted_proxies');
+        if ($proxies === null) {
+            return;
+        }
+
+        TrustProxies::at($proxies);
+        TrustProxies::withHeaders(
+            Request::HEADER_X_FORWARDED_FOR
+            | Request::HEADER_X_FORWARDED_PROTO
+            | Request::HEADER_X_FORWARDED_HOST
+            | Request::HEADER_X_FORWARDED_PORT
+        );
     }
 }

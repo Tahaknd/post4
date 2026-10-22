@@ -84,3 +84,22 @@ it('forgets both cache entries', function () {
     expect(Cache::has('project_id_by_key:'.$project->api_key))->toBeFalse()
         ->and(Cache::has('project_missing:'.sha1($missing)))->toBeFalse();
 });
+
+it('falls back to the database when every cache call throws', function () {
+    $project = Project::factory()->create();
+    Cache::shouldReceive('get', 'has', 'put')->andThrow(new RuntimeException('redis down'));
+
+    expect(app(ProjectResolver::class)->resolve($project->api_key))->toBe($project->id)
+        ->and(app(ProjectResolver::class)->resolve(Project::generateApiKey()))->toBeNull();
+});
+
+it('lets a database failure propagate', function () {
+    DB::beforeExecuting(fn () => throw new RuntimeException('db down'));
+
+    app(ProjectResolver::class)->resolve(Project::generateApiKey());
+})->throws(RuntimeException::class, 'db down');
+
+it('generates keys that match the model key pattern', function () {
+    expect(Project::generateApiKey())->toMatch(Project::API_KEY_PATTERN)
+        ->and(strlen(Project::generateApiKey()))->toBe(strlen(Project::API_KEY_PREFIX) + Project::API_KEY_RANDOM_LENGTH);
+});

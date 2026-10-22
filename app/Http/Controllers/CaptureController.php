@@ -20,6 +20,11 @@ final class CaptureController extends Controller
     /** Strict ISO-8601 / SQL-ish timestamp; anything else (e.g. "tomorrow") is ignored. */
     private const SENT_AT_FORMAT = '/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?$/';
 
+    private const LIMITER_WARNING_INTERVAL_SECONDS = 60;
+
+    /** Unix time of the last "limiter unavailable" warning, so a Redis outage cannot flood the log. */
+    private static int $lastLimiterWarningAt = 0;
+
     public function __invoke(
         Request $request,
         PayloadDecoder $decoder,
@@ -37,37 +42,50 @@ final class CaptureController extends Controller
 
         // Cheap per-IP guard against key guessing, before any decoding or lookup.
         $limiterKey = 'capture-auth-fail:'.($request->ip() ?? 'unknown');
-        $maxFailures = (int) config('capture.auth_fail_limit');
-        if (RateLimiter::tooManyAttempts($limiterKey, $maxFailures)) {
+        $retryAfter = $this->blockedFor($limiterKey);
+        if ($retryAfter !== null) {
             return $this->error(429, 'too_many_requests', 'Too many failed attempts, retry later')
-                ->header('Retry-After', (string) max(1, RateLimiter::availableIn($limiterKey)));
+                ->header('Retry-After', (string) $retryAfter);
         }
 
         // 2. Decode.
         try {
             $payload = $decoder->decode($request);
         } catch (TooManyEvents) {
+            $this->recordFailure($limiterKey);
+
             return $this->error(413, 'batch_too_large', 'Too many events in one batch');
         } catch (InvalidPayload $e) {
+            $this->recordFailure($limiterKey);
+
             return $this->error(400, 'invalid_payload', $e->getMessage());
         }
 
         // 3. Nothing to do.
         if ($payload->events === []) {
+            $this->recordFailure($limiterKey);
+
             return $this->error(400, 'no_events', 'No events in payload');
         }
 
         // 4. Authenticate before normalizing or producing anything.
-        $projectId = $payload->apiKey !== null ? $projects->resolve($payload->apiKey) : null;
+        try {
+            $projectId = $payload->apiKey !== null ? $projects->resolve($payload->apiKey) : null;
+        } catch (\Throwable $e) {
+            Log::error('capture project lookup failed', ['exception' => $e::class]);
+
+            return $this->error(503, 'service_unavailable', 'Project lookup is unavailable, retry later')
+                ->header('Retry-After', '5');
+        }
         if ($projectId === null) {
-            RateLimiter::hit($limiterKey, (int) config('capture.auth_fail_window_seconds'));
+            $this->recordFailure($limiterKey);
 
             return $this->error(401, 'invalid_api_key', 'API key is missing or invalid');
         }
 
         $now = CarbonImmutable::now('UTC');
         $sentAt = $this->parseSentAt($payload->sentAt);
-        $ip = $request->query('ip') === '0' ? null : $request->ip();
+        $ip = $this->ipDisabled($request->query('ip')) ? null : $request->ip();
 
         $messages = [];
         $months = [];
@@ -79,11 +97,18 @@ final class CaptureController extends Controller
             }
         }
 
-        $dropped = count($payload->events) - count($messages);
-        if ($dropped > 0) {
+        $received = count($payload->events);
+        $dropped = $received - count($messages);
+        if ($dropped === $received) {
+            Log::warning('capture dropped every event of a request', [
+                'project_id' => $projectId,
+                'received' => $received,
+                'dropped' => $dropped,
+            ]);
+        } elseif ($dropped > 0) {
             Log::debug('capture dropped invalid events', [
                 'project_id' => $projectId,
-                'received' => count($payload->events),
+                'received' => $received,
                 'dropped' => $dropped,
             ]);
         }
@@ -104,6 +129,56 @@ final class CaptureController extends Controller
         }
 
         return response()->json(['status' => 1]);
+    }
+
+    private function ipDisabled(mixed $value): bool
+    {
+        return is_string($value) && in_array(strtolower($value), ['0', 'false'], true);
+    }
+
+    /** Seconds until the caller may retry, or null when it is not blocked. Fails open if the limiter is down. */
+    private function blockedFor(string $limiterKey): ?int
+    {
+        try {
+            if (! RateLimiter::tooManyAttempts($limiterKey, (int) config('capture.auth_fail_limit'))) {
+                return null;
+            }
+
+            return max(1, RateLimiter::availableIn($limiterKey));
+        } catch (\Throwable $e) {
+            $this->warnLimiterUnavailable($e);
+
+            return null;
+        }
+    }
+
+    /** Counts a failed (unauthenticated or undecodable) request against the caller's ip. */
+    private function recordFailure(string $limiterKey): void
+    {
+        $limit = (int) config('capture.auth_fail_limit');
+
+        try {
+            $attempts = RateLimiter::hit($limiterKey, (int) config('capture.auth_fail_window_seconds'));
+        } catch (\Throwable $e) {
+            $this->warnLimiterUnavailable($e);
+
+            return;
+        }
+
+        if ($attempts === $limit) {
+            Log::warning('capture failure limit reached, blocking caller', ['limiter_key' => $limiterKey, 'limit' => $limit]);
+        }
+    }
+
+    private function warnLimiterUnavailable(\Throwable $e): void
+    {
+        $now = time();
+        if ($now - self::$lastLimiterWarningAt < self::LIMITER_WARNING_INTERVAL_SECONDS) {
+            return;
+        }
+        self::$lastLimiterWarningAt = $now;
+
+        Log::warning('capture rate limiter unavailable, failing open', ['exception' => $e::class]);
     }
 
     private function parseSentAt(?string $value): ?CarbonImmutable
