@@ -143,6 +143,7 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      - ./docker/clickhouse/users.d/10-ingest-settings.xml:/etc/clickhouse-server/users.d/10-ingest-settings.xml:ro
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     healthcheck:

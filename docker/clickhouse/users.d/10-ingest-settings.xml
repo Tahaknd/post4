@@ -1,0 +1,19 @@
+<clickhouse>
+    <!--
+        Ingest settings (one file per concern; mounted as a single file because the image entrypoint
+        writes generated user files into /etc/clickhouse-server/users.d/).
+
+        `events` is PARTITION BY toYYYYMM(timestamp). The Kafka engine hands the materialized view one
+        block per poll (up to kafka_max_block_size = 65536 messages), and ClickHouse refuses an INSERT
+        block that touches more than max_partitions_per_insert_block partitions (default 100) with
+        TOO_MANY_PARTS (Code 252). The Kafka consumer then does not commit the offset and re-reads the
+        same block forever, so ingestion stalls. Valid timestamps span 2000-01-01 .. now+366d (about 322
+        months), so one honest historical backfill (or any holder of a public project key) can trigger it.
+        1000 sits well above the ~322 possible months and below the 3000 parts_to_throw_insert default.
+    -->
+    <profiles>
+        <default>
+            <max_partitions_per_insert_block>1000</max_partitions_per_insert_block>
+        </default>
+    </profiles>
+</clickhouse>
