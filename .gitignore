@@ -33,3 +33,8 @@
 /caddy
 /frankenphp
 /public/frankenphp-worker.php
+
+# posthog-node compatibility test: installed packages
+/tests/compat/node_modules/
+/tests/compat/package.json
+/tests/compat/package-lock.json
