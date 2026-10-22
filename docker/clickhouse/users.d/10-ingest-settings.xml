@@ -3,13 +3,64 @@
         Ingest settings (one file per concern; mounted as a single file because the image entrypoint
         writes generated user files into /etc/clickhouse-server/users.d/).
 
+        WHY
         `events` is PARTITION BY toYYYYMM(timestamp). The Kafka engine hands the materialized view one
         block per poll (up to kafka_max_block_size = 65536 messages), and ClickHouse refuses an INSERT
         block that touches more than max_partitions_per_insert_block partitions (default 100) with
-        TOO_MANY_PARTS (Code 252). The Kafka consumer then does not commit the offset and re-reads the
-        same block forever, so ingestion stalls. Valid timestamps span 2000-01-01 .. now+366d (about 322
-        months), so one honest historical backfill (or any holder of a public project key) can trigger it.
-        1000 sits well above the ~322 possible months and below the 3000 parts_to_throw_insert default.
+        TOO_MANY_PARTS (Code 252, 'Too many partitions for single INSERT block'). The Kafka consumer then
+        does not commit the offset and re-reads the same block forever, so ingestion stalls. Valid
+        timestamps span 2000-01 .. now+366d (the EventNormalizer clamp), about 335 months and growing by
+        1 per month, so one honest historical backfill (or any holder of a public project key) can
+        trigger it.
+
+        WHY 1000
+        max_partitions_per_insert_block counts DISTINCT PARTITIONS IN ONE INSERT BLOCK. It is a different
+        dimension from parts_to_delay_insert (1000) / parts_to_throw_insert (3000), which count ACTIVE
+        PARTS INSIDE ONE PARTITION; do not compare the numbers. 1000 is well above the ~335 possible
+        months. A hostile block adds at most 1 part per partition per poll, so merges would have to lag
+        ~1000 polls (~2 h) to reach the delay and ~3000 polls (~6 h) to reach the throw. The only global
+        bound is max_parts_in_total (100000), besides disk space.
+
+        KEEP IN SYNC
+        If EventNormalizer::MIN_TIMESTAMP / MAX_DAYS_AHEAD or the 2000 floor is widened, or the partition
+        key of `events` changes, the month count above must be revisited together with the MV guards in
+        001_events.sql.
+
+        NOTE ON COMMANDS
+        XML comments cannot contain two consecutive hyphens, so long options below are written with a
+        space after the first hyphen: read '- -force-recreate' as two hyphens followed by force-recreate.
+
+        HOW TO APPLY
+        This is a SINGLE-FILE bind mount, which follows the inode. Editing the file in place (sed -i,
+        most editors) or `git pull` / checkout (unlink + create) is NOT picked up by
+        `docker compose up -d`. Run:
+            docker compose up -d - -force-recreate clickhouse
+
+        HOW TO RECOGNIZE THE WEDGE
+            SELECT exceptions.text, last_commit_time, last_poll_time
+            FROM system.kafka_consumers
+            WHERE database = 'posthog' AND table = 'kafka_events'
+        A stale last_commit_time with a fresh last_poll_time and a repeating exception means the consumer
+        is stalled. Key on the exception MESSAGE ('Too many partitions for single INSERT block' vs
+        'Too many parts (N)'), not only on Code 252. ANY persistent MV insert failure (disk full,
+        per-partition too many parts, MV expression errors) wedges the Kafka consumer the same way.
+
+        LAST RESORT (can LOSE data)
+        Skip the stuck block by resetting the consumer group offsets, with the ClickHouse Kafka table
+        detached or the server stopped:
+            docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+                - -bootstrap-server localhost:9092 - -group clickhouse_events - -topic events \
+                - -reset-offsets - -to-latest - -execute
+        Alternatively detach / reattach the Kafka table.
+
+        VERIFY
+        `scripts/smoke-capture.sh - -with-wedge-check` checks the limit end to end.
+
+        PROFILES
+        The setting is read from the server's default profile for the Kafka engine's insert context (in
+        this stack the `posthog` user also uses `default`). A read-only user defined later must use its
+        OWN profile, named e.g. `ro_insights` (NOT `readonly`: the stock users config already defines a
+        profile with that name).
     -->
     <profiles>
         <default>
