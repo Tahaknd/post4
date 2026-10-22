@@ -1,0 +1,31 @@
+# Dokümanlar ve Postman: en son kullanım talimatıyla birlikte eklenecek
+/docs/
+/postman/
+*.postman_collection.json
+*.postman_environment.json
+
+# Gizli bilgiler
+.env
+.env.*
+!.env.example
+
+# Bağımlılıklar ve build çıktıları
+/vendor/
+/node_modules/
+/public/build/
+/public/hot/
+/storage/*.key
+/storage/logs/
+/storage/framework/cache/
+/storage/framework/sessions/
+/storage/framework/views/
+
+# Docker veri dizinleri
+/docker/data/
+
+# Araç ve editör dosyaları
+.DS_Store
+.idea/
+.vscode/
+.claude/
+.phpunit.result.cache
