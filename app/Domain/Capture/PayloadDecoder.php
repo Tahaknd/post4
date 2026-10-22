@@ -87,6 +87,11 @@ final class PayloadDecoder
 
         $data = $request->input('data');
         if (! is_string($data) || $data === '') {
+            // $_POST is empty when PHP did not parse the body (limits, non-SAPI requests): read the raw body.
+            parse_str($request->getContent(), $form);
+            $data = $form['data'] ?? null;
+        }
+        if (! is_string($data) || $data === '') {
             throw new InvalidPayload('Missing "data" field');
         }
 

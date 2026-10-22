@@ -185,3 +185,10 @@ it('keeps invalid payload messages generic', function () {
 
     throw new RuntimeException('Expected InvalidPayload');
 });
+
+it('reads a urlencoded form from the raw body when PHP did not populate the request', function () {
+    $json = '{"api_key":"phc_x","event":"e","distinct_id":"u","properties":{"x":">>>???"}}';
+    $request = Request::create('/e/', 'POST', server: ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'], content: 'data='.str_replace('+', ' ', base64_encode($json)));
+
+    expect($this->decoder->decode($request)->apiKey)->toBe('phc_x');
+});

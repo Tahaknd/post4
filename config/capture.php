@@ -10,4 +10,6 @@ return [
     'max_decoded_bytes' => 2_000_000,
     'max_batch_size' => 500,
     'max_months_per_request' => 24,
+    'auth_fail_limit' => (int) env('CAPTURE_AUTH_FAIL_LIMIT', 30),
+    'auth_fail_window_seconds' => (int) env('CAPTURE_AUTH_FAIL_WINDOW_SECONDS', 60),
 ];
