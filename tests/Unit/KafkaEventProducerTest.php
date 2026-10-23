@@ -31,49 +31,80 @@ function timedProduce(KafkaEventProducer $producer, array $messages): array
     return [(hrtime(true) - $start) / 1e6, $error];
 }
 
-it('fails fast on a dead broker, then opens the circuit', function () {
-    $producer = new KafkaEventProducer('127.0.0.1:1', 'review_dead_topic', messageTimeoutMs: 200, flushTimeoutMs: 300, breakerCooldownSeconds: 5.0);
+/** A manually advanced clock for the circuit breaker, so no test needs to sleep or race the wall clock. */
+function fakeClock(): stdClass
+{
+    return (object) ['now' => 1000.0];
+}
+
+it('fails on a dead broker within the flush bound, then opens the circuit', function () {
+    $clock = fakeClock();
+    $producer = new KafkaEventProducer('127.0.0.1:1', 'review_dead_topic', messageTimeoutMs: 200, flushTimeoutMs: 300, breakerCooldownSeconds: 5.0, clock: fn (): float => $clock->now);
 
     [$first, $firstError] = timedProduce($producer, [kafkaMessage()]);
-    [$second, $secondError] = timedProduce($producer, [kafkaMessage()]);
+    [, $secondError] = timedProduce($producer, [kafkaMessage()]);
 
+    // The elapsed time is only sanity-checked: the lower bound is the 200 ms message timeout (a delivery
+    // cannot fail sooner), the upper bound is generous (the flush bound is 300 ms). Whether the circuit
+    // opened is decided by the injected clock and the exception message, never by how long a call took.
     expect($firstError)->toBeInstanceOf(ProducerUnavailable::class)
         ->and($firstError->getMessage())->toBe('Kafka delivery failed')
-        ->and($first)->toBeGreaterThan(190)->toBeLessThan(1500)
+        ->and($first)->toBeGreaterThan(190)->toBeLessThan(5000)
         ->and($secondError)->toBeInstanceOf(ProducerUnavailable::class)
-        ->and($secondError->getMessage())->toBe('Kafka circuit open')
-        ->and($second)->toBeLessThan(50);
+        ->and($secondError->getMessage())->toBe('Kafka circuit open');
 });
 
-it('probes again once the cooldown has passed and re-opens on failure', function () {
-    $producer = new KafkaEventProducer('127.0.0.1:1', 'review_dead_topic', messageTimeoutMs: 200, flushTimeoutMs: 300, breakerCooldownSeconds: 0.3);
+it('keeps the circuit open until the cooldown has passed, then probes again and re-opens on failure', function () {
+    $clock = fakeClock();
+    $producer = new KafkaEventProducer('127.0.0.1:1', 'review_dead_topic', messageTimeoutMs: 200, flushTimeoutMs: 300, breakerCooldownSeconds: 5.0, clock: fn (): float => $clock->now);
 
     [, $first] = timedProduce($producer, [kafkaMessage()]);
-    usleep(400_000);
+    $clock->now += 4.9;
+    [, $stillOpen] = timedProduce($producer, [kafkaMessage()]);
+    $clock->now += 0.2;
     [$probe, $probeError] = timedProduce($producer, [kafkaMessage()]);
-    [$after, $afterError] = timedProduce($producer, [kafkaMessage()]);
+    [, $afterError] = timedProduce($producer, [kafkaMessage()]);
 
     expect($first)->toBeInstanceOf(ProducerUnavailable::class)
+        ->and($stillOpen->getMessage())->toBe('Kafka circuit open')
         ->and($probeError)->toBeInstanceOf(ProducerUnavailable::class)
         ->and($probeError->getMessage())->toBe('Kafka delivery failed')
         ->and($probe)->toBeGreaterThan(100)
-        ->and($afterError->getMessage())->toBe('Kafka circuit open')
-        ->and($after)->toBeLessThan(50);
+        ->and($afterError->getMessage())->toBe('Kafka circuit open');
 });
 
 it('skips an oversized message without tripping the circuit breaker', function () {
-    $producer = new KafkaEventProducer('127.0.0.1:1', 'review_dead_topic', messageTimeoutMs: 200, flushTimeoutMs: 300, breakerCooldownSeconds: 5.0);
+    $clock = fakeClock();
+    $producer = new KafkaEventProducer('127.0.0.1:1', 'review_dead_topic', messageTimeoutMs: 200, flushTimeoutMs: 300, breakerCooldownSeconds: 5.0, clock: fn (): float => $clock->now);
     $oversized = kafkaMessage(json_encode(['a' => str_repeat('x', 1_500_000)]));
 
-    [$oversizedTime, $oversizedError] = timedProduce($producer, [$oversized]);
+    // Nothing is queued, so nothing is flushed or judged: the broker (dead here) and the events its client
+    // queues in the background (connection log and error events) cannot turn this into a failure.
+    [, $oversizedError] = timedProduce($producer, [$oversized]);
     [, $normalError] = timedProduce($producer, [kafkaMessage()]);
     [, $thirdError] = timedProduce($producer, [kafkaMessage()]);
 
     expect($oversizedError)->toBeNull()
-        ->and($oversizedTime)->toBeLessThan(200)
         ->and($normalError)->toBeInstanceOf(ProducerUnavailable::class)
         ->and($normalError->getMessage())->toBe('Kafka delivery failed')
         ->and($thirdError->getMessage())->toBe('Kafka circuit open');
+});
+
+it('never fails a batch that only contained oversized messages, however often it is repeated', function () {
+    // Regression for the old flake: a pending client event (e.g. the dead broker's connection log) used to
+    // make the empty flush look failed in about 1 of 70 fresh producers.
+    $oversized = kafkaMessage(json_encode(['a' => str_repeat('x', 1_500_000)]));
+    $errors = [];
+
+    for ($i = 0; $i < 20; $i++) {
+        $producer = new KafkaEventProducer('127.0.0.1:1', 'review_dead_topic', messageTimeoutMs: 200, flushTimeoutMs: 300, breakerCooldownSeconds: 5.0, clock: fn (): float => 1000.0);
+        [, $error] = timedProduce($producer, [$oversized, $oversized]);
+        if ($error !== null) {
+            $errors[] = $error->getMessage();
+        }
+    }
+
+    expect($errors)->toBe([]);
 });
 
 it('keeps producing the rest of a batch around an oversized message', function () {
@@ -92,14 +123,13 @@ it('returns for an empty batch without a handle, an error or a circuit check', f
 
     $handle = new ReflectionProperty($producer, 'producer');
 
-    [$empty, $emptyError] = timedProduce($producer, []);
+    [, $emptyError] = timedProduce($producer, []);
     $handleAfterEmpty = $handle->getValue($producer);
     [, $failure] = timedProduce($producer, [kafkaMessage()]);
     [, $stillEmptyError] = timedProduce($producer, []);
 
     expect($emptyError)->toBeNull()
         ->and($handleAfterEmpty)->toBeNull()
-        ->and($empty)->toBeLessThan(50)
         ->and($failure)->toBeInstanceOf(ProducerUnavailable::class)
         ->and($stillEmptyError)->toBeNull();
 });

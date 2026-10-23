@@ -34,6 +34,7 @@ final class KafkaEventProducer implements EventProducer
      * @param  int  $messageTimeoutMs  Upper bound for delivering one message (message.timeout.ms).
      * @param  int  $flushTimeoutMs  How long produce() waits for the flush; keep it above $messageTimeoutMs.
      * @param  float  $breakerCooldownSeconds  How long the circuit stays open after a delivery failure.
+     * @param  ?\Closure(): float  $clock  Monotonic seconds; a test seam for the circuit breaker (default: hrtime).
      */
     public function __construct(
         private readonly string $brokers,
@@ -41,6 +42,7 @@ final class KafkaEventProducer implements EventProducer
         private readonly int $messageTimeoutMs = 2500,
         private readonly int $flushTimeoutMs = 3000,
         private readonly float $breakerCooldownSeconds = 10.0,
+        private readonly ?\Closure $clock = null,
     ) {}
 
     public function produce(array $messages): void
@@ -81,6 +83,7 @@ final class KafkaEventProducer implements EventProducer
     private function send(array $payloads): void
     {
         $this->failures = 0;
+        $queued = 0;
 
         try {
             $producer = $this->producer();
@@ -100,6 +103,7 @@ final class KafkaEventProducer implements EventProducer
                     continue;
                 }
 
+                $queued++;
                 $producer->poll(0);
             }
         } catch (\RdKafka\Exception $e) {
@@ -111,6 +115,12 @@ final class KafkaEventProducer implements EventProducer
             throw new ProducerUnavailable('Kafka produce failed', previous: $e);
         }
 
+        // Everything was skipped (oversized): there is nothing to deliver, so nothing to wait for or to judge.
+        // Without this the verdict would depend on the broker state and on late reports of older messages.
+        if ($queued === 0) {
+            return;
+        }
+
         $result = $producer->flush($this->flushTimeoutMs);
 
         if ($result === RD_KAFKA_RESP_ERR_NO_ERROR) {
@@ -118,7 +128,12 @@ final class KafkaEventProducer implements EventProducer
             $producer->poll(0);
         }
 
-        if ($result !== RD_KAFKA_RESP_ERR_NO_ERROR || $this->failures > 0 || $producer->getOutQLen() > 0) {
+        // flush() returns NO_ERROR only once every queued message has its delivery report and the reports were
+        // served, so $this->failures is final here. Do NOT also require getOutQLen() to be 0: it counts every
+        // pending event of the client, not only messages, and a connection log or error event queued by the
+        // background thread right after the flush made a delivered batch look failed (a spurious 503 and an
+        // open circuit for the whole cooldown; seen in about 1 of 70 runs against a dead broker).
+        if ($result !== RD_KAFKA_RESP_ERR_NO_ERROR || $this->failures > 0) {
             $this->purge($producer);
 
             throw new ProducerUnavailable('Kafka delivery failed');
@@ -178,6 +193,6 @@ final class KafkaEventProducer implements EventProducer
 
     private function now(): float
     {
-        return hrtime(true) / 1e9;
+        return ($this->clock ?? static fn (): float => hrtime(true) / 1e9)();
     }
 }

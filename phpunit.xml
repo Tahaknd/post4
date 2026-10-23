@@ -37,6 +37,12 @@
         <env name="CLICKHOUSE_URL" value="http://127.0.0.1:1" force="true"/>
         <env name="KAFKA_BROKERS" value="127.0.0.1:1" force="true"/>
         <env name="LOG_CHANNEL" value="null" force="true"/>
+        <env name="CAPTURE_PROJECT_EVENTS_PER_MINUTE" value="60000" force="true"/>
+        <env name="CAPTURE_AUTH_FAIL_LIMIT" value="120" force="true"/>
+        <env name="CAPTURE_AUTH_FAIL_WINDOW_SECONDS" value="60" force="true"/>
+        <env name="OCTANE_WORKERS" value="4" force="true"/>
+        <env name="OCTANE_MAX_REQUESTS" value="500" force="true"/>
+        <env name="CLICKHOUSE_RO_PASSWORD" value="posthog_ro" force="true"/>
         <env name="APP_KEY" value="base64:Ce5G4GmiUVXannm654GanbHgZ1SueerpQTjdyJxXfoI=" force="true"/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync" force="true"/>
@@ -57,6 +63,12 @@
         <server name="CLICKHOUSE_URL" value="http://127.0.0.1:1" force="true"/>
         <server name="KAFKA_BROKERS" value="127.0.0.1:1" force="true"/>
         <server name="LOG_CHANNEL" value="null" force="true"/>
+        <server name="CAPTURE_PROJECT_EVENTS_PER_MINUTE" value="60000" force="true"/>
+        <server name="CAPTURE_AUTH_FAIL_LIMIT" value="120" force="true"/>
+        <server name="CAPTURE_AUTH_FAIL_WINDOW_SECONDS" value="60" force="true"/>
+        <server name="OCTANE_WORKERS" value="4" force="true"/>
+        <server name="OCTANE_MAX_REQUESTS" value="500" force="true"/>
+        <server name="CLICKHOUSE_RO_PASSWORD" value="posthog_ro" force="true"/>
         <server name="APP_KEY" value="base64:Ce5G4GmiUVXannm654GanbHgZ1SueerpQTjdyJxXfoI=" force="true"/>
     </php>
 </phpunit>
