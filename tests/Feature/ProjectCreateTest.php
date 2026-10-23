@@ -2,6 +2,9 @@
 
 use App\Models\Project;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Exceptions;
+use Tests\Support\FailingCacheStore;
 
 it('creates a project with a phc_ api key', function () {
     $this->artisan('project:create', ['name' => 'Demo', '--key-only' => true])->assertSuccessful();
@@ -58,4 +61,18 @@ it('keeps the default and --key-only outputs unchanged', function () {
 
     expect(Artisan::call('project:create', ['name' => 'B', '--key-only' => true]))->toBe(0);
     expect(Artisan::output())->toBe(Project::where('name', 'B')->value('api_key')."\n");
+});
+
+it('still prints exactly one json line with --json when the cache is down', function () {
+    Exceptions::fake();
+    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
+    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
+
+    expect(Artisan::call('project:create', ['name' => 'Demo', '--json' => true]))->toBe(0);
+
+    $output = Artisan::output();
+    $project = Project::firstOrFail();
+
+    expect($output)->toBe(json_encode(['id' => $project->id, 'api_key' => $project->api_key])."\n");
+    Exceptions::assertReported(RuntimeException::class);
 });

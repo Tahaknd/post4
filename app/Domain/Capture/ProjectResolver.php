@@ -7,7 +7,8 @@ use Illuminate\Support\Facades\Cache;
 
 final class ProjectResolver
 {
-    private const POSITIVE_TTL_SECONDS = 300;
+    /** How long a resolved key stays cached, so also how long a deleted or re-keyed key may still be accepted if forgetting it fails. */
+    public const POSITIVE_TTL_SECONDS = 300;
 
     private const NEGATIVE_TTL_SECONDS = 10;
 

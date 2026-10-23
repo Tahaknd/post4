@@ -66,7 +66,7 @@ it('still deletes and exits 0 with a warning when the cache is down', function (
     expect(Artisan::call('project:delete', ['api_key' => $project->api_key]))->toBe(0);
 
     expect(Artisan::output())->toContain("Project #{$project->id} deleted.")
-        ->toContain('300')
+        ->toContain((string) ProjectResolver::POSITIVE_TTL_SECONDS)
         ->and(Project::whereKey($project->id)->exists())->toBeFalse();
     Exceptions::assertReported(RuntimeException::class);
 });

@@ -43,9 +43,18 @@ class ProjectRotateKey extends Command
             $resolver->forget($oldKey);
         } catch (\Throwable $e) {
             // stderr keeps `--key-only` stdout to just the key.
-            $this->getOutput()->getErrorStyle()->warning('Eski anahtarın önbellek girdisi silinemedi; en fazla 5 dakika daha geçerli kalabilir: '.$e->getMessage());
+            $this->getOutput()->getErrorStyle()->warning('Eski anahtarın önbellek girdisi silinemedi; en fazla '.$this->ttlText().' daha geçerli kalabilir: '.$e->getMessage());
         }
 
         return self::SUCCESS;
+    }
+
+    /** The resolver's positive TTL as "N dakika", "N saniye" or "N dakika M saniye". */
+    private function ttlText(): string
+    {
+        $minutes = intdiv(ProjectResolver::POSITIVE_TTL_SECONDS, 60);
+        $seconds = ProjectResolver::POSITIVE_TTL_SECONDS % 60;
+
+        return trim(($minutes > 0 ? "{$minutes} dakika " : '').($seconds > 0 ? "{$seconds} saniye" : ''));
     }
 }

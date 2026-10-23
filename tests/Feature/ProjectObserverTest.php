@@ -163,7 +163,7 @@ it('still forgets the new key when forgetting the old key fails', function () {
     Exceptions::assertReported(RuntimeException::class);
 });
 
-it('does not fire for mass operations that skip model events (known limitation)', function () {
+it('KNOWN LIMITATION: a query-builder mass delete skips the observer (flip this when it is fixed)', function () {
     $project = Project::factory()->create();
     app(ProjectResolver::class)->resolve($project->api_key);
 
@@ -187,8 +187,85 @@ it('forgets the old key after commit when the key changes inside a transaction',
         expect(positiveEntry($old))->toBeTrue();
     });
 
-    // After commit the model's "original" attributes already hold the new key.
     expect(positiveEntry($old))->toBeFalse()
         ->and($resolver->resolve($old))->toBeNull()
         ->and($resolver->resolve($new))->toBe($project->id);
+});
+
+it('forgets every key when one instance is re-keyed twice inside one transaction (A -> B -> C)', function () {
+    $project = Project::factory()->create();
+    $a = $project->api_key;
+    $b = Project::generateApiKey();
+    $c = Project::generateApiKey();
+    foreach ([$a, $b, $c] as $key) {
+        Cache::put('project_id_by_key:'.$key, $project->id, 300);
+    }
+
+    DB::transaction(function () use ($project, $b, $c) {
+        $project->update(['api_key' => $b]);
+        $project->update(['api_key' => $c]);
+    });
+
+    $resolver = app(ProjectResolver::class);
+    expect(positiveEntry($a))->toBeFalse()
+        ->and(positiveEntry($b))->toBeFalse()
+        ->and(positiveEntry($c))->toBeFalse()
+        ->and($resolver->resolve($a))->toBeNull()
+        ->and($resolver->resolve($b))->toBeNull()
+        ->and($resolver->resolve($c))->toBe($project->id);
+});
+
+it('forgets nothing when a re-key is rolled back, and the old key still resolves', function () {
+    $project = Project::factory()->create();
+    $old = $project->api_key;
+    $new = Project::generateApiKey();
+    $resolver = app(ProjectResolver::class);
+    expect($resolver->resolve($old))->toBe($project->id)
+        ->and($resolver->resolve($new))->toBeNull();
+
+    try {
+        DB::transaction(function () use ($project, $new) {
+            $project->update(['api_key' => $new]);
+
+            throw new RuntimeException('boom');
+        });
+    } catch (RuntimeException) {
+        // expected
+    }
+
+    expect(positiveEntry($old))->toBeTrue()
+        ->and(negativeEntry($new))->toBeTrue()
+        ->and($resolver->resolve($old))->toBe($project->id)
+        ->and($resolver->resolve($new))->toBeNull();
+});
+
+it('KNOWN LIMITATION: saveQuietly() skips the observer (flip this when it is fixed)', function () {
+    $project = Project::factory()->create();
+    $old = $project->api_key;
+    app(ProjectResolver::class)->resolve($old);
+
+    $project->api_key = Project::generateApiKey();
+    $project->saveQuietly();
+
+    expect(positiveEntry($old))->toBeTrue();
+});
+
+it('forgets the old key when other attributes change in the same save', function () {
+    $project = Project::factory()->create();
+    $old = $project->api_key;
+    $new = Project::generateApiKey();
+    app(ProjectResolver::class)->resolve($old);
+
+    $project->update(['name' => 'Renamed', 'api_key' => $new, 'timezone' => 'Europe/Istanbul']);
+
+    expect(positiveEntry($old))->toBeFalse();
+});
+
+it('leaves the cache alone on touch()', function () {
+    $project = Project::factory()->create();
+    app(ProjectResolver::class)->resolve($project->api_key);
+
+    $project->touch();
+
+    expect(positiveEntry($project->api_key))->toBeTrue();
 });

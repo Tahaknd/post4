@@ -70,3 +70,13 @@ it('still prints the new key when the cache cannot be cleared', function () {
     expect($new)->not->toBe($old)
         ->and(Artisan::output())->toContain($new);
 });
+
+it('derives the cache warning duration from the resolver TTL', function () {
+    $project = Project::factory()->create();
+    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
+    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
+
+    expect(Artisan::call('project:rotate-key', ['id' => $project->id]))->toBe(0);
+
+    expect(Artisan::output())->toContain('en fazla '.intdiv(ProjectResolver::POSITIVE_TTL_SECONDS, 60).' dakika');
+});

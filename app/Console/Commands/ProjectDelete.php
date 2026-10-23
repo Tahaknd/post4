@@ -40,7 +40,7 @@ class ProjectDelete extends Command
             $resolver->forget($apiKey);
         } catch (\Throwable $e) {
             // stderr keeps stdout clean for scripts.
-            $this->getOutput()->getErrorStyle()->warning('Could not clear the cached key; it may still be accepted for up to 300 seconds: '.$e->getMessage());
+            $this->getOutput()->getErrorStyle()->warning('Could not clear the cached key; it may still be accepted for up to '.ProjectResolver::POSITIVE_TTL_SECONDS.' seconds: '.$e->getMessage());
         }
 
         return self::SUCCESS;
