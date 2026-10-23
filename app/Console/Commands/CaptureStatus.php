@@ -4,7 +4,9 @@ namespace App\Console\Commands;
 
 use App\Domain\Capture\IngestHealth;
 use App\Domain\Capture\KafkaLagProbe;
+use App\Http\Controllers\CaptureController;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
+use App\Models\Project;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
@@ -62,10 +64,11 @@ HELP;
         }
 
         $lag = $this->kafkaLag($probe);
+        $dropped = $this->droppedEvents();
         $now = CarbonImmutable::now('UTC')->getTimestamp();
         $previous = $this->readSnapshot();
 
-        $snapshot = $this->healthSnapshot($data, $lag, $previous, $now);
+        $snapshot = $this->healthSnapshot($data, $lag, $previous, $now) + ['dropped_by_project' => $dropped['by_project']];
         $health = IngestHealth::classify($snapshot, [
             'min_free_percent' => (float) config('capture.status.min_free_percent'),
             'min_free_bytes' => (int) config('capture.status.min_free_bytes'),
@@ -78,7 +81,7 @@ HELP;
             default => self::OK,
         };
 
-        $report = $this->report($data, $lag, $previous, $now, $health, $exit);
+        $report = $this->report($data, $lag, $dropped, $previous, $now, $health, $exit);
 
         if ($this->option('json')) {
             $this->writeRaw(json_encode($report, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR));
@@ -214,6 +217,37 @@ HELP;
         }
     }
 
+    /**
+     * Events the normaliser rejected, from the per-project hourly counters the capture endpoint keeps (current
+     * plus previous hour bucket). Single-tenant scale: one cache read per project. Informational, so a cache or
+     * database failure is a stderr note and "unknown", never an error.
+     *
+     * @return array{known: bool, total: ?int, by_project: array<int, int>}
+     */
+    private function droppedEvents(): array
+    {
+        try {
+            $now = CarbonImmutable::now('UTC');
+            $buckets = [$now->format('YmdH'), $now->subHour()->format('YmdH')];
+            $byProject = [];
+            foreach (Project::pluck('id') as $id) {
+                $sum = 0;
+                foreach ($buckets as $bucket) {
+                    $sum += (int) Cache::get(CaptureController::DROPPED_KEY_PREFIX.$id.':'.$bucket, 0);
+                }
+                if ($sum > 0) {
+                    $byProject[(int) $id] = $sum;
+                }
+            }
+
+            return ['known' => true, 'total' => array_sum($byProject), 'by_project' => $byProject];
+        } catch (\Throwable $e) {
+            $this->getOutput()->getErrorStyle()->writeln('NOTE: dropped-event counters are unknown: '.OutputFormatter::escape(Str::limit($this->oneLine($e->getMessage()), 200)));
+
+            return ['known' => false, 'total' => null, 'by_project' => []];
+        }
+    }
+
     /** @return ?array{offset_sum: int, at: int, lag: ?int} */
     private function readSnapshot(): ?array
     {
@@ -292,7 +326,7 @@ HELP;
      * @param  array{status: string, reasons: list<string>}  $health
      * @return array<string, mixed>
      */
-    private function report(array $d, array $lag, ?array $previous, int $now, array $health, int $exit): array
+    private function report(array $d, array $lag, array $dropped, ?array $previous, int $now, array $health, int $exit): array
     {
         $clock = $d['now_ts'];
         $exception = $d['newest_exception'];
@@ -364,6 +398,11 @@ HELP;
                 'max_parts_in_total' => $d['parts_max'],
                 'pending_mutations' => $d['pending_mutations'],
             ],
+            'dropped' => [
+                'known' => $dropped['known'],
+                'last_hour_total' => $dropped['total'],
+                'by_project' => (object) $dropped['by_project'],
+            ],
             'previous_run' => [
                 'found' => $previous !== null,
                 'offsets' => $trend,
@@ -393,6 +432,14 @@ HELP;
         $this->line('  rows:                '.number_format($r['events_errors']['last_hour']));
         foreach ($r['events_errors']['top'] as $top) {
             $this->line(sprintf('  %5d x  %s  (newest %s)', $top['count'], $top['error'], $top['newest_received_at']));
+        }
+
+        $d = $r['dropped'];
+        $this->newLine();
+        $this->line('Dropped events (rejected by the normaliser, current + previous hour)');
+        $this->line('  total:              '.($d['known'] ? number_format($d['last_hour_total']) : 'unknown'));
+        foreach ((array) $d['by_project'] as $projectId => $count) {
+            $this->line(sprintf('  project #%d:%s%s', $projectId, str_repeat(' ', max(1, 11 - strlen((string) $projectId))), number_format($count)));
         }
 
         $c = $r['kafka_consumer'];

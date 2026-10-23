@@ -6,6 +6,7 @@ use App\Domain\Capture\EventNormalizer;
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\FailureLimiter;
 use App\Domain\Capture\InvalidPayload;
+use App\Domain\Capture\LimiterOutage;
 use App\Domain\Capture\PayloadDecoder;
 use App\Domain\Capture\ProducerUnavailable;
 use App\Domain\Capture\ProjectRateLimiter;
@@ -14,10 +15,17 @@ use App\Domain\Capture\TooManyEvents;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 final class CaptureController extends Controller
 {
+    /** Per-hour drop counters read by `capture:status`: capture-dropped:{project_id}:{YmdH} (UTC). */
+    public const DROPPED_KEY_PREFIX = 'capture-dropped:';
+
+    /** Two hours: the current bucket plus the previous one stay readable. */
+    private const DROPPED_TTL_SECONDS = 7200;
+
     /** Strict ISO-8601 / SQL-ish timestamp; anything else (e.g. "tomorrow") is ignored. */
     private const SENT_AT_FORMAT = '/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?$/';
 
@@ -118,6 +126,11 @@ final class CaptureController extends Controller
             }
             $produced = count($messages);
 
+            // Only a request answered 200 counts: a rejected or retried one would be counted again.
+            if ($dropped > 0) {
+                $this->countDropped($projectId, $dropped, $now);
+            }
+
             return response()->json(['status' => 1]);
         } catch (ProducerUnavailable) {
             return $this->unavailable(
@@ -130,6 +143,19 @@ final class CaptureController extends Controller
             // (which clients retry) give their reservation back.
             $projectLimiter->release($projectId, $reserved - $produced, $nowTs);
         }
+    }
+
+    /**
+     * Per project and UTC hour, so `capture:status` can show events the normaliser rejected (every request still
+     * answers 200). Fail-open: the cache is a safety net here, never a reason to fail a request.
+     */
+    private function countDropped(int $projectId, int $dropped, CarbonImmutable $now): void
+    {
+        LimiterOutage::guard(function () use ($projectId, $dropped, $now): void {
+            $key = self::DROPPED_KEY_PREFIX.$projectId.':'.$now->format('YmdH');
+            Cache::add($key, 0, self::DROPPED_TTL_SECONDS);
+            Cache::increment($key, $dropped);
+        });
     }
 
     private function ipDisabled(mixed $value): bool

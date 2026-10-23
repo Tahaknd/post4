@@ -139,6 +139,12 @@ final class IngestHealth
             $reasons[] = "{$mutations} ClickHouse mutation(s) in posthog are still pending";
         }
 
+        foreach ((array) ($s['dropped_by_project'] ?? []) as $projectId => $dropped) {
+            if ((int) $dropped > $t['drops_warn_per_project_per_hour']) {
+                $reasons[] = sprintf('project #%d lost %d events to the normaliser in the last hour (more than %d); check its SDK payloads', $projectId, $dropped, $t['drops_warn_per_project_per_hour']);
+            }
+        }
+
         if (self::int($s, 'consumers') === 0) {
             $reasons[] = 'no Kafka consumer is registered for posthog.kafka_events in system.kafka_consumers';
         }

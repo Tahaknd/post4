@@ -182,3 +182,21 @@ it('accepts thresholds overrides', function () {
     expect(IngestHealth::classify($snapshot)['status'])->toBe('WARN')
         ->and(IngestHealth::classify($snapshot, ['min_free_percent' => 1, 'min_free_bytes' => 1_000_000])['status'])->toBe('OK');
 });
+
+describe('dropped events', function () {
+    it('is informational: drops alone, up to 1000 per project, keep the status OK', function () {
+        expect(IngestHealth::classify(healthySnapshot(['dropped_by_project' => [1 => 1000, 2 => 3]])))->toBe(['status' => 'OK', 'reasons' => []]);
+    });
+
+    it('warns for a project with more than 1000 drops in the hour and names the project', function () {
+        $result = IngestHealth::classify(healthySnapshot(['dropped_by_project' => [1 => 5, 7 => 1001]]));
+
+        expect($result['status'])->toBe('WARN')
+            ->and($result['reasons'])->toHaveCount(1)
+            ->and($result['reasons'][0])->toContain('project #7')->toContain('1001');
+    });
+
+    it('does not add the per-project drops up', function () {
+        expect(IngestHealth::classify(healthySnapshot(['dropped_by_project' => [1 => 600, 2 => 600]]))['status'])->toBe('OK');
+    });
+});

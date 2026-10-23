@@ -2,6 +2,7 @@
 
 use App\Console\Commands\CaptureStatus;
 use App\Domain\Capture\KafkaLagProbe;
+use App\Models\Project;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
@@ -322,4 +323,75 @@ it('runs through the artisan facade like a real invocation', function () {
 
 it('registers the command with its exit-code help', function () {
     $this->artisan('capture:status --help')->expectsOutputToContain('INGEST STALLED')->assertExitCode(0);
+});
+
+describe('dropped events', function () {
+    it('shows drops of the current and previous hour per project with a total, and stays OK', function () {
+        $a = Project::factory()->create();
+        $b = Project::factory()->create();
+        $quiet = Project::factory()->create();
+        Cache::put("capture-dropped:{$a->id}:2026102312", 4, 7200);
+        Cache::put("capture-dropped:{$a->id}:2026102311", 3, 7200);
+        Cache::put("capture-dropped:{$b->id}:2026102312", 10, 7200);
+        Cache::put("capture-dropped:{$a->id}:2026102310", 999, 7200);
+
+        [$code, $out, $err] = runStatus();
+
+        expect($code)->toBe(0)
+            ->and($out)->toContain('Dropped events')
+            ->toContain('total:              17')
+            ->toContain("project #{$a->id}:".str_repeat(' ', 1))
+            ->and($out)->toMatch("/project #{$a->id}:\s+7/")
+            ->and($out)->toMatch("/project #{$b->id}:\s+10/")
+            ->and($out)->not->toContain("project #{$quiet->id}:")
+            ->and($err)->toBe('');
+    });
+
+    it('has the drops in the JSON', function () {
+        $a = Project::factory()->create();
+        Cache::put("capture-dropped:{$a->id}:2026102312", 2, 7200);
+
+        [, $out] = runStatus(['--json' => true]);
+        $json = json_decode($out, true, flags: JSON_THROW_ON_ERROR);
+
+        expect($json['dropped'])->toBe(['known' => true, 'last_hour_total' => 2, 'by_project' => [(string) $a->id => 2]]);
+    });
+
+    it('shows none when nothing was dropped', function () {
+        Project::factory()->create();
+
+        [$code, $out] = runStatus();
+        $json = json_decode(runStatus(['--json' => true])[1], true, flags: JSON_THROW_ON_ERROR);
+
+        expect($code)->toBe(0)->and($out)->toContain('total:              0')
+            ->and($json['dropped'])->toBe(['known' => true, 'last_hour_total' => 0, 'by_project' => []]);
+    });
+
+    it('warns (exit 1) for a project with more than 1000 drops in the hour', function () {
+        $a = Project::factory()->create();
+        Cache::put("capture-dropped:{$a->id}:2026102312", 600, 7200);
+        Cache::put("capture-dropped:{$a->id}:2026102311", 401, 7200);
+
+        [$code, , $err] = runStatus();
+
+        expect($code)->toBe(1)->and($err)->toContain("project #{$a->id}")->toContain('1001');
+    });
+
+    it('does not warn at exactly 1000', function () {
+        $a = Project::factory()->create();
+        Cache::put("capture-dropped:{$a->id}:2026102312", 1000, 7200);
+
+        expect(runStatus()[0])->toBe(0);
+    });
+
+    it('is non-fatal when the cache is unavailable: drops are unknown with a stderr note', function () {
+        Project::factory()->create();
+        ProjectCache::breakStore();
+
+        [$code, $out, $err] = runStatus();
+
+        expect($code)->toBe(0)
+            ->and($out)->toContain('total:              unknown')
+            ->and($err)->toContain('NOTE: dropped-event counters are unknown');
+    });
 });
