@@ -9,7 +9,7 @@ final class ProjectResolver
 {
     private const POSITIVE_TTL_SECONDS = 300;
 
-    private const NEGATIVE_TTL_SECONDS = 60;
+    private const NEGATIVE_TTL_SECONDS = 10;
 
     /**
      * A cache outage only costs a database lookup; a database failure propagates to the caller.

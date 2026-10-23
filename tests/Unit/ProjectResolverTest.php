@@ -31,7 +31,7 @@ it('returns null for malformed keys without touching cache or database', functio
     'wrong prefix' => 'phx_'.str_repeat('a', 43),
     'too long' => 'phc_'.str_repeat('a', 44),
     'bad chars' => 'phc_'.str_repeat('a', 42).'-',
-    'trailing newline' => "phc_".str_repeat('a', 43)."\n",
+    'trailing newline' => 'phc_'.str_repeat('a', 43)."\n",
     'huge' => str_repeat('a', 5000),
 ]);
 
@@ -65,9 +65,13 @@ it('does not serve a stale negative entry forever', function () {
     $resolver = app(ProjectResolver::class);
     $resolver->resolve($key);
 
-    Project::create(['name' => 'late', 'api_key' => $key]);
-    $this->travel(61)->seconds();
+    // Bypasses model events (and so the observer): only the TTL can expire the negative entry.
+    DB::table('projects')->insert(['name' => 'late', 'api_key' => $key, 'created_at' => now(), 'updated_at' => now()]);
 
+    $this->travel(9)->seconds();
+    expect($resolver->resolve($key))->toBeNull();
+
+    $this->travel(2)->seconds();
     expect($resolver->resolve($key))->not->toBeNull();
 });
 
