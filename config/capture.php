@@ -38,6 +38,12 @@ return [
      */
     'project_events_per_minute' => (int) env('CAPTURE_PROJECT_EVENTS_PER_MINUTE', 60000),
 
+    /* Time to live of a project's window counter: longer than its 60 s window so a late increment still lands, then it disappears. */
+    'project_counter_ttl_seconds' => 120,
+
+    /* At most one "limiter unavailable, failing open" warning per process per this many seconds, so a Redis outage cannot flood the log. */
+    'limiter_warning_interval_seconds' => 60,
+
     /*
      * Reverse proxies whose X-Forwarded-* headers are trusted (env TRUSTED_PROXIES):
      * unset/empty => null (trust nothing, so a direct client cannot spoof its ip),

@@ -1,7 +1,7 @@
 <?php
 
 use App\Domain\Capture\EventProducer;
-use App\Http\Controllers\CaptureController;
+use App\Domain\Capture\LimiterOutage;
 use App\Models\Project;
 use App\Providers\AppServiceProvider;
 use Illuminate\Http\Middleware\TrustProxies;
@@ -22,7 +22,7 @@ beforeEach(function () {
 
 afterEach(function () {
     TrustProxies::flushState();
-    (new ReflectionProperty(CaptureController::class, 'lastLimiterWarningAt'))->setValue(null, 0);
+    (new ReflectionProperty(LimiterOutage::class, 'lastWarningAt'))->setValue(null, 0);
 });
 
 /** The trusted proxies are applied when the provider boots, so re-boot it after changing the config. */
@@ -228,16 +228,17 @@ it('answers 429 to every kind of unauthenticated request from a blocked ip', fun
         ->and(RateLimiter::attempts('capture-auth-fail:127.0.0.1'))->toBe(2);
 })->with(['unknown key', 'malformed key', 'missing key', 'invalid json', 'empty array', 'valid key but no events', 'oversized batch']);
 
-it('lets a valid key through from a blocked ip without consulting the limiter', function () {
+it('lets a valid key through from a blocked ip and leaves the failure budget untouched', function () {
     config(['capture.auth_fail_limit' => 1]);
     RateLimiter::hit('capture-auth-fail:127.0.0.1', 60);
 
-    RateLimiter::partialMock()->shouldNotReceive('tooManyAttempts', 'hit', 'availableIn');
+    foreach (range(1, 5) as $_) {
+        $this->postJson('/e/', captureEvent($this->key))->assertOk();
+        $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [['event' => 'a', 'distinct_id' => 'u']]])->assertOk();
+    }
 
-    $this->postJson('/e/', captureEvent($this->key))->assertOk();
-    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [['event' => 'a', 'distinct_id' => 'u']]])->assertOk();
-
-    expect($this->producer->messages)->toHaveCount(2);
+    expect($this->producer->messages)->toHaveCount(10)
+        ->and(RateLimiter::attempts('capture-auth-fail:127.0.0.1'))->toBe(1);
 });
 
 it('does not let authenticated requests consume the failure budget', function () {
