@@ -15,7 +15,7 @@ use InvalidArgumentException;
  * başka kiracıların satırlarını da okuyan düşmanca bir sorguyu (alt sorgu, UNION, `OR` ...) durduramaz.
  * Sorgu kurucular bu sözleşmeye göre yazılmalı ve gözden geçirilmelidir; kullanıcı girdisi asla SQL
  * metnine girmez, yalnızca `$params` ile bağlanır. Salt-okunur profil (`ro_insights`) etki alanını
- * `posthog.*` üzerinde SELECT ve sorgu başına sınırlarla kısıtlar, ama kiracı izolasyonunu SAĞLAMAZ.
+ * `posthog.events` üzerinde SELECT ve sorgu başına sınırlarla kısıtlar, ama kiracı izolasyonunu SAĞLAMAZ.
  */
 class ProjectScopedReader
 {
@@ -24,11 +24,12 @@ class ProjectScopedReader
     /** `events.project_id` UInt32'dir. */
     private const MAX_PROJECT_ID = 4294967295;
 
-    public function __construct(private readonly ReadOnlyClickHouseClient $client) {}
+    public function __construct(private readonly ClickHouseReads $client) {}
 
     /**
      * @param  array<string, mixed>  $params  Bağlı parametreler (`project_id` adı ayrılmıştır)
-     * @param  array<string, bool|int|float|string>  $settings  Sabit sorgu ayarları (kullanıcı girdisi DEĞİL)
+     * @param  array<string, bool|int|float|string>  $settings  Sabit sorgu ayarları (kullanıcı girdisi DEĞİL).
+     *                                                          `log_comment` verilmezse `project:<id>` olur (`system.query_log`).
      * @return array<int, array<string, mixed>>
      */
     public function select(int $projectId, string $sql, array $params = [], array $settings = []): array
@@ -42,6 +43,9 @@ class ProjectScopedReader
         if (array_key_exists('project_id', $params)) {
             throw new InvalidArgumentException("The 'project_id' param is set by the reader and cannot be passed by the caller");
         }
+
+        // `+`: çağıranın verdiği log_comment kazanır.
+        $settings += [RoSettings::LOG_COMMENT => 'project:'.$projectId];
 
         return $this->client->select($sql, ['project_id' => $projectId] + $params, $settings);
     }

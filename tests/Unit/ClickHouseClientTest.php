@@ -1,6 +1,7 @@
 <?php
 
 use App\Infrastructure\ClickHouse\ClickHouseClient;
+use App\Infrastructure\ClickHouse\ClickHouseReads;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
@@ -351,4 +352,24 @@ it('validates settings before anything is sent even when other settings are vali
     expect(fn () => $this->client->select('SELECT 1', [], ['max_threads' => 1, 'database' => 'other']))
         ->toThrow(InvalidArgumentException::class);
     Http::assertNothingSent();
+});
+
+it('applies a per-call timeout override on select and keeps the default for the next call', function () {
+    $seen = [];
+    Http::fake(function ($request, $options) use (&$seen) {
+        $seen[] = $options['timeout'] ?? null;
+
+        return Http::response('{"data":[]}');
+    });
+
+    $client = new ClickHouseClient('http://ch:8123', 'posthog', 'u', 'p', 5, 2);
+    $client->select('SELECT 1');
+    $client->select('SELECT 2', timeout: 90);
+    $client->select('SELECT 3');
+
+    expect($seen)->toBe([5, 90, 5]);
+});
+
+it('implements the ClickHouseReads interface', function () {
+    expect($this->client)->toBeInstanceOf(ClickHouseReads::class);
 });

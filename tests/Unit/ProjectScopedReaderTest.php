@@ -1,5 +1,6 @@
 <?php
 
+use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use Illuminate\Http\Client\Request;
@@ -96,10 +97,55 @@ it('refuses a settings key that would override the client arguments', function (
     Http::assertNothingSent();
 });
 
-it('resolves from the container on top of the read-only client', function () {
+it('resolves from the container on top of the read-only client, never the admin one', function () {
     $reader = app(ProjectScopedReader::class);
     $client = (new ReflectionProperty(ProjectScopedReader::class, 'client'))->getValue($reader);
 
     expect($client)->toBeInstanceOf(ReadOnlyClickHouseClient::class)
         ->and($client)->toBe(app(ReadOnlyClickHouseClient::class));
+});
+
+it('type-hints the ClickHouseReads interface and works with any implementation', function () {
+    $fake = new class implements ClickHouseReads
+    {
+        public array $calls = [];
+
+        public function select(string $sql, array $params = [], array $settings = [], ?int $timeout = null): array
+        {
+            $this->calls[] = [$sql, $params, $settings, $timeout];
+
+            return [['n' => 9]];
+        }
+    };
+
+    $rows = (new ProjectScopedReader($fake))->select(5, 'SELECT {project_id:UInt32}', ['a' => 1], ['max_threads' => 2]);
+
+    expect($rows)->toBe([['n' => 9]])
+        ->and($fake->calls)->toBe([['SELECT {project_id:UInt32}', ['project_id' => 5, 'a' => 1], ['max_threads' => 2, 'log_comment' => 'project:5'], null]])
+        ->and((string) (new ReflectionMethod(ProjectScopedReader::class, '__construct'))->getParameters()[0]->getType())
+        ->toBe(ClickHouseReads::class);
+});
+
+it('sets log_comment to project:<id> automatically', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    $this->reader->select(42, 'SELECT {project_id:UInt32}');
+
+    Http::assertSent(fn (Request $r) => scopedQuery($r)['log_comment'] === 'project:42');
+});
+
+it('keeps a caller supplied log_comment', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    $this->reader->select(42, 'SELECT {project_id:UInt32}', [], ['log_comment' => 'insight:trends']);
+
+    Http::assertSent(fn (Request $r) => scopedQuery($r)['log_comment'] === 'insight:trends');
+});
+
+it('refuses a setting outside the read-only allow-list', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    expect(fn () => $this->reader->select(1, 'SELECT {project_id:UInt32}', [], ['session_id' => 'x']))
+        ->toThrow(InvalidArgumentException::class, 'session_id');
+    Http::assertNothingSent();
 });

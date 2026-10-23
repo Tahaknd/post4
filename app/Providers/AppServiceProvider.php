@@ -6,6 +6,8 @@ use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\PayloadDecoder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
+use App\Infrastructure\ClickHouse\ClickHouseReads;
+use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use App\Infrastructure\Kafka\KafkaEventProducer;
 use Illuminate\Http\Middleware\TrustProxies;
@@ -29,16 +31,18 @@ class AppServiceProvider extends ServiceProvider
             (int) config('clickhouse.connect_timeout'),
         ));
 
-        // Distinct binding (the admin ClickHouseClient above is unaffected): query builders type-hint
-        // ProjectScopedReader, which takes this one.
+        // Distinct binding (the admin ClickHouseClient above is unaffected). The constructor fails fast
+        // when the password is empty. ClickHouseReads is deliberately NOT bound globally (the admin
+        // client implements it too); only the scoped reader gets the read-only client.
         $this->app->singleton(ReadOnlyClickHouseClient::class, fn () => new ReadOnlyClickHouseClient(
             config('clickhouse.url'),
             config('clickhouse.database'),
             config('clickhouse.readonly.user'),
-            config('clickhouse.readonly.password'),
-            (int) config('clickhouse.timeout'),
+            (string) config('clickhouse.readonly.password'),
+            (int) config('clickhouse.readonly.timeout'),
             (int) config('clickhouse.connect_timeout'),
         ));
+        $this->app->when(ProjectScopedReader::class)->needs(ClickHouseReads::class)->give(ReadOnlyClickHouseClient::class);
 
         $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
             $app->make(ClickHouseClient::class),

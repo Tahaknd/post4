@@ -10,7 +10,7 @@ use InvalidArgumentException;
 use JsonException;
 use RuntimeException;
 
-class ClickHouseClient
+class ClickHouseClient implements ClickHouseReads
 {
     private const ERROR_BODY_LIMIT = 1000;
 
@@ -46,13 +46,14 @@ class ClickHouseClient
      * yalnızca `$params` ile bağlanır). İstemcinin kendi argümanlarıyla (`database`, `default_format`,
      * `wait_end_of_query`, `query`, `param_*`) çakışan adlar `InvalidArgumentException` ile reddedilir.
      * Sunucu tarafı sınırlar kullanıcının profilindeki constraint'lerle ayrıca korunur.
+     * `$timeout` çağrı başına HTTP zaman aşımıdır (saniye), null ise yapıcıdaki varsayılan.
      *
      * @param  array<string, bool|int|float|string>  $settings
      * @return array<int, array<string, mixed>>
      */
-    public function select(string $sql, array $params = [], array $settings = []): array
+    public function select(string $sql, array $params = [], array $settings = [], ?int $timeout = null): array
     {
-        $body = $this->send($sql, $params, ['default_format' => 'JSON', 'wait_end_of_query' => 1], null, $settings);
+        $body = $this->send($sql, $params, ['default_format' => 'JSON', 'wait_end_of_query' => 1], $timeout, $settings);
 
         try {
             $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
