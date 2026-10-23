@@ -43,6 +43,12 @@ Options:
                     limiter (K of 120 per window). Takes ~45 s, uses no project and sends no events
                     (opt-in; the default run is unchanged)
 
+Always-on checks (besides the capture round trip): the ingest wedge guard setting, the read-only
+user guarantees (runs scripts/check-readonly-user.sh, skipped with an INFO if the script is absent)
+and `capture:status --json` (exit 0 passes, exit 1 = WARN is only reported as an INFO with the
+reasons because a warning such as a full disk is not a smoke failure, exit 2 = STALLED or
+ClickHouse unreachable fails).
+
 Environment:
   HOST              capture endpoint, http://localhost[:port] or http://127.0.0.1[:port]
                     (default http://localhost:8000; anything else is refused)
@@ -234,6 +240,20 @@ if chv "SELECT value FROM system.settings WHERE name = 'max_partitions_per_inser
   fi
 fi
 
+# --- (0b) static: the read-only user guarantees hold ------------------------------------------------
+# Its own script (also usable alone and in CI against a scratch ClickHouse); one smoke check wraps it.
+if [[ -f scripts/check-readonly-user.sh ]]; then
+  RO_RC=0
+  bash scripts/check-readonly-user.sh >"$TMP/ro_out" 2>&1 || RO_RC=$?
+  if [[ $RO_RC -eq 0 ]]; then
+    pass "read-only user guarantees hold"
+  else
+    fail "read-only user guarantees broken (exit $RO_RC): $({ grep -E '^(FAIL|REFUSED)' "$TMP/ro_out" || true; } | head -n 3 | cut -c1-200 | tr '\n' ' ')(run scripts/check-readonly-user.sh for the full list)"
+  fi
+else
+  echo "INFO: scripts/check-readonly-user.sh not found, skipping the read-only user check"
+fi
+
 # One JSON line carries id and key. Only a line of exactly that shape counts, so a stray warning cannot
 # hide a project that was created; the key is validated before it is used to delete anything.
 CREATED_JSON="$(docker compose exec -T app php artisan project:create "$NAME" --json 2>"$TMP/create_err" | tr -d '\r' | grep -E '^\{"id":[0-9]+,"api_key":"phc_[A-Za-z0-9]{43}"\}$' | head -n 1 || true)"
@@ -365,6 +385,19 @@ if [[ $CONSUMER_OK -eq 1 ]]; then
 else
   fail "kafka_events consumer unhealthy ($CONSUMER_MSG)"
 fi
+
+# --- (d2) capture:status: the ingest health summary ----------------------------------------------
+# Exit 0 OK passes. Exit 1 (WARN) is only an INFO with the reasons: a warning such as a nearly full disk is
+# not a smoke failure. Exit 2 (STALLED, or ClickHouse unreachable) fails.
+STATUS_RC=0
+docker compose exec -T app php artisan capture:status --json >"$TMP/status_out" 2>"$TMP/status_err" || STATUS_RC=$?
+case "$STATUS_RC" in
+  0) pass "capture:status reports OK (exit 0)" ;;
+  1) pass "capture:status ran (exit 1 = WARN, not a smoke failure)"
+     echo "INFO: capture:status exit 1 (warnings only, never a smoke failure): $({ grep -E '^WARN: ' "$TMP/status_err" || true; } | cut -c7-220 | tr '\n' ';')" ;;
+  2) fail "capture:status exit 2 (STALLED or ClickHouse unreachable): $(head -c 400 "$TMP/status_err" | tr '\n' ' ')" ;;
+  *) fail "capture:status failed unexpectedly (exit $STATUS_RC): $(head -c 300 "$TMP/status_err" | tr '\n' ' ')" ;;
+esac
 
 # --- negative checks (each wrong-key/invalid-JSON request counts toward the per-IP limiter: 2 hits) ----
 WRONG_KEY="phc_$(printf 'x%.0s' $(seq 1 43))"
