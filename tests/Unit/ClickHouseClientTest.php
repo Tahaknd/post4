@@ -225,3 +225,130 @@ it('does not mutate a datetime param', function () {
 it('rejects unsupported param types', function () {
     $this->client->execute('SELECT {p:String}', ['p' => new stdClass]);
 })->throws(InvalidArgumentException::class);
+
+/** Sends one query-level settings array through select() (or execute()) and returns the URL arguments. */
+function sentQuery(ClickHouseClient $client, array $settings, bool $viaSelect = true): array
+{
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    $viaSelect
+        ? $client->select('SELECT 1', [], $settings)
+        : $client->execute('SELECT 1', [], null, $settings);
+
+    $recorded = Http::recorded();
+
+    return queryOf($recorded[count($recorded) - 1][0]);
+}
+
+it('sends per-query settings as url arguments on select and execute', function () {
+    foreach ([true, false] as $viaSelect) {
+        $query = sentQuery($this->client, ['max_execution_time' => 5, 'result_overflow_mode' => 'throw'], $viaSelect);
+
+        expect($query['max_execution_time'])->toBe('5')
+            ->and($query['result_overflow_mode'])->toBe('throw')
+            ->and($query['database'])->toBe('posthog');
+    }
+});
+
+it('encodes bool, int, float and string settings', function () {
+    $query = sentQuery($this->client, [
+        'a_true' => true,
+        'a_false' => false,
+        'an_int' => 30,
+        'a_zero' => 0,
+        'a_float' => 0.5,
+        'a_string' => 'a b&c=d',
+    ]);
+
+    expect($query['a_true'])->toBe('1')
+        ->and($query['a_false'])->toBe('0')
+        ->and($query['an_int'])->toBe('30')
+        ->and($query['a_zero'])->toBe('0')
+        ->and($query['a_float'])->toBe('0.5')
+        ->and($query['a_string'])->toBe('a b&c=d');
+});
+
+it('keeps the client own arguments next to the settings', function () {
+    $query = sentQuery($this->client, ['max_threads' => 2]);
+
+    expect($query['default_format'])->toBe('JSON')
+        ->and($query['wait_end_of_query'])->toBe('1')
+        ->and($query['max_threads'])->toBe('2');
+});
+
+it('sends params and settings together without mixing them up', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    $this->client->select('SELECT {id:UInt32}', ['id' => 7], ['max_execution_time' => 9]);
+
+    $recorded = Http::recorded();
+    $query = queryOf($recorded[0][0]);
+
+    expect($query['param_id'])->toBe('7')
+        ->and($query['max_execution_time'])->toBe('9')
+        ->and(array_key_exists('id', $query))->toBeFalse();
+});
+
+it('does not carry settings over to the next call', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    $this->client->select('SELECT 1', [], ['max_execution_time' => 9]);
+    $this->client->select('SELECT 2');
+    $this->client->execute('SELECT 3');
+
+    $recorded = Http::recorded();
+
+    expect(queryOf($recorded[0][0]))->toHaveKey('max_execution_time')
+        ->and(queryOf($recorded[1][0]))->not->toHaveKey('max_execution_time')
+        ->and(queryOf($recorded[2][0]))->not->toHaveKey('max_execution_time');
+});
+
+it('rejects invalid setting names', function (mixed $name) {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    expect(fn () => $this->client->select('SELECT 1', [], [$name => 1]))
+        ->toThrow(InvalidArgumentException::class);
+    Http::assertNothingSent();
+})->with([
+    'upper case' => 'Max_Time',
+    'leading digit' => '1max',
+    'leading underscore' => '_max',
+    'dash' => 'max-time',
+    'space' => 'max time',
+    'ampersand' => 'a&b',
+    'equals' => 'a=b',
+    'brackets' => 'a[]',
+    'empty' => '',
+    'int key (list)' => 0,
+]);
+
+it('rejects non scalar setting values', function (mixed $value) {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    expect(fn () => $this->client->select('SELECT 1', [], ['max_threads' => $value]))
+        ->toThrow(InvalidArgumentException::class);
+    Http::assertNothingSent();
+})->with([
+    'null' => [null],
+    'array' => [[1]],
+    'object' => [new stdClass],
+    'datetime' => [new DateTimeImmutable],
+    'nan' => [NAN],
+    'infinity' => [INF],
+]);
+
+it('rejects settings that collide with the client own url arguments', function (string $name) {
+    Http::fake(['*' => Http::response('')]);
+
+    expect(fn () => $this->client->execute('SELECT 1', [], null, [$name => 'x']))
+        ->toThrow(InvalidArgumentException::class, $name);
+    Http::assertNothingSent();
+})->with(['database', 'default_format', 'wait_end_of_query', 'query', 'param_project_id', 'param_x']);
+
+it('validates settings before anything is sent even when other settings are valid', function () {
+    Http::fake(['*' => Http::response('')]);
+
+    expect(fn () => $this->client->select('SELECT 1', [], ['max_threads' => 1, 'database' => 'other']))
+        ->toThrow(InvalidArgumentException::class);
+    Http::assertNothingSent();
+});

@@ -14,6 +14,9 @@ class ClickHouseClient
 {
     private const ERROR_BODY_LIMIT = 1000;
 
+    /** URL arguments the client sets itself; a per-query setting must never override them. */
+    private const RESERVED_ARGUMENTS = ['database', 'default_format', 'wait_end_of_query', 'query'];
+
     public function __construct(
         private readonly string $url,
         private readonly string $database,
@@ -23,21 +26,33 @@ class ClickHouseClient
         private readonly int $connectTimeout = 10,
     ) {}
 
-    /** Veri döndürmeyen ifade (DDL, INSERT). */
-    public function execute(string $sql, array $params = [], ?int $timeout = null): void
+    /**
+     * Veri döndürmeyen ifade (DDL, INSERT).
+     *
+     * @param  array<string, bool|int|float|string>  $settings  Sorgu başına ClickHouse ayarları, bkz. {@see self::select()}.
+     */
+    public function execute(string $sql, array $params = [], ?int $timeout = null, array $settings = []): void
     {
-        $this->send($sql, $params, [], $timeout);
+        $this->send($sql, $params, [], $timeout, $settings);
     }
 
     /**
      * `wait_end_of_query=1`: sunucu cevabı tamponlar, sorgu akış ortasında patlarsa
      * 200 + yarım gövde yerine gerçek bir HTTP 5xx döner.
      *
+     * `$settings` sorgu başına ClickHouse ayarlarıdır (`max_execution_time` vb.) ve `params` gibi URL
+     * argümanı olarak gider. Anahtarlar `/^[a-z][a-z0-9_]*$/` olmalı, değerler skaler (bool 1/0 olur).
+     * Ayarlar ASLA kullanıcı girdisinden gelmez: çağıranlar sabit değer geçer (kullanıcı girdisi
+     * yalnızca `$params` ile bağlanır). İstemcinin kendi argümanlarıyla (`database`, `default_format`,
+     * `wait_end_of_query`, `query`, `param_*`) çakışan adlar `InvalidArgumentException` ile reddedilir.
+     * Sunucu tarafı sınırlar kullanıcının profilindeki constraint'lerle ayrıca korunur.
+     *
+     * @param  array<string, bool|int|float|string>  $settings
      * @return array<int, array<string, mixed>>
      */
-    public function select(string $sql, array $params = []): array
+    public function select(string $sql, array $params = [], array $settings = []): array
     {
-        $body = $this->send($sql, $params, ['default_format' => 'JSON', 'wait_end_of_query' => 1]);
+        $body = $this->send($sql, $params, ['default_format' => 'JSON', 'wait_end_of_query' => 1], null, $settings);
 
         try {
             $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
@@ -54,11 +69,12 @@ class ClickHouseClient
     }
 
     /**
-     * @param  array<string, mixed>  $settings  URL argümanları (default_format vb.)
+     * @param  array<string, mixed>  $arguments  İstemcinin kendi URL argümanları (default_format vb.)
+     * @param  array<string, mixed>  $settings  Çağıranın sorgu başına ayarları (doğrulanır)
      */
-    private function send(string $sql, array $params, array $settings, ?int $timeout = null): string
+    private function send(string $sql, array $params, array $arguments, ?int $timeout = null, array $settings = []): string
     {
-        $query = ['database' => $this->database] + $settings;
+        $query = ['database' => $this->database] + $arguments + $this->encodeSettings($settings);
         foreach ($params as $name => $value) {
             $query['param_'.$name] = $this->encodeParam($value);
         }
@@ -74,6 +90,33 @@ class ClickHouseClient
         }
 
         return $response->body();
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $settings
+     * @return array<string, string>
+     */
+    private function encodeSettings(array $settings): array
+    {
+        $encoded = [];
+        foreach ($settings as $name => $value) {
+            if (! is_string($name) || preg_match('/^[a-z][a-z0-9_]*$/', $name) !== 1) {
+                throw new InvalidArgumentException('Invalid ClickHouse setting name: '.var_export($name, true));
+            }
+            if (in_array($name, self::RESERVED_ARGUMENTS, true) || str_starts_with($name, 'param_')) {
+                throw new InvalidArgumentException("ClickHouse setting '{$name}' collides with an argument the client sets itself");
+            }
+
+            $encoded[$name] = match (true) {
+                is_bool($value) => $value ? '1' : '0',
+                is_int($value) => (string) $value,
+                is_float($value) && is_finite($value) => var_export($value, true),
+                is_string($value) => $value,
+                default => throw new InvalidArgumentException("ClickHouse setting '{$name}' must be a bool, int, finite float or string, got ".get_debug_type($value)),
+            };
+        }
+
+        return $encoded;
     }
 
     /** URL parametreleri TSV-escape edilmiş metin olarak ayrıştırılır. */
