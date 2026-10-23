@@ -4,7 +4,7 @@ use App\Domain\Capture\EventNormalizer;
 use Carbon\CarbonImmutable;
 
 beforeEach(function () {
-    $this->normalizer = new EventNormalizer();
+    $this->normalizer = new EventNormalizer;
     $this->now = CarbonImmutable::parse('2026-10-22 12:00:00.000', 'UTC');
 });
 
@@ -222,7 +222,7 @@ it('accepts properties of exactly the size cap', function () {
 });
 
 it('defaults the properties cap to 900000 bytes', function () {
-    $normalizer = new EventNormalizer();
+    $normalizer = new EventNormalizer;
 
     $ok = $normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 899_000)]], project: 1, now: $this->now);
     $big = $normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['a' => str_repeat('x', 900_000)]], project: 1, now: $this->now);

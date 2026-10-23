@@ -69,7 +69,7 @@ it('rejects a non-positive event limit', function (int $limit) {
 })->with(['zero' => 0, 'negative' => -5])->throws(InvalidArgumentException::class);
 
 it('defaults to a 2 MB decoded limit', function () {
-    $limit = (new ReflectionProperty(PayloadDecoder::class, 'maxDecodedBytes'))->getValue(new PayloadDecoder());
+    $limit = (new ReflectionProperty(PayloadDecoder::class, 'maxDecodedBytes'))->getValue(new PayloadDecoder);
 
     expect($limit)->toBe(2_000_000);
 });
@@ -245,7 +245,7 @@ it('rejects a non-positive container limit', function (int $limit) {
 })->with(['zero' => 0, 'negative' => -5])->throws(InvalidArgumentException::class);
 
 it('defaults to 100000 containers', function () {
-    $limit = (new ReflectionProperty(PayloadDecoder::class, 'maxContainers'))->getValue(new PayloadDecoder());
+    $limit = (new ReflectionProperty(PayloadDecoder::class, 'maxContainers'))->getValue(new PayloadDecoder);
 
     expect($limit)->toBe(100_000);
 });

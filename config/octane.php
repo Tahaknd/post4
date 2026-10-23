@@ -1,5 +1,6 @@
 <?php
 
+use App\Domain\Capture\EventProducer;
 use Laravel\Octane\Contracts\OperationTerminated;
 use Laravel\Octane\Events\RequestHandled;
 use Laravel\Octane\Events\RequestReceived;
@@ -132,7 +133,7 @@ return [
 
     'warm' => [
         ...Octane::defaultServicesToWarm(),
-        \App\Domain\Capture\EventProducer::class,
+        EventProducer::class,
     ],
 
     'flush' => [

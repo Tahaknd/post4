@@ -6,6 +6,7 @@ use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\ProducerUnavailable;
 use Illuminate\Support\Facades\Log;
 use RdKafka\Conf;
+use RdKafka\Exception;
 use RdKafka\Producer;
 
 /**
@@ -92,7 +93,7 @@ final class KafkaEventProducer implements EventProducer
             foreach ($payloads as [$payload, $key]) {
                 try {
                     $topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload, $key);
-                } catch (\RdKafka\Exception $e) {
+                } catch (Exception $e) {
                     if ($e->getCode() !== RD_KAFKA_RESP_ERR_MSG_SIZE_TOO_LARGE) {
                         throw $e;
                     }
@@ -106,7 +107,7 @@ final class KafkaEventProducer implements EventProducer
                 $queued++;
                 $producer->poll(0);
             }
-        } catch (\RdKafka\Exception $e) {
+        } catch (Exception $e) {
             if ($this->producer !== null) {
                 $this->purge($this->producer);
             }
