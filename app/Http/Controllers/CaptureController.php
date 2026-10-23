@@ -146,6 +146,8 @@ final class CaptureController extends Controller
         if ($limit <= 0 || $count === 0) {
             return null;
         }
+        // An enabled limit below the batch cap would reject a full batch forever (SDKs retry it forever).
+        $limit = max($limit, (int) config('capture.max_batch_size'));
 
         $window = intdiv($timestamp, 60);
         $key = "capture-rate:{$projectId}:{$window}";

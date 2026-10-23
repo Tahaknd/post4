@@ -551,7 +551,7 @@ it('defaults to 60000 events per project per minute', function () {
 
 it('accepts requests under the project limit and counts the events', function () {
     Carbon::setTestNow('2026-10-22 12:00:10');
-    config(['capture.project_events_per_minute' => 10]);
+    config(['capture.project_events_per_minute' => 10, 'capture.max_batch_size' => 7]);
 
     $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
     $this->postJson('/batch/', eventBatch($this->key, 7))->assertOk();
@@ -562,7 +562,7 @@ it('accepts requests under the project limit and counts the events', function ()
 
 it('answers 503 rate_limited with Retry-After and produces nothing over the project limit', function () {
     Carbon::setTestNow('2026-10-22 12:00:10');
-    config(['capture.project_events_per_minute' => 5]);
+    config(['capture.project_events_per_minute' => 5, 'capture.max_batch_size' => 4]);
 
     $this->postJson('/batch/', eventBatch($this->key, 4, 'secret-marker'))->assertOk();
     $response = $this->postJson('/batch/', eventBatch($this->key, 2, 'secret-marker'));
@@ -576,7 +576,7 @@ it('answers 503 rate_limited with Retry-After and produces nothing over the proj
 
 it('restores the budget after a rejection so a smaller request still fits', function () {
     Carbon::setTestNow('2026-10-22 12:00:10');
-    config(['capture.project_events_per_minute' => 5]);
+    config(['capture.project_events_per_minute' => 5, 'capture.max_batch_size' => 4]);
 
     $this->postJson('/batch/', eventBatch($this->key, 4))->assertOk();
     $this->postJson('/batch/', eventBatch($this->key, 3))->assertStatus(503);
@@ -587,18 +587,36 @@ it('restores the budget after a rejection so a smaller request still fits', func
     expect($this->producer->messages)->toHaveCount(5);
 });
 
-it('rejects a single request that is larger than the limit by itself', function () {
-    config(['capture.project_events_per_minute' => 2]);
+it('never lets the project limit drop below max_batch_size', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    // Effective limit = max(10, 20) = 20: a full batch is accepted once instead of being rejected forever.
+    config(['capture.project_events_per_minute' => 10, 'capture.max_batch_size' => 20]);
 
-    $this->postJson('/batch/', eventBatch($this->key, 3))->assertStatus(503)->assertJsonPath('code', 'rate_limited');
+    $this->postJson('/batch/', eventBatch($this->key, 20))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 20))->assertStatus(503)->assertJsonPath('code', 'rate_limited');
 
-    expect($this->producer->messages)->toBeEmpty()
-        ->and((int) Cache::get(rateKey($this->project)))->toBe(0);
+    expect($this->producer->messages)->toHaveCount(20)
+        ->and((int) Cache::get(rateKey($this->project)))->toBe(20);
+
+    Carbon::setTestNow('2026-10-22 12:01:10');
+    $this->postJson('/batch/', eventBatch($this->key, 20))->assertOk();
+    expect($this->producer->messages)->toHaveCount(40);
+});
+
+it('keeps a limit above max_batch_size as configured', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 30, 'capture.max_batch_size' => 20]);
+
+    $this->postJson('/batch/', eventBatch($this->key, 20))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 11))->assertStatus(503);
+    $this->postJson('/batch/', eventBatch($this->key, 10))->assertOk();
+
+    expect($this->producer->messages)->toHaveCount(30);
 });
 
 it('resets the project budget in the next minute window', function () {
     Carbon::setTestNow('2026-10-22 12:00:10');
-    config(['capture.project_events_per_minute' => 3]);
+    config(['capture.project_events_per_minute' => 3, 'capture.max_batch_size' => 3]);
 
     $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
     $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertHeader('Retry-After', '50');
@@ -613,7 +631,7 @@ it('resets the project budget in the next minute window', function () {
 });
 
 it('keeps independent budgets for different projects', function () {
-    config(['capture.project_events_per_minute' => 2]);
+    config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 2]);
     $other = Project::factory()->create();
 
     $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
@@ -634,7 +652,7 @@ it('disables the project limit with zero or a negative value', function (int $li
 })->with([0, -1]);
 
 it('counts only producible messages towards the project limit', function () {
-    config(['capture.project_events_per_minute' => 2]);
+    config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 4]);
 
     $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
         ['event' => 'good', 'distinct_id' => 'u'],
@@ -663,17 +681,19 @@ it('does not charge the project budget for requests rejected before production',
 
 it('warns once per window and project when the project limit is first exceeded', function () {
     Carbon::setTestNow('2026-10-22 12:00:10');
-    config(['capture.project_events_per_minute' => 1]);
+    config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 2]);
     Log::spy();
 
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
     foreach (range(1, 3) as $_) {
         $this->postJson('/batch/', eventBatch($this->key, 2, 'secret-marker'))->assertStatus(503);
     }
     Log::shouldHaveReceived('warning')->once()->withArgs(
-        fn (string $message, array $context) => $context === ['project_id' => $this->project->id, 'limit' => 1, 'requested' => 2],
+        fn (string $message, array $context) => $context === ['project_id' => $this->project->id, 'limit' => 2, 'requested' => 2],
     );
 
     Carbon::setTestNow('2026-10-22 12:01:10');
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
     $this->postJson('/batch/', eventBatch($this->key, 2))->assertStatus(503);
     Log::shouldHaveReceived('warning')->twice();
 });

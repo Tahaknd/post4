@@ -11,6 +11,13 @@ return [
     'max_batch_size' => 500,
     'max_containers' => 100_000,
     'max_months_per_request' => 24,
+    /*
+     * Per client ip limiter for UNAUTHENTICATED outcomes only (bad or missing key, undecodable body,
+     * oversized or empty batch): at most auth_fail_limit failures per auth_fail_window_seconds (env
+     * CAPTURE_AUTH_FAIL_LIMIT / CAPTURE_AUTH_FAIL_WINDOW_SECONDS), then 429 + Retry-After for that ip.
+     * Requests with a valid key never touch it. It is a fixed window, so up to ~2x the limit can pass
+     * across a window boundary. The smoke script's slow-POST check spends one failure per connection.
+     */
     'auth_fail_limit' => (int) env('CAPTURE_AUTH_FAIL_LIMIT', 120),
     'auth_fail_window_seconds' => (int) env('CAPTURE_AUTH_FAIL_WINDOW_SECONDS', 60),
 
@@ -18,6 +25,16 @@ return [
      * Interim per-project ingest cap: producible events accepted per fixed one-minute window (env
      * CAPTURE_PROJECT_EVENTS_PER_MINUTE). The public key is readable from any web page, so without it
      * a valid key can post unlimited events. 0 or negative disables the cap.
+     *
+     * Read it as a FLOOD CEILING for Kafka/ClickHouse, not as a storage or CPU guard: 60000/min is about
+     * 86 million events/day per project. Notes:
+     *  - the window is fixed, so up to ~2x the limit can be accepted across a window boundary;
+     *  - a 503 `rate_limited` looks like an outage to passive proxies and monitors; the JSON `code`
+     *    ("rate_limited" vs "service_unavailable") tells them apart, and Retry-After is set;
+     *  - a busy project (about 1000 events/s) will see 503s at the default: raise the limit for it;
+     *  - an enabled limit is never lower than max_batch_size (effective limit = max(limit, max_batch_size)).
+     *    Otherwise a full batch could never fit, every attempt would be rejected and SDKs would retry
+     *    it forever.
      */
     'project_events_per_minute' => (int) env('CAPTURE_PROJECT_EVENTS_PER_MINUTE', 60000),
 
