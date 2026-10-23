@@ -6,6 +6,7 @@ use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\PayloadDecoder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
+use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use App\Infrastructure\Kafka\KafkaEventProducer;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
@@ -24,6 +25,17 @@ class AppServiceProvider extends ServiceProvider
             config('clickhouse.database'),
             config('clickhouse.user'),
             config('clickhouse.password'),
+            (int) config('clickhouse.timeout'),
+            (int) config('clickhouse.connect_timeout'),
+        ));
+
+        // Distinct binding (the admin ClickHouseClient above is unaffected): query builders type-hint
+        // ProjectScopedReader, which takes this one.
+        $this->app->singleton(ReadOnlyClickHouseClient::class, fn () => new ReadOnlyClickHouseClient(
+            config('clickhouse.url'),
+            config('clickhouse.database'),
+            config('clickhouse.readonly.user'),
+            config('clickhouse.readonly.password'),
             (int) config('clickhouse.timeout'),
             (int) config('clickhouse.connect_timeout'),
         ));
