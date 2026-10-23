@@ -36,7 +36,10 @@ final class FailureLimiter
         );
 
         if ($attempts === $limit) {
-            Log::warning('capture failure limit reached, blocking caller', ['limiter_key' => $key, 'limit' => $limit]);
+            // Best effort: a failing logger must not fail the request that was already answered.
+            LimiterOutage::guard(
+                fn () => Log::warning('capture failure limit reached, blocking caller', ['limiter_key' => $key, 'limit' => $limit]),
+            );
         }
     }
 

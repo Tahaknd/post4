@@ -143,16 +143,19 @@ LUA;
         return $total;
     }
 
+    /** Logging is best effort: a failing cache or logger here must not turn a decided rejection into an acceptance. */
     private function warnOnce(int $projectId, int $window, int $limit, int $requested): void
     {
-        // Once per window and project, whatever the number of rejected requests (counts only, no input).
-        if (Cache::add("capture-rate-warned:{$projectId}:{$window}", 1, $this->counterTtl())) {
-            Log::warning('capture project event rate limit exceeded', [
-                'project_id' => $projectId,
-                'limit' => $limit,
-                'requested' => $requested,
-            ]);
-        }
+        LimiterOutage::guard(function () use ($projectId, $window, $limit, $requested): void {
+            // Once per window and project, whatever the number of rejected requests (counts only, no input).
+            if (Cache::add("capture-rate-warned:{$projectId}:{$window}", 1, $this->counterTtl())) {
+                Log::warning('capture project event rate limit exceeded', [
+                    'project_id' => $projectId,
+                    'limit' => $limit,
+                    'requested' => $requested,
+                ]);
+            }
+        });
     }
 
     /** Null when the limiter is disabled. */

@@ -4,6 +4,7 @@ namespace App\Domain\Capture;
 
 use Closure;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 /**
  * The fail-open pattern shared by the capture limiters: a limiter is a safety net, so when the cache is
@@ -19,9 +20,11 @@ final class LimiterOutage
      * capture.limiter_warning_interval_seconds (per process) and returns $fallback.
      *
      * @template T
+     * @template F
      *
      * @param  Closure(): T  $callback
-     * @return T|mixed
+     * @param  F  $fallback
+     * @return T|F
      */
     public static function guard(Closure $callback, mixed $fallback = null): mixed
     {
@@ -48,6 +51,10 @@ final class LimiterOutage
         }
         self::$lastWarningAt = $now;
 
-        Log::warning('capture rate limiter unavailable, failing open', ['exception' => $e::class]);
+        Log::warning('capture rate limiter unavailable, failing open', [
+            'exception' => $e::class,
+            // The class alone cannot tell a timeout from READONLY, OOM or WRONGTYPE (or a programming error).
+            'message' => Str::limit($e->getMessage(), 200),
+        ]);
     }
 }

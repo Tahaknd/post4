@@ -118,7 +118,7 @@ it('fails open and warns once when the cache is unavailable', function () {
         ->and($this->limiter->reserve(1, 4, RATE_TS))->toBeNull();
 
     Log::shouldHaveReceived('warning')->once()->withArgs(
-        fn (string $message, array $context) => $context === ['exception' => RuntimeException::class],
+        fn (string $message, array $context) => $context === ['exception' => RuntimeException::class, 'message' => 'cache store unavailable'],
     );
 });
 
@@ -232,4 +232,41 @@ it('keeps the add/increment path working on a non-redis store', function () {
 
     $this->limiter->release(424242, 4, RATE_TS);
     expect(rateCounter(424242))->toBe(6);
+});
+
+it('still rejects when the once-per-window warning cannot be written', function () {
+    $this->limiter->reserve(1, 4, RATE_TS);
+    $this->limiter->reserve(1, 1, RATE_TS);
+    Log::shouldReceive('warning')->with('capture project event rate limit exceeded', Mockery::type('array'))
+        ->andThrow(new RuntimeException('logger down'));
+    Log::shouldReceive('warning')->once()->with('capture rate limiter unavailable, failing open', Mockery::on(
+        fn (array $context) => $context === ['exception' => RuntimeException::class, 'message' => 'logger down'],
+    ));
+
+    expect($this->limiter->reserve(1, 2, RATE_TS))->toBe(50)
+        ->and(rateCounter(1))->toBe(5);
+});
+
+it('still rejects when the warning marker cannot be stored', function () {
+    $store = new class extends ArrayStore
+    {
+        // Repository::add() falls back to get + put on this store.
+        public function put($key, $value, $seconds)
+        {
+            if (str_starts_with($key, 'capture-rate-warned:')) {
+                throw new RuntimeException('cache read-only');
+            }
+
+            return parent::put($key, $value, $seconds);
+        }
+    };
+    Cache::swap(Cache::repository($store));
+    Log::spy();
+    $this->limiter->reserve(1, 4, RATE_TS);
+    $this->limiter->reserve(1, 1, RATE_TS);
+
+    expect($this->limiter->reserve(1, 2, RATE_TS))->toBe(50);
+    Log::shouldHaveReceived('warning')->once()->withArgs(
+        fn (string $message, array $context) => $context['message'] === 'cache read-only',
+    );
 });

@@ -173,6 +173,10 @@ return [
             'password' => env('REDIS_PASSWORD'),
             'port' => env('REDIS_PORT', '6379'),
             'database' => env('REDIS_CACHE_DB', '1'),
+            // Bounded, unlike `default` (Horizon's blocking pops need long reads): phpredis waits forever
+            // by default, so a frozen Redis would block every limiter/resolver call before it can fail open.
+            'timeout' => (float) env('REDIS_CACHE_TIMEOUT', 0.5),
+            'read_timeout' => (float) env('REDIS_CACHE_READ_TIMEOUT', 1.0),
             'max_retries' => env('REDIS_MAX_RETRIES', 3),
             'backoff_algorithm' => env('REDIS_BACKOFF_ALGORITHM', 'decorrelated_jitter'),
             'backoff_base' => env('REDIS_BACKOFF_BASE', 100),

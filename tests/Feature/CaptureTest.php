@@ -829,3 +829,15 @@ it('does not touch the counter at all when the project limit is disabled', funct
     Cache::shouldNotHaveReceived('decrement');
     Cache::shouldNotHaveReceived('add');
 });
+
+it('still answers 503 rate_limited when the limit warning cannot be written', function () {
+    config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 2]);
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
+    Log::shouldReceive('warning')->with('capture project event rate limit exceeded', Mockery::type('array'))
+        ->andThrow(new RuntimeException('logger down'));
+    Log::shouldReceive('warning')->with('capture rate limiter unavailable, failing open', Mockery::type('array'));
+
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertJsonPath('code', 'rate_limited');
+
+    expect($this->producer->messages)->toHaveCount(2);
+});

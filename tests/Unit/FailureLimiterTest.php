@@ -86,6 +86,18 @@ it('fails open and warns once when the cache is unavailable', function () {
     expect($this->limiter->blockedFor('203.0.113.7'))->toBeNull();
 
     Log::shouldHaveReceived('warning')->once()->withArgs(
-        fn (string $message, array $context) => $context === ['exception' => RuntimeException::class],
+        fn (string $message, array $context) => $context === ['exception' => RuntimeException::class, 'message' => 'redis down'],
     );
+});
+
+it('does not fail the request when the limit warning cannot be written', function () {
+    Log::shouldReceive('warning')->with('capture failure limit reached, blocking caller', Mockery::type('array'))
+        ->andThrow(new RuntimeException('logger down'));
+    Log::shouldReceive('warning')->once()->with('capture rate limiter unavailable, failing open', Mockery::type('array'));
+
+    foreach (range(1, 3) as $_) {
+        $this->limiter->record('203.0.113.7');
+    }
+
+    expect($this->limiter->blockedFor('203.0.113.7'))->toBeInt();
 });
