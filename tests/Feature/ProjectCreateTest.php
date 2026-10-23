@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Project;
+use Illuminate\Support\Facades\Artisan;
 
 it('creates a project with a phc_ api key', function () {
     $this->artisan('project:create', ['name' => 'Demo', '--key-only' => true])->assertSuccessful();
@@ -31,4 +32,30 @@ it('creates a project with a valid key from the factory', function () {
         ->and($project->name)->not->toBe('')
         ->and($project->api_key)->toMatch('/^phc_[A-Za-z0-9]{43}$/')
         ->and($project->timezone)->toBe('UTC');
+});
+
+it('prints exactly one json line with --json', function () {
+    expect(Artisan::call('project:create', ['name' => 'Demo', '--json' => true]))->toBe(0);
+
+    $output = Artisan::output();
+    $project = Project::firstOrFail();
+
+    expect($output)->toBe(json_encode(['id' => $project->id, 'api_key' => $project->api_key])."\n")
+        ->and($output)->toMatch('/^\{"id":\d+,"api_key":"phc_[A-Za-z0-9]{43}"\}\n\z/')
+        ->and(json_decode($output, true))->toBe(['id' => $project->id, 'api_key' => $project->api_key]);
+});
+
+it('rejects --json together with --key-only without creating anything', function () {
+    expect(Artisan::call('project:create', ['name' => 'Demo', '--json' => true, '--key-only' => true]))->toBe(2)
+        ->and(Artisan::output())->toContain('--json')->toContain('--key-only')
+        ->and(Project::count())->toBe(0);
+});
+
+it('keeps the default and --key-only outputs unchanged', function () {
+    expect(Artisan::call('project:create', ['name' => 'A']))->toBe(0);
+    $project = Project::firstOrFail();
+    expect(Artisan::output())->toBe("Proje #{$project->id} oluşturuldu. API anahtarı: {$project->api_key}\n");
+
+    expect(Artisan::call('project:create', ['name' => 'B', '--key-only' => true]))->toBe(0);
+    expect(Artisan::output())->toBe(Project::where('name', 'B')->value('api_key')."\n");
 });
