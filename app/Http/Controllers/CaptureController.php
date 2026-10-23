@@ -74,7 +74,14 @@ final class CaptureController extends Controller
             return $this->unauthenticated($failures, $clientIp, 401, 'invalid_api_key', 'API key is missing or invalid');
         }
 
+        // 5. Early reject: a project whose window is already spent is refused before normalising up to
+        // max_batch_size events (one cache read, no charge). Only the decode has been paid for.
         $now = CarbonImmutable::now('UTC');
+        $exhausted = $projectLimiter->isExhausted($projectId, $now->getTimestamp(), count($payload->events));
+        if ($exhausted !== null) {
+            return $this->rateLimited($exhausted);
+        }
+
         $sentAt = $this->parseSentAt($payload->sentAt);
         $ip = $this->ipDisabled($request->query('ip')) ? null : $request->ip();
 
@@ -104,19 +111,18 @@ final class CaptureController extends Controller
             ]);
         }
 
-        // 5. ClickHouse TOO_MANY_PARTS guard: partitions are monthly.
+        // 6. ClickHouse TOO_MANY_PARTS guard: partitions are monthly.
         if (count($months) > (int) config('capture.max_months_per_request')) {
             return $this->error(400, 'too_many_months', 'Events span too many calendar months for one request');
         }
 
-        // 6. Per-project event rate, counted in producible messages (dropped events cost nothing).
+        // 7. Per-project event rate, counted in producible messages (dropped events cost nothing).
         $limited = $projectLimiter->charge($projectId, count($messages), $now->getTimestamp());
         if ($limited !== null) {
-            return $this->error(503, 'rate_limited', 'Project event rate limit exceeded, retry later')
-                ->header('Retry-After', (string) $limited);
+            return $this->rateLimited($limited);
         }
 
-        // 7. Produce.
+        // 8. Produce.
         try {
             if ($messages !== []) {
                 $producer->produce($messages);
@@ -162,6 +168,12 @@ final class CaptureController extends Controller
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    private function rateLimited(int $retryAfter): JsonResponse
+    {
+        return $this->error(503, 'rate_limited', 'Project event rate limit exceeded, retry later')
+            ->header('Retry-After', (string) $retryAfter);
     }
 
     private function error(int $status, string $code, string $detail): JsonResponse

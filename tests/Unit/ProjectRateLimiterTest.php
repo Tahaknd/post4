@@ -2,6 +2,7 @@
 
 use App\Domain\Capture\LimiterOutage;
 use App\Domain\Capture\ProjectRateLimiter;
+use Illuminate\Cache\ArrayStore;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Tests\Support\FailingCacheStore;
@@ -15,7 +16,7 @@ function rateCounter(int $projectId, int $ts = RATE_TS): int
 
 beforeEach(function () {
     config(['capture.project_events_per_minute' => 5, 'capture.max_batch_size' => 4]);
-    $this->limiter = new ProjectRateLimiter;
+    $this->limiter = new ProjectRateLimiter(fn (): int => 0);
 });
 
 afterEach(function () {
@@ -124,10 +125,81 @@ it('fails open and warns once when the cache is unavailable', function () {
 
 it('fails open when the store cannot increment a missing counter', function () {
     // The database store answers false for increment on a missing key.
+    Cache::shouldReceive('getStore')->andReturn(new ArrayStore);
     Cache::shouldReceive('add')->andReturn(false);
     Cache::shouldReceive('increment')->andReturn(false);
     Log::spy();
 
     expect($this->limiter->charge(1, 4, RATE_TS))->toBeNull();
+    Log::shouldHaveReceived('warning')->once();
+});
+
+it('adds the injected jitter to Retry-After', function () {
+    $limiter = new ProjectRateLimiter(fn (): int => 3);
+    $limiter->charge(1, 4, RATE_TS);
+    $limiter->charge(1, 1, RATE_TS);
+
+    expect($limiter->charge(1, 1, RATE_TS))->toBe(53)
+        ->and($limiter->isExhausted(1, RATE_TS, 1))->toBe(53);
+});
+
+it('keeps the default jitter within five seconds', function () {
+    $limiter = new ProjectRateLimiter;
+    $limiter->charge(1, 4, RATE_TS);
+    $limiter->charge(1, 1, RATE_TS);
+
+    $seen = [];
+    foreach (range(1, 200) as $_) {
+        $seen[] = $limiter->charge(1, 1, RATE_TS);
+    }
+
+    expect(min($seen))->toBeGreaterThanOrEqual(50)->and(max($seen))->toBeLessThanOrEqual(55)
+        ->and(count(array_unique($seen)))->toBeGreaterThan(1);
+});
+
+it('reports a project as exhausted once its counter reaches the limit', function () {
+    expect($this->limiter->isExhausted(1, RATE_TS, 1))->toBeNull();
+
+    $this->limiter->charge(1, 4, RATE_TS);
+    expect($this->limiter->isExhausted(1, RATE_TS, 1))->toBeNull();
+
+    $this->limiter->charge(1, 1, RATE_TS);
+    expect($this->limiter->isExhausted(1, RATE_TS, 1))->toBe(50)
+        ->and($this->limiter->isExhausted(2, RATE_TS, 1))->toBeNull()
+        ->and($this->limiter->isExhausted(1, RATE_TS + 50, 1))->toBeNull()
+        ->and(rateCounter(1))->toBe(5);
+});
+
+it('never charges when checking and ignores a disabled limit', function () {
+    $this->limiter->isExhausted(1, RATE_TS, 1);
+    expect(Cache::has('capture-rate:1:'.intdiv(RATE_TS, 60)))->toBeFalse();
+
+    config(['capture.project_events_per_minute' => 0]);
+    Cache::put('capture-rate:1:'.intdiv(RATE_TS, 60), 999999, 60);
+    expect($this->limiter->isExhausted(1, RATE_TS, 1))->toBeNull();
+});
+
+it('warns about the limit from the early check too, once per window', function () {
+    Log::spy();
+    $this->limiter->charge(1, 4, RATE_TS);
+    $this->limiter->charge(1, 1, RATE_TS);
+
+    foreach (range(1, 3) as $_) {
+        $this->limiter->isExhausted(1, RATE_TS, 7);
+    }
+    $this->limiter->charge(1, 2, RATE_TS);
+
+    Log::shouldHaveReceived('warning')->once()->withArgs(
+        fn (string $message, array $context) => $context === ['project_id' => 1, 'limit' => 5, 'requested' => 7],
+    );
+});
+
+it('fails open when the early check cannot read the cache', function () {
+    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
+    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
+    Cache::forgetDriver();
+    Log::spy();
+
+    expect($this->limiter->isExhausted(1, RATE_TS, 1))->toBeNull();
     Log::shouldHaveReceived('warning')->once();
 });

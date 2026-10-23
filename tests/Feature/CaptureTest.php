@@ -2,6 +2,7 @@
 
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\LimiterOutage;
+use App\Domain\Capture\ProjectRateLimiter;
 use App\Models\Project;
 use App\Providers\AppServiceProvider;
 use Illuminate\Http\Middleware\TrustProxies;
@@ -541,6 +542,12 @@ function rateKey(Project $project, ?int $at = null): string
     return "capture-rate:{$project->id}:".intdiv($at ?? now('UTC')->getTimestamp(), 60);
 }
 
+/** Replaces the project limiter by one whose Retry-After jitter is pinned. */
+function pinRetryJitter(int $seconds): void
+{
+    app()->instance(ProjectRateLimiter::class, new ProjectRateLimiter(fn (): int => $seconds));
+}
+
 function eventBatch(string $key, int $count, string $name = 'e'): array
 {
     return ['api_key' => $key, 'batch' => array_map(fn (int $i) => ['event' => $name, 'distinct_id' => 'u'.$i], range(1, $count))];
@@ -562,6 +569,7 @@ it('accepts requests under the project limit and counts the events', function ()
 });
 
 it('answers 503 rate_limited with Retry-After and produces nothing over the project limit', function () {
+    pinRetryJitter(0);
     Carbon::setTestNow('2026-10-22 12:00:10');
     config(['capture.project_events_per_minute' => 5, 'capture.max_batch_size' => 4]);
 
@@ -616,6 +624,7 @@ it('keeps a limit above max_batch_size as configured', function () {
 });
 
 it('resets the project budget in the next minute window', function () {
+    pinRetryJitter(0);
     Carbon::setTestNow('2026-10-22 12:00:10');
     config(['capture.project_events_per_minute' => 3, 'capture.max_batch_size' => 3]);
 
@@ -653,7 +662,7 @@ it('disables the project limit with zero or a negative value', function (int $li
 })->with([0, -1]);
 
 it('counts only producible messages towards the project limit', function () {
-    config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 4]);
+    config(['capture.project_events_per_minute' => 3, 'capture.max_batch_size' => 4]);
 
     $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
         ['event' => 'good', 'distinct_id' => 'u'],
@@ -711,4 +720,61 @@ it('fails open and warns once when the cache is unavailable for the project limi
 
     expect($this->producer->messages)->toHaveCount(6);
     Log::shouldHaveReceived('warning')->once();
+});
+
+it('adds jitter of up to five seconds to the project Retry-After', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 3, 'capture.max_batch_size' => 3]);
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
+
+    // Real randomness stays within [seconds to the window end, +5]; both the early reject and the charge use it.
+    foreach (range(1, 20) as $_) {
+        $retryAfter = (int) $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->headers->get('Retry-After');
+        expect($retryAfter)->toBeGreaterThanOrEqual(50)->toBeLessThanOrEqual(55);
+    }
+
+    pinRetryJitter(4);
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertHeader('Retry-After', '54');
+});
+
+it('refuses a spent project before normalising and without charging', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 2]);
+    pinRetryJitter(0);
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
+
+    Log::spy();
+    // Every event would be dropped by the normaliser (and logged as such); the early reject never gets there.
+    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [['event' => '', 'distinct_id' => 'u']]])
+        ->assertStatus(503)->assertJsonPath('code', 'rate_limited')->assertHeader('Retry-After', '50');
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertHeader('Retry-After', '50');
+
+    Log::shouldNotHaveReceived('debug');
+    // The only warning is the once-per-window limit notice, not the normaliser's "dropped every event".
+    Log::shouldHaveReceived('warning')->once()->withArgs(
+        fn (string $message, array $context) => $message === 'capture project event rate limit exceeded' && $context['requested'] === 1,
+    );
+    expect((int) Cache::get(rateKey($this->project)))->toBe(2)
+        ->and($this->producer->messages)->toHaveCount(2);
+});
+
+it('does not early-reject another project or the next window', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 2]);
+    $other = Project::factory()->create();
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503);
+
+    $this->postJson('/batch/', eventBatch($other->api_key, 1))->assertOk();
+    Carbon::setTestNow('2026-10-22 12:01:00');
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertOk();
+});
+
+it('does not consult the project limiter for the early reject when the limit is disabled', function () {
+    config(['capture.project_events_per_minute' => 0]);
+    Cache::spy();
+
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
+
+    Cache::shouldNotHaveReceived('get', [rateKey($this->project)]);
 });
