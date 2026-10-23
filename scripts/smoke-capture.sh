@@ -144,13 +144,19 @@ chv() {
   return 1
 }
 
-# Removes the throwaway project by its unique api_key (and its cached key lookups).
+# Removes the throwaway project by its unique api_key. project:delete goes through the model, so the
+# observer also forgets the cached key lookups. "Project not found." means there is nothing left to
+# delete (the old tinker version also treated 0 deleted rows as success).
 delete_project() {
   [[ -n "$KEY" ]] || return 0
   local out
-  out="$(docker compose exec -T app php artisan tinker --execute="\$k = '${KEY}'; app(App\\Domain\\Capture\\ProjectResolver::class)->forget(\$k); \$n = App\\Models\\Project::where('api_key', \$k)->delete(); app(App\\Domain\\Capture\\ProjectResolver::class)->forget(\$k); echo 'deleted='.\$n;" 2>&1)" \
-    && [[ "$out" == *"deleted="* ]] || { echo "WARN: could not delete throwaway project (key ${KEY:0:8}...): ${out:0:200}" >&2; return 1; }
-  KEY=""
+  if out="$(docker compose exec -T app php artisan project:delete "$KEY" 2>&1)" || [[ "$out" == *"Project not found."* ]]; then
+    [[ "$out" != *"may still be accepted"* ]] || echo "WARN: ${out:0:300}" >&2
+    KEY=""
+    return 0
+  fi
+  echo "WARN: could not delete throwaway project (key ${KEY:0:8}...): ${out:0:200}" >&2
+  return 1
 }
 
 cleanup() {
@@ -218,17 +224,19 @@ if chv "SELECT value FROM system.settings WHERE name = 'max_partitions_per_inser
   fi
 fi
 
-# Take only the line that is a well-formed key, so a stray warning cannot hide a project that was created.
-CREATED="$(docker compose exec -T app php artisan project:create "$NAME" --key-only 2>"$TMP/create_err" | tr -d '\r' | grep -E '^phc_[A-Za-z0-9]{43}$' | head -n 1 || true)"
-if [[ -n "$CREATED" ]]; then
+# One JSON line carries id and key. Only a line of exactly that shape counts, so a stray warning cannot
+# hide a project that was created; the key is validated before it is used to delete anything.
+CREATED_JSON="$(docker compose exec -T app php artisan project:create "$NAME" --json 2>"$TMP/create_err" | tr -d '\r' | grep -E '^\{"id":[0-9]+,"api_key":"phc_[A-Za-z0-9]{43}"\}$' | head -n 1 || true)"
+CREATED="$(printf '%s\n' "$CREATED_JSON" | sed -n 's/^.*"api_key":"\(phc_[A-Za-z0-9]\{43\}\)".*$/\1/p')"
+ID_RAW="$(printf '%s\n' "$CREATED_JSON" | sed -n 's/^{"id":\([0-9][0-9]*\),.*$/\1/p')"
+if [[ "$CREATED" =~ ^phc_[A-Za-z0-9]{43}$ ]]; then
   KEY="$CREATED"   # from here on cleanup deletes the project by this key
 else
   fail "could not create throwaway project ($(head -c 200 "$TMP/create_err" | tr '\n' ' '))"
   exit 1
 fi
 
-# The tinker output must be exactly a number before it may reach SQL (a PHP warning on stdout would not be).
-ID_RAW="$(docker compose exec -T app php artisan tinker --execute="echo App\\Models\\Project::where('api_key','${KEY}')->value('id');" 2>/dev/null | tr -d '\r\n' || true)"
+# The id must be exactly a number before it may reach SQL.
 if [[ "$ID_RAW" =~ ^[0-9]+$ ]]; then
   PROJECT_ID="$ID_RAW"
 else
