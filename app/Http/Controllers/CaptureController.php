@@ -38,13 +38,7 @@ final class CaptureController extends Controller
             return $this->error(413, 'payload_too_large', 'Request body is too large');
         }
 
-        // Per-IP limiter for UNAUTHENTICATED outcomes only (decode failure, too many events, no events,
-        // missing/malformed/unknown key). It bounds Postgres and negative-cache load; it does not protect
-        // the key (43 random chars). A request whose key resolves never consults or hits it: behind a proxy
-        // without TRUSTED_PROXIES every client shares one apparent ip, and the SDKs treat a 429 as
-        // permanent data loss, so one abuser must not be able to lock out legitimate senders.
-        // Cost trade-off: a blocked ip is only told 429 after its body was decoded (we must know whether
-        // it carries a valid key first); that work is bounded by the body/structure caps.
+        // Per-IP limiter for UNAUTHENTICATED outcomes only; the policy is in FailureLimiter's docblock.
         $clientIp = (string) $request->ip();
 
         // 2. Decode.
@@ -67,72 +61,75 @@ final class CaptureController extends Controller
         } catch (\Throwable $e) {
             Log::error('capture project lookup failed', ['exception' => $e::class]);
 
-            return $this->error(503, 'service_unavailable', 'Project lookup is unavailable, retry later')
-                ->header('Retry-After', '5');
+            return $this->unavailable('service_unavailable', 'Project lookup is unavailable, retry later', 5);
         }
         if ($projectId === null) {
             return $this->unauthenticated($failures, $clientIp, 401, 'invalid_api_key', 'API key is missing or invalid');
         }
 
-        // 5. Early reject: a project whose window is already spent is refused before normalising up to
-        // max_batch_size events (one cache read, no charge). Only the decode has been paid for.
+        // 5. Reserve the project's event budget before any normalising work, so a spent project costs
+        // only the decode. Whatever is not produced below is released again.
         $now = CarbonImmutable::now('UTC');
-        $exhausted = $projectLimiter->isExhausted($projectId, $now->getTimestamp(), count($payload->events));
-        if ($exhausted !== null) {
-            return $this->rateLimited($exhausted);
-        }
-
-        $sentAt = $this->parseSentAt($payload->sentAt);
-        $ip = $this->ipDisabled($request->query('ip')) ? null : $request->ip();
-
-        $messages = [];
-        $months = [];
-        foreach ($payload->events as $raw) {
-            $message = $normalizer->normalize($raw, $projectId, $now, $sentAt, $ip);
-            if ($message !== null) {
-                $messages[] = $message;
-                $months[substr($message['timestamp'], 0, 7)] = true;
-            }
-        }
-
-        $received = count($payload->events);
-        $dropped = $received - count($messages);
-        if ($dropped === $received) {
-            Log::warning('capture dropped every event of a request', [
-                'project_id' => $projectId,
-                'received' => $received,
-                'dropped' => $dropped,
-            ]);
-        } elseif ($dropped > 0) {
-            Log::debug('capture dropped invalid events', [
-                'project_id' => $projectId,
-                'received' => $received,
-                'dropped' => $dropped,
-            ]);
-        }
-
-        // 6. ClickHouse TOO_MANY_PARTS guard: partitions are monthly.
-        if (count($months) > (int) config('capture.max_months_per_request')) {
-            return $this->error(400, 'too_many_months', 'Events span too many calendar months for one request');
-        }
-
-        // 7. Per-project event rate, counted in producible messages (dropped events cost nothing).
-        $limited = $projectLimiter->charge($projectId, count($messages), $now->getTimestamp());
+        $nowTs = $now->getTimestamp();
+        $reserved = count($payload->events);
+        $limited = $projectLimiter->reserve($projectId, $reserved, $nowTs);
         if ($limited !== null) {
-            return $this->rateLimited($limited);
+            return $this->unavailable('rate_limited', 'Project event rate limit exceeded, retry later', $limited);
         }
 
-        // 8. Produce.
+        $produced = 0;
         try {
+            $sentAt = $this->parseSentAt($payload->sentAt);
+            $ip = $this->ipDisabled($request->query('ip')) ? null : $request->ip();
+
+            $messages = [];
+            $months = [];
+            foreach ($payload->events as $raw) {
+                $message = $normalizer->normalize($raw, $projectId, $now, $sentAt, $ip);
+                if ($message !== null) {
+                    $messages[] = $message;
+                    $months[substr($message['timestamp'], 0, 7)] = true;
+                }
+            }
+
+            $dropped = $reserved - count($messages);
+            if ($dropped === $reserved) {
+                Log::warning('capture dropped every event of a request', [
+                    'project_id' => $projectId,
+                    'received' => $reserved,
+                    'dropped' => $dropped,
+                ]);
+            } elseif ($dropped > 0) {
+                Log::debug('capture dropped invalid events', [
+                    'project_id' => $projectId,
+                    'received' => $reserved,
+                    'dropped' => $dropped,
+                ]);
+            }
+
+            // 6. ClickHouse TOO_MANY_PARTS guard: partitions are monthly.
+            if (count($months) > (int) config('capture.max_months_per_request')) {
+                return $this->error(400, 'too_many_months', 'Events span too many calendar months for one request');
+            }
+
+            // 7. Produce.
             if ($messages !== []) {
                 $producer->produce($messages);
             }
-        } catch (ProducerUnavailable) {
-            return $this->error(503, 'service_unavailable', 'Event pipeline is unavailable, retry later')
-                ->header('Retry-After', (string) max(1, (int) ceil((float) config('capture.kafka_breaker_cooldown_seconds'))));
-        }
+            $produced = count($messages);
 
-        return response()->json(['status' => 1]);
+            return response()->json(['status' => 1]);
+        } catch (ProducerUnavailable) {
+            return $this->unavailable(
+                'service_unavailable',
+                'Event pipeline is unavailable, retry later',
+                max(1, (int) ceil((float) config('capture.kafka_breaker_cooldown_seconds'))),
+            );
+        } finally {
+            // Only what was produced stays counted: dropped events, a rejected request and a Kafka outage
+            // (which clients retry) give their reservation back.
+            $projectLimiter->release($projectId, $reserved - $produced, $nowTs);
+        }
     }
 
     private function ipDisabled(mixed $value): bool
@@ -148,8 +145,7 @@ final class CaptureController extends Controller
     {
         $retryAfter = $failures->blockedFor($ip);
         if ($retryAfter !== null) {
-            return $this->error(429, 'too_many_requests', 'Too many failed attempts, retry later')
-                ->header('Retry-After', (string) $retryAfter);
+            return $this->unavailable('too_many_requests', 'Too many failed attempts, retry later', $retryAfter, 429);
         }
 
         $failures->record($ip);
@@ -170,10 +166,10 @@ final class CaptureController extends Controller
         }
     }
 
-    private function rateLimited(int $retryAfter): JsonResponse
+    /** A retryable error (503, or 429 for the per-ip limit) with its Retry-After. */
+    private function unavailable(string $code, string $detail, int $retryAfter, int $status = 503): JsonResponse
     {
-        return $this->error(503, 'rate_limited', 'Project event rate limit exceeded, retry later')
-            ->header('Retry-After', (string) $retryAfter);
+        return $this->error($status, $code, $detail)->header('Retry-After', (string) $retryAfter);
     }
 
     private function error(int $status, string $code, string $detail): JsonResponse

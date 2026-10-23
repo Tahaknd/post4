@@ -34,6 +34,12 @@ final class LimiterOutage
         }
     }
 
+    /** @internal Test seam: forgets the last warning so the next failure logs again. */
+    public static function reset(): void
+    {
+        self::$lastWarningAt = 0;
+    }
+
     private static function warn(\Throwable $e): void
     {
         $now = time();

@@ -8,24 +8,38 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Per-project ingest cap: producible events per fixed one-minute window (see config/capture.php).
- * Fails open if the cache is down.
+ * Per-project ingest cap: events per fixed one-minute window (see config/capture.php). A request first
+ * reserve()s its event count, and release()s whatever it did not end up producing. Fails open if the
+ * cache is down.
  */
 final class ProjectRateLimiter
 {
+    /** Length of a counter window; the counter key lives twice as long so a late increment still lands. */
+    private const WINDOW_SECONDS = 60;
+
     /** Upper bound (inclusive) of the random seconds added to Retry-After so limited clients do not return together. */
     private const RETRY_JITTER_MAX_SECONDS = 5;
 
     /**
-     * INCRBY, set the ttl when the key has none, and refund the charge when it went over the limit, in one
-     * atomic step. Returns the counter value after the increment and before the refund, so the caller
+     * INCRBY, set the ttl when the key has none, and refund the reservation when it went over the limit, in
+     * one atomic step. Returns the counter value after the increment and before the refund, so the caller
      * tells rejected (> limit) from allowed. KEYS[1] counter; ARGV[1] count, ARGV[2] ttl, ARGV[3] limit.
      */
-    private const REDIS_CHARGE_SCRIPT = <<<'LUA'
+    private const REDIS_RESERVE_SCRIPT = <<<'LUA'
 local t = redis.call('INCRBY', KEYS[1], ARGV[1])
 if redis.call('TTL', KEYS[1]) < 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
 if t > tonumber(ARGV[3]) then redis.call('DECRBY', KEYS[1], ARGV[1]) end
 return t
+LUA;
+
+    /**
+     * DECRBY that never leaves the counter below zero, keeping the key's ttl. A key that is gone (or was
+     * over-released) is deleted rather than recreated at 0 without an expiry. KEYS[1] counter; ARGV[1] count.
+     */
+    private const REDIS_RELEASE_SCRIPT = <<<'LUA'
+local v = redis.call('DECRBY', KEYS[1], ARGV[1])
+if v < 0 then redis.call('DEL', KEYS[1]); v = 0 end
+return v
 LUA;
 
     /** @var Closure(): int */
@@ -38,34 +52,28 @@ LUA;
     }
 
     /**
-     * Charges $count events to the project's window. Returns null when they fit; otherwise the charge
-     * is taken back (so rejected retries do not eat the budget) and the Retry-After seconds (time to the
-     * window end plus jitter) are returned.
-     *
-     * A request without producible events (count 0) is never charged or rejected here. Note that
-     * isExhausted() runs before normalisation and cannot know the count, so such a request is still
-     * refused while the budget is spent; CPU protection for flooding with undecodable or all-dropped
-     * bodies belongs at the reverse proxy.
+     * Reserves $count events in the project's window. Returns null when they fit; otherwise the
+     * reservation is taken back (so rejected retries do not eat the budget) and the Retry-After seconds
+     * (time to the window end plus jitter) are returned. Pair it with release() for the part of the
+     * reservation that was not produced.
      *
      * Atomic on every store: one EVAL on Redis, otherwise add + increment (never read-modify-write).
-     * The key carries a capture.project_counter_ttl_seconds ttl so a window outlives its minute and
-     * then disappears.
      */
-    public function charge(int $projectId, int $count, int $nowTs): ?int
+    public function reserve(int $projectId, int $count, int $nowTs): ?int
     {
         $limit = $this->effectiveLimit();
-        if ($limit === null || $count === 0) {
+        if ($limit === null || $count <= 0) {
             return null;
         }
 
-        $window = intdiv($nowTs, 60);
-        $key = $this->key($projectId, $window);
+        $window = intdiv($nowTs, self::WINDOW_SECONDS);
+        $key = "capture-rate:{$projectId}:{$window}";
 
         $rejected = LimiterOutage::guard(function () use ($projectId, $count, $limit, $window, $key): bool {
             $store = Cache::getStore();
             $total = $store instanceof RedisStore
-                ? $this->chargeRedis($store, $key, $count, $limit)
-                : $this->chargeGeneric($key, $count, $limit);
+                ? $this->reserveRedis($store, $key, $count, $limit)
+                : $this->reserveGeneric($key, $count, $limit);
 
             if ($total <= $limit) {
                 return false;
@@ -76,43 +84,42 @@ LUA;
             return true;
         }, false);
 
-        return $rejected ? $this->retryAfter($window, $nowTs) : null;
+        return $rejected ? max(1, ($window + 1) * self::WINDOW_SECONDS - $nowTs) + max(0, ($this->jitter)()) : null;
     }
 
     /**
-     * Cheap pre-check, meant to run before the request is normalised: Retry-After seconds when the
-     * project's counter for this window has already reached the limit, otherwise null. It reads only
-     * (one cache get) and never charges. $requested is the number of events in the request and only
-     * feeds the once-per-window warning. Fails open.
+     * Gives back $count events that were reserved but not produced (dropped, or never sent). $nowTs must be
+     * the timestamp of the reservation, so the same window is addressed. The counter never goes below
+     * zero. Best effort: a cache failure only means the window keeps the over-count until it ends.
      */
-    public function isExhausted(int $projectId, int $nowTs, int $requested): ?int
+    public function release(int $projectId, int $count, int $nowTs): void
     {
-        $limit = $this->effectiveLimit();
-        if ($limit === null) {
-            return null;
+        if ($count <= 0 || $this->effectiveLimit() === null) {
+            return;
         }
 
-        $window = intdiv($nowTs, 60);
+        $key = "capture-rate:{$projectId}:".intdiv($nowTs, self::WINDOW_SECONDS);
 
-        $exhausted = LimiterOutage::guard(function () use ($projectId, $requested, $limit, $window): bool {
-            $current = Cache::get($this->key($projectId, $window));
-            if (! is_numeric($current) || (int) $current < $limit) {
-                return false;
+        LimiterOutage::guard(function () use ($key, $count): void {
+            $store = Cache::getStore();
+            if ($store instanceof RedisStore) {
+                $store->connection()->eval(self::REDIS_RELEASE_SCRIPT, 1, $store->getPrefix().$key, $count);
+
+                return;
             }
 
-            $this->warnOnce($projectId, $window, $limit, $requested);
-
-            return true;
-        }, false);
-
-        return $exhausted ? $this->retryAfter($window, $nowTs) : null;
+            $left = Cache::decrement($key, $count);
+            if (is_int($left) && $left < 0) {
+                Cache::increment($key, -$left);
+            }
+        });
     }
 
     /** One EVAL; returns the counter after the increment (before a refund). */
-    private function chargeRedis(RedisStore $store, string $key, int $count, int $limit): int
+    private function reserveRedis(RedisStore $store, string $key, int $count, int $limit): int
     {
         $total = $store->connection()->eval(
-            self::REDIS_CHARGE_SCRIPT, 1, $store->getPrefix().$key, $count, max(1, $this->counterTtl()), $limit,
+            self::REDIS_RESERVE_SCRIPT, 1, $store->getPrefix().$key, $count, $this->counterTtl(), $limit,
         );
         if (! is_int($total)) {
             throw new \UnexpectedValueException('project rate counter script did not return an integer');
@@ -122,7 +129,7 @@ LUA;
     }
 
     /** Portable path for the other stores (array, database, ...); returns the counter after the increment. */
-    private function chargeGeneric(string $key, int $count, int $limit): int
+    private function reserveGeneric(string $key, int $count, int $limit): int
     {
         Cache::add($key, 0, $this->counterTtl());
         $total = Cache::increment($key, $count);
@@ -148,11 +155,6 @@ LUA;
         }
     }
 
-    private function retryAfter(int $window, int $nowTs): int
-    {
-        return max(1, ($window + 1) * 60 - $nowTs) + max(0, ($this->jitter)());
-    }
-
     /** Null when the limiter is disabled. */
     private function effectiveLimit(): ?int
     {
@@ -167,11 +169,6 @@ LUA;
 
     private function counterTtl(): int
     {
-        return (int) config('capture.project_counter_ttl_seconds');
-    }
-
-    private function key(int $projectId, int $window): string
-    {
-        return "capture-rate:{$projectId}:{$window}";
+        return 2 * self::WINDOW_SECONDS;
     }
 }

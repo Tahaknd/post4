@@ -53,7 +53,8 @@ final class FailureLimiter
 
     private function normalise(string $ip): string
     {
-        $packed = @inet_pton($ip);
+        // A NUL byte makes inet_pton throw a ValueError (unreachable through Request::ip(), cheap to rule out).
+        $packed = str_contains($ip, "\0") ? false : @inet_pton($ip);
         if ($packed === false) {
             return 'unknown';
         }

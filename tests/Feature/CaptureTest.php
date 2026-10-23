@@ -23,7 +23,7 @@ beforeEach(function () {
 
 afterEach(function () {
     TrustProxies::flushState();
-    (new ReflectionProperty(LimiterOutage::class, 'lastWarningAt'))->setValue(null, 0);
+    LimiterOutage::reset();
 });
 
 /** The trusted proxies are applied when the provider boots, so re-boot it after changing the config. */
@@ -661,7 +661,7 @@ it('disables the project limit with zero or a negative value', function (int $li
         ->and(Cache::has(rateKey($this->project)))->toBeFalse();
 })->with([0, -1]);
 
-it('counts only producible messages towards the project limit', function () {
+it('keeps only the producible messages counted and releases the dropped events', function () {
     config(['capture.project_events_per_minute' => 3, 'capture.max_batch_size' => 4]);
 
     $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
@@ -672,21 +672,49 @@ it('counts only producible messages towards the project limit', function () {
     ]])->assertOk();
     expect((int) Cache::get(rateKey($this->project)))->toBe(2);
 
-    // A request in which every event was dropped costs nothing and is not rejected.
+    // A request in which every event was dropped is reserved, fully released and answered 200 as before.
     $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [['event' => '', 'distinct_id' => 'u']]])->assertOk();
     expect((int) Cache::get(rateKey($this->project)))->toBe(2)
         ->and($this->producer->messages)->toHaveCount(2);
 });
 
-it('does not charge the project budget for requests rejected before production', function () {
+it('releases the whole reservation when the request spans too many months', function () {
     config(['capture.project_events_per_minute' => 100, 'capture.max_months_per_request' => 1]);
+    $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
 
     $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
         ['event' => 'a', 'distinct_id' => 'u', 'timestamp' => '2024-01-05T00:00:00Z'],
         ['event' => 'b', 'distinct_id' => 'u', 'timestamp' => '2024-03-05T00:00:00Z'],
     ]])->assertStatus(400)->assertJsonPath('code', 'too_many_months');
 
-    expect(Cache::has(rateKey($this->project)))->toBeFalse();
+    expect((int) Cache::get(rateKey($this->project)))->toBe(3);
+});
+
+it('releases the whole reservation when the event pipeline is unavailable', function () {
+    config(['capture.project_events_per_minute' => 5, 'capture.max_batch_size' => 4]);
+    $this->producer->fail = true;
+
+    // Retried batches during a Kafka outage must not burn the project's budget.
+    $this->postJson('/batch/', eventBatch($this->key, 4))->assertStatus(503)->assertJsonPath('code', 'service_unavailable');
+    $this->postJson('/batch/', eventBatch($this->key, 4))->assertStatus(503)->assertJsonPath('code', 'service_unavailable');
+    expect((int) Cache::get(rateKey($this->project)))->toBe(0);
+
+    $this->producer->fail = false;
+    $this->postJson('/batch/', eventBatch($this->key, 4))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertOk();
+    expect((int) Cache::get(rateKey($this->project)))->toBe(5)
+        ->and($this->producer->messages)->toHaveCount(5);
+});
+
+it('releases the reservation when normalising throws unexpectedly', function () {
+    config(['capture.project_events_per_minute' => 10]);
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
+    $this->producer->failWith = new RuntimeException('boom');
+
+    $this->withoutExceptionHandling();
+    expect(fn () => $this->postJson('/batch/', eventBatch($this->key, 4)))->toThrow(RuntimeException::class);
+
+    expect((int) Cache::get(rateKey($this->project)))->toBe(2);
 });
 
 it('warns once per window and project when the project limit is first exceeded', function () {
@@ -727,7 +755,7 @@ it('adds jitter of up to five seconds to the project Retry-After', function () {
     config(['capture.project_events_per_minute' => 3, 'capture.max_batch_size' => 3]);
     $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
 
-    // Real randomness stays within [seconds to the window end, +5]; both the early reject and the charge use it.
+    // Real randomness stays within [seconds to the window end, +5]; the reservation uses it.
     foreach (range(1, 20) as $_) {
         $retryAfter = (int) $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->headers->get('Retry-After');
         expect($retryAfter)->toBeGreaterThanOrEqual(50)->toBeLessThanOrEqual(55);
@@ -737,14 +765,15 @@ it('adds jitter of up to five seconds to the project Retry-After', function () {
     $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertHeader('Retry-After', '54');
 });
 
-it('refuses a spent project before normalising and without charging', function () {
+it('refuses a spent project before any normalising work and keeps the counter', function () {
     Carbon::setTestNow('2026-10-22 12:00:10');
     config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 2]);
     pinRetryJitter(0);
     $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
 
     Log::spy();
-    // Every event would be dropped by the normaliser (and logged as such); the early reject never gets there.
+    // The normaliser would drop (and log) this event; the reservation is refused before it gets there,
+    // so an all-dropped request is no special case: it is a 503 while the budget is spent.
     $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [['event' => '', 'distinct_id' => 'u']]])
         ->assertStatus(503)->assertJsonPath('code', 'rate_limited')->assertHeader('Retry-After', '50');
     $this->postJson('/batch/', eventBatch($this->key, 1))->assertStatus(503)->assertHeader('Retry-After', '50');
@@ -758,7 +787,27 @@ it('refuses a spent project before normalising and without charging', function (
         ->and($this->producer->messages)->toHaveCount(2);
 });
 
-it('does not early-reject another project or the next window', function () {
+it('rejects a batch that no longer fits without normalising it, even with mixed batch sizes', function () {
+    Carbon::setTestNow('2026-10-22 12:00:10');
+    config(['capture.project_events_per_minute' => 10, 'capture.max_batch_size' => 7]);
+    $this->postJson('/batch/', eventBatch($this->key, 7))->assertOk();
+    $this->postJson('/batch/', eventBatch($this->key, 2))->assertOk();
+    expect((int) Cache::get(rateKey($this->project)))->toBe(9);
+
+    Log::spy();
+    // One of the two events is invalid: normalising would log the drop. 2 > 1 left, so it is rejected up front.
+    $this->postJson('/batch/', ['api_key' => $this->key, 'batch' => [
+        ['event' => 'good', 'distinct_id' => 'u'],
+        ['event' => '', 'distinct_id' => 'u'],
+    ]])->assertStatus(503)->assertJsonPath('code', 'rate_limited');
+    Log::shouldNotHaveReceived('debug');
+
+    expect((int) Cache::get(rateKey($this->project)))->toBe(9);
+    $this->postJson('/batch/', eventBatch($this->key, 1))->assertOk();
+    expect((int) Cache::get(rateKey($this->project)))->toBe(10);
+});
+
+it('keeps rejecting per project and per window only', function () {
     Carbon::setTestNow('2026-10-22 12:00:10');
     config(['capture.project_events_per_minute' => 2, 'capture.max_batch_size' => 2]);
     $other = Project::factory()->create();
@@ -770,11 +819,13 @@ it('does not early-reject another project or the next window', function () {
     $this->postJson('/batch/', eventBatch($this->key, 1))->assertOk();
 });
 
-it('does not consult the project limiter for the early reject when the limit is disabled', function () {
+it('does not touch the counter at all when the project limit is disabled', function () {
     config(['capture.project_events_per_minute' => 0]);
     Cache::spy();
 
     $this->postJson('/batch/', eventBatch($this->key, 3))->assertOk();
 
-    Cache::shouldNotHaveReceived('get', [rateKey($this->project)]);
+    Cache::shouldNotHaveReceived('increment');
+    Cache::shouldNotHaveReceived('decrement');
+    Cache::shouldNotHaveReceived('add');
 });

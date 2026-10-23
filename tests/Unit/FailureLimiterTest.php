@@ -11,7 +11,7 @@ beforeEach(function () {
 });
 
 afterEach(function () {
-    (new ReflectionProperty(LimiterOutage::class, 'lastWarningAt'))->setValue(null, 0);
+    LimiterOutage::reset();
 });
 
 it('uses an IPv4 address as its own key', function () {
@@ -41,7 +41,7 @@ it('only treats the ::ffff:0:0/96 range as IPv4-mapped', function () {
 
 it('maps empty and unparseable ips to one constant key', function (string $ip) {
     expect($this->limiter->key($ip))->toBe('capture-auth-fail:unknown');
-})->with(['', 'not-an-ip', '999.1.1.1', '1.2.3', 'fe80::1%eth0']);
+})->with(['', 'not-an-ip', '999.1.1.1', '1.2.3', 'fe80::1%eth0', "1.2.3.4\0", "\0"]);
 
 it('is not blocked until the limit is reached, then reports a retry delay', function () {
     expect($this->limiter->blockedFor('203.0.113.7'))->toBeNull();
