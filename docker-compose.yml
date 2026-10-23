@@ -31,6 +31,8 @@ x-app: &app
     CLICKHOUSE_DATABASE: posthog
     CLICKHOUSE_USER: posthog
     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-posthog}
+    CLICKHOUSE_RO_USER: ${CLICKHOUSE_RO_USER:-posthog_ro}
+    CLICKHOUSE_RO_PASSWORD: ${CLICKHOUSE_RO_PASSWORD:-posthog_ro}
   volumes:
     - app-storage:/app/storage
 
@@ -146,6 +148,9 @@ services:
       CLICKHOUSE_USER: posthog
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-posthog}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      # Read by 20-readonly-user.xml (from_env). Explicit non-empty default: an empty value would be
+      # accepted as an EMPTY PASSWORD for the read-only user.
+      CLICKHOUSE_RO_PASSWORD: ${CLICKHOUSE_RO_PASSWORD:-posthog_ro}
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       # Single-file bind mount: it follows the inode, so after editing or pulling the file run
@@ -154,6 +159,13 @@ services:
       - type: bind
         source: ./docker/clickhouse/users.d/10-ingest-settings.xml
         target: /etc/clickhouse-server/users.d/10-ingest-settings.xml
+        read_only: true
+        bind:
+          create_host_path: false
+      # Same mechanics for the read-only user and its ro_insights profile (20-readonly-user.xml).
+      - type: bind
+        source: ./docker/clickhouse/users.d/20-readonly-user.xml
+        target: /etc/clickhouse-server/users.d/20-readonly-user.xml
         read_only: true
         bind:
           create_host_path: false

@@ -1,0 +1,116 @@
+<clickhouse>
+    <!--
+        Read-only user for the query layer (one file per concern; mounted as a single file because the
+        image entrypoint writes generated user files into /etc/clickhouse-server/users.d/).
+
+        WHAT
+        `posthog_ro` may only SELECT from the `posthog` database. The application's insight queries (the
+        ProjectScopedReader / ReadOnlyClickHouseClient) connect as this user, so a bug or a hostile query
+        built there cannot write, alter, drop, read files or URLs, or look at system tables. Tenant
+        isolation (project_id) is NOT enforced here; that is the job of ProjectScopedReader. This user only
+        limits the blast radius to SELECT on posthog.*.
+
+        PROFILE NAME
+        The profile is called `ro_insights` and NOT `readonly`: the stock users.xml already defines a
+        profile named `readonly` (readonly=1), and a same-named profile here would be merged with it
+        instead of replacing it.
+
+        WHY readonly=2 (and not 1)
+        readonly=1 forbids changing ANY setting, which includes the URL arguments the HTTP client sends
+        (default_format, wait_end_of_query, database). readonly=2 allows changing settings but never
+        `readonly` itself, and the constraints below bound every limit that matters: a query may LOWER
+        a limit or pass a benign setting, but cannot raise a limit above the profile maximum.
+
+        LIMITS (sized for a roughly 2 GB box that also runs Kafka, Postgres and the app)
+        max_execution_time 20 s (cap 30): the app's HTTP timeout is set a few seconds above it, so the
+        server cancels cleanly. max_memory_usage 1 GB per query: half the box in the worst case, but the
+        server wide max_server_memory_usage_to_ram_ratio still caps the sum, and a query that needs more
+        than 1 GB is a bad query (builders must aggregate and use LIMIT). max_threads 4 keeps one query
+        from taking every core. max_result_rows 100000 with result_overflow_mode throw protects PHP's
+        memory (128 MB) from an unbounded result. max_rows_to_read and max_bytes_to_read are backstops
+        against full scans of a huge table, they throw instead of returning a silently truncated answer.
+
+        Spilling to disk (external GROUP BY / sort) is switched off and pinned, so a heavy query hits
+        max_memory_usage and fails instead of writing temp files to the (small) Docker disk.
+        max_temp_data_on_disk_size_for_query is a server level setting on 25.8, not a profile setting.
+
+        WHY EVERY CONSTRAINT HAS min 1
+        For these settings 0 means UNLIMITED, and 0 is numerically below any max, so a bare max
+        constraint would let a query pass `max_execution_time = 0` or `max_result_rows = 0` and switch the
+        limit off (verified on 25.8). min 1 closes that hole; the client may still lower a limit.
+
+        stream_like_engine_allow_direct_select is pinned to 0: SELECT on posthog.* includes the Kafka
+        engine table, and a direct SELECT from it would consume messages away from the ingest consumer.
+
+        PASSWORD
+        `from_env` reads the password from the CLICKHOUSE_RO_PASSWORD environment variable of the
+        clickhouse container (compose passes it, default posthog_ro). The server fails to load the
+        config if the variable is missing, and an empty value would mean an EMPTY PASSWORD, so keep the
+        explicit default in docker-compose.yml. Change it before the first public start.
+
+        NOTE ON COMMANDS
+        XML comments cannot contain two consecutive hyphens, so long options below are written with a
+        space after the first hyphen: read '- -force-recreate' as two hyphens followed by force-recreate.
+
+        HOW TO APPLY
+        This is a SINGLE-FILE bind mount, which follows the inode. Editing the file in place (sed -i,
+        most editors) or `git pull` / checkout (unlink + create) is NOT picked up by
+        `docker compose up -d`. Run:
+            docker compose up -d - -force-recreate clickhouse
+        (also after changing CLICKHOUSE_RO_PASSWORD; the account is defined in this file, not in the
+        data volume, so no migration is needed).
+    -->
+    <profiles>
+        <ro_insights>
+            <readonly>2</readonly>
+            <max_execution_time>20</max_execution_time>
+            <timeout_overflow_mode>throw</timeout_overflow_mode>
+            <max_memory_usage>1000000000</max_memory_usage>
+            <max_threads>4</max_threads>
+            <max_result_rows>100000</max_result_rows>
+            <max_result_bytes>268435456</max_result_bytes>
+            <result_overflow_mode>throw</result_overflow_mode>
+            <max_rows_to_read>1000000000</max_rows_to_read>
+            <max_bytes_to_read>64000000000</max_bytes_to_read>
+            <read_overflow_mode>throw</read_overflow_mode>
+            <max_bytes_before_external_group_by>0</max_bytes_before_external_group_by>
+            <max_bytes_ratio_before_external_group_by>0</max_bytes_ratio_before_external_group_by>
+            <max_bytes_before_external_sort>0</max_bytes_before_external_sort>
+            <max_bytes_ratio_before_external_sort>0</max_bytes_ratio_before_external_sort>
+            <stream_like_engine_allow_direct_select>0</stream_like_engine_allow_direct_select>
+
+            <constraints>
+                <readonly><const/></readonly>
+                <max_execution_time><min>1</min><max>30</max></max_execution_time>
+                <timeout_overflow_mode><const/></timeout_overflow_mode>
+                <max_memory_usage><min>1</min><max>1000000000</max></max_memory_usage>
+                <max_threads><min>1</min><max>4</max></max_threads>
+                <max_result_rows><min>1</min><max>100000</max></max_result_rows>
+                <max_result_bytes><min>1</min><max>268435456</max></max_result_bytes>
+                <result_overflow_mode><const/></result_overflow_mode>
+                <max_rows_to_read><min>1</min><max>1000000000</max></max_rows_to_read>
+                <max_bytes_to_read><min>1</min><max>64000000000</max></max_bytes_to_read>
+                <read_overflow_mode><const/></read_overflow_mode>
+                <max_bytes_before_external_group_by><const/></max_bytes_before_external_group_by>
+                <max_bytes_ratio_before_external_group_by><const/></max_bytes_ratio_before_external_group_by>
+                <max_bytes_before_external_sort><const/></max_bytes_before_external_sort>
+                <max_bytes_ratio_before_external_sort><const/></max_bytes_ratio_before_external_sort>
+                <stream_like_engine_allow_direct_select><const/></stream_like_engine_allow_direct_select>
+            </constraints>
+        </ro_insights>
+    </profiles>
+
+    <users>
+        <posthog_ro>
+            <password from_env="CLICKHOUSE_RO_PASSWORD"/>
+            <profile>ro_insights</profile>
+            <quota>default</quota>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <grants>
+                <query>GRANT SELECT ON posthog.*</query>
+            </grants>
+        </posthog_ro>
+    </users>
+</clickhouse>
