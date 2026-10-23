@@ -248,10 +248,24 @@ return [
     | chunked body at exactly max_size bytes, so the controller still sees
     | max_body_bytes + 1 and answers 413 instead of a misleading 400.
     |
+    | CADDY_GLOBAL_OPTIONS replaces Octane's own value, so it repeats Octane's
+    | default (auto_https disable_redirects; we never use --https/--http-redirect)
+    | and adds read timeouts: a client has 10 s to send its headers and 30 s to
+    | send the whole body. Without them a slow POST holds an Octane worker
+    | indefinitely. This bounds the starvation to 30 s per connection, it does
+    | not remove it (see scripts/smoke-capture.sh --with-slow-post-check).
+    |
     */
 
     'caddy' => [
         'env' => [
+            'CADDY_GLOBAL_OPTIONS' => "auto_https disable_redirects\n"
+                ."\tservers {\n"
+                ."\t\ttimeouts {\n"
+                ."\t\t\tread_header 10s\n"
+                ."\t\t\tread_body 30s\n"
+                ."\t\t}\n"
+                ."\t}",
             'CADDY_SERVER_EXTRA_DIRECTIVES' => "@capture path /e /e/* /batch /batch/* /capture /capture/* /i/*\n"
                 ."\t\trequest_body @capture {\n"
                 ."\t\t\tmax_size 1000001\n"

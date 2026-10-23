@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 
 usage() {
   cat <<'EOF'
-Usage: scripts/smoke-capture.sh [--with-wedge-check] [-h|--help]
+Usage: scripts/smoke-capture.sh [--with-wedge-check] [--with-slow-post-check] [-h|--help]
 
 End-to-end capture smoke test against the running docker compose stack.
 
@@ -29,6 +29,15 @@ Options:
                     except for the always-on settings check). Timestamps are the first day of each
                     month at 12:00Z; the server clamp allows 2000-01-01 .. now+366d, we only use
                     months up to the current one
+  --with-slow-post-check
+                    open (Octane workers + 2) raw TCP connections to HOST, each announcing a POST /e/
+                    with Content-Length 1000000 and then sending ONE byte per second, poll GET /up for
+                    ~12 s meanwhile, and assert that the server closes every slow connection within 40 s
+                    (the Caddy read timeout is 30 s). PASSES only on that closing. The /up responsiveness
+                    while the connections are open is reported as an informational INFO line, not
+                    asserted: the timeout bounds the starvation to ~30 s, it does not remove it. Also
+                    asserts /up answers again once the connections are gone. Takes ~45 s, uses no
+                    project and sends no events (opt-in; the default run is unchanged)
 
 Environment:
   HOST              capture endpoint, http://localhost[:port] or http://127.0.0.1[:port]
@@ -47,10 +56,12 @@ EOF
 }
 
 WITH_WEDGE=0
+WITH_SLOW=0
 for arg in "$@"; do
   case "$arg" in
     -h | --help) usage; exit 0 ;;
     --with-wedge-check) WITH_WEDGE=1 ;;
+    --with-slow-post-check) WITH_SLOW=1 ;;
     *) echo "unknown argument: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -99,6 +110,7 @@ FAILED=0
 HTTP_CODE="000"
 HTTP_BODY=""
 CH_OUT=""
+SLOW_PIDS=()
 
 pass() { PASSED=$((PASSED + 1)); echo "PASS: $1"; }
 fail() { FAILED=$((FAILED + 1)); echo "FAIL: $1"; }
@@ -141,7 +153,11 @@ cleanup() {
   set +e
   # Project first, so no new events are accepted for it; then give Kafka a moment to drain what is in
   # flight, then delete only this run's rows (event prefix AND our throwaway project), never TRUNCATE.
-  local had_project=0 left
+  local had_project=0 left pid
+  # Slow-POST connection holders (background subshells): never leave one running.
+  for pid in ${SLOW_PIDS[@]+"${SLOW_PIDS[@]}"}; do
+    kill "$pid" 2>/dev/null
+  done
   [[ -n "$KEY" ]] && had_project=1
   delete_project
   if [[ -n "$PROJECT_ID" ]]; then
@@ -428,6 +444,126 @@ if [[ $WITH_WEDGE -eq 1 ]]; then
   if [[ $FAILED -gt $FAILED_BEFORE_WEDGE ]]; then
     echo "HINT: ingest may be wedged. Check the exceptions in system.kafka_consumers (WHERE database='posthog' AND table='kafka_events');"
     echo "      see the header of docker/clickhouse/users.d/10-ingest-settings.xml for how to recognize it and the reset steps."
+  fi
+fi
+
+# --- (f) opt-in: slow POST bodies must be closed by the Caddy read timeout --------------------------
+# K = Octane workers + 2 connections each announce a 1 MB body (Content-Length 1000000, the largest the
+# request_body cap allows) and then send one byte per second. Every such request holds an Octane worker
+# thread while PHP waits for the body. Caddy's read_body timeout (30 s, config/octane.php) must close them.
+# PASS criterion: every connection is closed by the server within 40 s. What /up does meanwhile is only
+# reported: with K >= workers the pool can be fully tied up until the timeout fires.
+slow_holder() {
+  # slow_holder <index> <host> <port>: writes "<seconds> <how>" to $TMP/slow_<index> when the server hangs up.
+  local idx="$1" h="$2" p="$3" start how rc ch
+  trap '' PIPE
+  if ! exec 3<>"/dev/tcp/$h/$p"; then
+    echo "-1 connect_failed" >"$TMP/slow_$idx"
+    return 1
+  fi
+  start=$SECONDS
+  printf 'POST /e/ HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n' >&3 \
+    || { echo "-1 send_failed" >"$TMP/slow_$idx"; return 1; }
+  while [[ $((SECONDS - start)) -lt 70 ]]; do
+    # A write fails (EPIPE) once the server has hung up; the first write after its FIN only provokes an RST.
+    printf 'a' >&3 2>/dev/null || { how="hung_up"; break; }
+    # read doubles as the one-second pacer. bash 3.2 returns 1 both on timeout and on EOF, so only
+    # "0 = the server sent bytes (its answer)" is told apart here; EOF shows up as a failing write.
+    rc=0
+    # shellcheck disable=SC2034
+    read -r -t 1 -n 1 -u 3 ch || rc=$?
+    if [[ $rc -eq 0 ]]; then how="server_response"; break; fi
+  done
+  echo "$((SECONDS - start)) ${how:-gave_up_70s}" >"$TMP/slow_$idx"
+}
+
+if [[ $WITH_SLOW -eq 1 ]]; then
+  FAILED_BEFORE_SLOW=$FAILED
+  SLOW_HOST="${HOST#http://}"
+  SLOW_PORT=80
+  if [[ "$SLOW_HOST" == *:* ]]; then SLOW_PORT="${SLOW_HOST##*:}"; fi
+  SLOW_HOST="${SLOW_HOST%%:*}"
+  [[ "$SLOW_HOST" == "localhost" ]] && SLOW_HOST="127.0.0.1"   # the published port is bound to IPv4 loopback
+  SLOW_K=0
+  SLOW_WORKERS="$(docker compose exec -T app sh -c 'curl -s localhost:2019/frankenphp/threads' 2>/dev/null | grep -c 'Worker PHP Thread' || true)"
+  [[ "$SLOW_WORKERS" =~ ^[0-9]+$ && "$SLOW_WORKERS" -ge 1 ]] || SLOW_WORKERS=4
+  SLOW_K=$((SLOW_WORKERS + 2))
+
+  UP_BEFORE="$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "$HOST/up" 2>/dev/null || true)"
+  if [[ "$UP_BEFORE" != "200" ]]; then
+    fail "slow-POST check needs a healthy /up first, got HTTP ${UP_BEFORE:-000}"
+  else
+    echo "slow-POST check: ${SLOW_K} connections (${SLOW_WORKERS} Octane workers + 2) to ${SLOW_HOST}:${SLOW_PORT}, 1 byte/s, announced body 1000000 bytes"
+    for ((c = 0; c < SLOW_K; c++)); do
+      slow_holder "$c" "$SLOW_HOST" "$SLOW_PORT" &
+      SLOW_PIDS+=("$!")
+      disown "$!" 2>/dev/null || true
+    done
+    sleep 2   # let the connections establish and take their workers
+
+    up_n=0; up_fail=0; up_max_ms=0; up_slow=0
+    poll_start=$SECONDS
+    while [[ $((SECONDS - poll_start)) -lt 12 ]]; do
+      up_out="$(curl -s -o /dev/null --max-time 5 -w '%{http_code} %{time_total}' "$HOST/up" 2>/dev/null || true)"
+      up_code="${up_out%% *}"
+      up_time="${up_out#* }"
+      up_n=$((up_n + 1))
+      if [[ "$up_code" != "200" ]]; then up_fail=$((up_fail + 1)); fi
+      if [[ "$up_time" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        up_ms=$((10#${up_time%.*} * 1000 + 10#${up_time#*.} / 1000))
+        [[ $up_ms -gt $up_max_ms ]] && up_max_ms=$up_ms
+        [[ $up_ms -gt 1000 ]] && up_slow=$((up_slow + 1))
+      fi
+      sleep 1
+    done
+    if [[ $up_fail -eq 0 && $up_max_ms -le 1000 ]]; then
+      echo "INFO: /up stayed responsive while ${SLOW_K} slow POSTs were open: ${up_n} polls, max ${up_max_ms} ms, 0 failures"
+    else
+      echo "INFO: /up WAS AFFECTED while ${SLOW_K} slow POSTs were open (${SLOW_WORKERS} workers): ${up_n} polls, ${up_fail} failed/timed out (5 s limit), ${up_slow} slower than 1 s, max ${up_max_ms} ms. The read timeout bounds this to ~30 s per connection, it does not remove it"
+    fi
+
+    # Wait for every holder to report that the server closed its connection (limit 40 s since connect).
+    wait_start=$SECONDS
+    closed=0
+    while [[ $((SECONDS - wait_start)) -lt 45 ]]; do
+      closed=0
+      for ((c = 0; c < SLOW_K; c++)); do [[ -s "$TMP/slow_$c" ]] && closed=$((closed + 1)); done
+      [[ $closed -eq SLOW_K ]] && break
+      sleep 1
+    done
+    max_closed=0; bad_close=0; closed_list=""
+    for ((c = 0; c < SLOW_K; c++)); do
+      read -r secs how <"$TMP/slow_$c" 2>/dev/null || { secs=-1; how="no_result"; }
+      closed_list="${closed_list}${secs}s(${how}) "
+      if [[ "$secs" =~ ^[0-9]+$ && "$how" != "gave_up_70s" ]]; then
+        [[ $secs -gt $max_closed ]] && max_closed=$secs
+        [[ $secs -gt 40 ]] && bad_close=$((bad_close + 1))
+      else
+        bad_close=$((bad_close + 1))
+      fi
+    done
+    echo "INFO: connection lifetimes until the server hung up: ${closed_list}"
+    if [[ $bad_close -eq 0 && $closed -eq SLOW_K ]]; then
+      pass "all ${SLOW_K} slow POST connections were closed by the server within 40 s (slowest ${max_closed}s)"
+    else
+      fail "slow POST connections: ${closed}/${SLOW_K} closed, ${bad_close} not closed within 40 s: no read timeout is active (check CADDY_GLOBAL_OPTIONS in config/octane.php, docker compose restart app)"
+    fi
+
+    # The workers must be free again.
+    UP_AFTER="000"
+    for _ in 1 2 3 4 5; do
+      UP_AFTER="$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "$HOST/up" 2>/dev/null || true)"
+      [[ "$UP_AFTER" == "200" ]] && break
+      sleep 1
+    done
+    if [[ "$UP_AFTER" == "200" ]]; then
+      pass "/up answers again after the slow connections were closed"
+    else
+      fail "/up still answers HTTP ${UP_AFTER:-000} after the slow connections were closed"
+    fi
+  fi
+  if [[ $FAILED -gt $FAILED_BEFORE_SLOW ]]; then
+    echo "HINT: see config/octane.php (caddy.env CADDY_GLOBAL_OPTIONS) and: docker compose exec -T app sh -c 'curl -s localhost:2019/config/apps/http/servers/'"
   fi
 fi
 
