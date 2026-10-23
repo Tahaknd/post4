@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Domain\Capture\EventProducer;
+use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\PayloadDecoder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
@@ -10,6 +11,7 @@ use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use App\Infrastructure\Kafka\KafkaEventProducer;
+use App\Infrastructure\Kafka\RdKafkaLagProbe;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -55,6 +57,13 @@ class AppServiceProvider extends ServiceProvider
             messageTimeoutMs: (int) config('capture.kafka_message_timeout_ms'),
             flushTimeoutMs: (int) config('capture.kafka_flush_timeout_ms'),
             breakerCooldownSeconds: (float) config('capture.kafka_breaker_cooldown_seconds'),
+        ));
+
+        $this->app->singleton(KafkaLagProbe::class, fn () => new RdKafkaLagProbe(
+            config('capture.kafka_brokers'),
+            config('capture.events_topic'),
+            config('capture.status.kafka_group'),
+            (int) config('capture.status.kafka_timeout_ms'),
         ));
 
         $this->app->singleton(PayloadDecoder::class, fn () => new PayloadDecoder(

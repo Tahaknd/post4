@@ -38,6 +38,18 @@ return [
      */
     'project_events_per_minute' => (int) env('CAPTURE_PROJECT_EVENTS_PER_MINUTE', 60000),
 
+    /*
+     * `capture:status` thresholds (see App\Domain\Capture\IngestHealth). The two disk knobs exist because a
+     * small dev box can legitimately run below the defaults; production should keep them.
+     */
+    'status' => [
+        'kafka_group' => env('CAPTURE_STATUS_KAFKA_GROUP', 'clickhouse_events'),
+        'kafka_timeout_ms' => 3000,
+        'min_free_percent' => (float) env('CAPTURE_STATUS_MIN_FREE_PERCENT', 10),
+        'min_free_bytes' => (int) env('CAPTURE_STATUS_MIN_FREE_BYTES', 2 * 1024 ** 3),
+        'snapshot_ttl_seconds' => 86400,
+    ],
+
     /* At most one "limiter unavailable, failing open" warning per process per this many seconds, so a Redis outage cannot flood the log. */
     'limiter_warning_interval_seconds' => 60,
 
