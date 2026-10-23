@@ -31,7 +31,6 @@ x-app: &app
     CLICKHOUSE_DATABASE: posthog
     CLICKHOUSE_USER: posthog
     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-posthog}
-    CLICKHOUSE_RO_USER: ${CLICKHOUSE_RO_USER:-posthog_ro}
     CLICKHOUSE_RO_PASSWORD: ${CLICKHOUSE_RO_PASSWORD:-posthog_ro}
   volumes:
     - app-storage:/app/storage
