@@ -182,7 +182,7 @@ it('forgets every key when one instance is re-keyed twice inside one transaction
     $b = Project::generateApiKey();
     $c = Project::generateApiKey();
     foreach ([$a, $b, $c] as $key) {
-        Cache::put('project_id_by_key:'.$key, $project->id, 300);
+        Cache::put('project_id_by_key:'.$key, $project->id, ProjectResolver::POSITIVE_TTL_SECONDS);
     }
 
     DB::transaction(function () use ($project, $b, $c) {
