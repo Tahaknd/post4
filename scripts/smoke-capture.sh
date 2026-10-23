@@ -121,15 +121,18 @@ fail() { FAILED=$((FAILED + 1)); echo "FAIL: $1"; }
 
 # ClickHouse client run inside the container with the container's own CLICKHOUSE_USER / CLICKHOUSE_PASSWORD
 # (the client reads them from its environment), so no password appears on any argv.
+# ch_run <clickhouse-client args...> is the general form; ch <query> is the 30 s-limited shortcut.
 # SC2016 is intended: the single-quoted script is for the container's shell, not for this one.
 # shellcheck disable=SC2016
-ch() {
+ch_run() {
   docker compose exec -T -e CH_FALLBACK_PASSWORD clickhouse sh -c '
     [ -n "${CLICKHOUSE_USER:-}" ] || CLICKHOUSE_USER=posthog
     [ -n "${CLICKHOUSE_PASSWORD:-}" ] || CLICKHOUSE_PASSWORD="$CH_FALLBACK_PASSWORD"
     export CLICKHOUSE_USER CLICKHOUSE_PASSWORD
-    exec clickhouse-client --max_execution_time=30 "$@"' sh --query "$1"
+    exec clickhouse-client "$@"' sh "$@"
 }
+ch() { ch_run --max_execution_time=30 --query "$1"; }
+
 
 # chv <query>: result in CH_OUT; a failing query is reported through fail and returns 1.
 chv() {
@@ -157,7 +160,7 @@ cleanup() {
   set +e
   # Project first, so no new events are accepted for it; then give Kafka a moment to drain what is in
   # flight, then delete only this run's rows (event prefix AND our throwaway project), never TRUNCATE.
-  local had_project=0 left pid
+  local had_project=0 left pid del_ok pending
   # Slow-POST connection holders (background subshells): never leave one running.
   for pid in ${SLOW_PIDS[@]+"${SLOW_PIDS[@]}"}; do
     kill "$pid" 2>/dev/null
@@ -166,10 +169,24 @@ cleanup() {
   delete_project
   if [[ -n "$PROJECT_ID" ]]; then
     sleep 3
-    ch "DELETE FROM posthog.events WHERE event LIKE 'smoke\\\\_%' AND project_id = ${PROJECT_ID}" >/dev/null 2>&1 \
-      || echo "WARN: could not delete smoke rows from posthog.events" >&2
-    left="$(ch "SELECT count() FROM posthog.events WHERE event LIKE 'smoke\\\\_%' AND project_id = ${PROJECT_ID}" 2>/dev/null)"
-    [[ "$left" == "0" ]] || echo "WARN: ${left:-?} smoke rows still in posthog.events for project ${PROJECT_ID}" >&2
+    # The lightweight DELETE normally waits for its mutation (lightweight_deletes_sync=2) and the client's
+    # 30 s limit used to cancel that WAIT on a slow disk although the mutation itself completes. So submit
+    # it asynchronously (sync=0, no client time limit) and verify by polling the remaining count.
+    del_ok=1
+    ch_run --lightweight_deletes_sync=0 --max_execution_time=120 \
+      --query "DELETE FROM posthog.events WHERE event LIKE 'smoke\\\\_%' AND project_id = ${PROJECT_ID}" >/dev/null 2>&1 \
+      || del_ok=0
+    left=""
+    for _ in $(seq 1 30); do
+      # A transient query error counts as "not verified yet", never as 0.
+      left="$(ch "SELECT count() FROM posthog.events WHERE event LIKE 'smoke\\\\_%' AND project_id = ${PROJECT_ID}" 2>/dev/null || true)"
+      [[ "$left" == "0" ]] && break
+      sleep 2
+    done
+    if [[ "$left" != "0" ]]; then
+      pending="$(ch "SELECT count() FROM system.mutations WHERE database = 'posthog' AND \`table\` = 'events' AND NOT is_done" 2>/dev/null || true)"
+      echo "WARN: ${left:-?} smoke rows still in posthog.events for project ${PROJECT_ID} after 60 s$([[ $del_ok -eq 1 ]] || echo ' (the DELETE itself was not accepted)'); unfinished mutations on posthog.events: ${pending:-?} (a pending mutation will remove them when it completes)" >&2
+    fi
   elif [[ $had_project -eq 1 ]]; then
     echo "WARN: project id unknown, no ClickHouse rows deleted (event prefix ${MARK})" >&2
   fi
