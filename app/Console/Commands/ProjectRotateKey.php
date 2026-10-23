@@ -17,14 +17,14 @@ class ProjectRotateKey extends Command
         $id = (string) $this->argument('id');
         // Anything else (or a value beyond bigint) would reach Postgres as a query error.
         if (! ctype_digit($id) || strlen($id) > 18) {
-            $this->error('Geçersiz proje kimliği.');
+            $this->getOutput()->getErrorStyle()->error('Geçersiz proje kimliği.');
 
             return self::FAILURE;
         }
 
         $project = Project::find($id);
         if ($project === null) {
-            $this->error('Proje bulunamadı.');
+            $this->getOutput()->getErrorStyle()->error('Proje bulunamadı.');
 
             return self::FAILURE;
         }

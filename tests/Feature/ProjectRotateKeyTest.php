@@ -3,9 +3,8 @@
 use App\Domain\Capture\ProjectResolver;
 use App\Models\Project;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Tests\Support\FailingCacheStore;
+use Tests\Support\ProjectCache;
 
 it('rotates the key so the old one stops resolving even when cached', function () {
     $project = Project::factory()->create();
@@ -61,8 +60,7 @@ it('rejects an id too long for a bigint', function () {
 it('still prints the new key when the cache cannot be cleared', function () {
     $project = Project::factory()->create();
     $old = $project->api_key;
-    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
-    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
+    ProjectCache::breakStore();
 
     expect(Artisan::call('project:rotate-key', ['id' => $project->id]))->toBe(0);
 
@@ -73,8 +71,7 @@ it('still prints the new key when the cache cannot be cleared', function () {
 
 it('derives the cache warning duration from the resolver TTL', function () {
     $project = Project::factory()->create();
-    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
-    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
+    ProjectCache::breakStore();
 
     expect(Artisan::call('project:rotate-key', ['id' => $project->id]))->toBe(0);
 

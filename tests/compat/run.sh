@@ -147,17 +147,27 @@ run_errors_where() {
 }
 
 # Removes the throwaway project by its unique api_key. project:delete goes through the model, so the
-# observer also forgets the cached key lookups. "Project not found." means there is nothing left to
-# delete (the old tinker version also treated 0 deleted rows as success).
+# observer also forgets the cached key lookups. The decision rests on the documented exit codes only:
+# 0 deleted and 3 unknown key (nothing left to delete) are both success; anything else is a failure.
+# On exit 0, anything on stderr is the command's cache-clearing warning and is echoed as WARN.
 delete_project() {
   [[ -n "$KEY" ]] || return 0
-  local out
-  if out="$(docker compose exec -T app php artisan project:delete "$KEY" 2>&1)" || [[ "$out" == *"Project not found."* ]]; then
-    [[ "$out" != *"may still be accepted"* ]] || echo "WARN: ${out:0:300}" >&2
-    KEY=""
-    return 0
-  fi
-  echo "WARN: could not delete throwaway project (key ${KEY:0:8}...): ${out:0:200}" >&2
+  local out rc=0
+  out="$(docker compose exec -T app php artisan project:delete "$KEY" --force 2>"$TMP/delete_err")" || rc=$?
+  case "$rc" in
+    0)
+      if [[ -s "$TMP/delete_err" ]]; then
+        echo "WARN: project:delete reported: $(head -c 300 "$TMP/delete_err" | tr '\n' ' ')" >&2
+      fi
+      KEY=""
+      return 0
+      ;;
+    3)
+      KEY=""
+      return 0
+      ;;
+  esac
+  echo "WARN: could not delete throwaway project (key ${KEY:0:8}..., exit $rc): $(printf '%s %s' "$out" "$(head -c 200 "$TMP/delete_err" 2>/dev/null)" | head -c 200 | tr '\n' ' ')" >&2
   return 1
 }
 
@@ -266,6 +276,7 @@ fi
 # The id must be exactly a number before it may reach SQL.
 if [[ "$ID_RAW" =~ ^[0-9]+$ ]]; then
   PROJECT_ID="$ID_RAW"
+  echo "INFO: project #$PROJECT_ID $NAME"
 else
   fail "could not read throwaway project id (got '${ID_RAW:0:100}')"
   exit 1

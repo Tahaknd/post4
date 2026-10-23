@@ -8,24 +8,43 @@ use Illuminate\Console\Command;
 
 class ProjectDelete extends Command
 {
-    protected $signature = 'project:delete {api_key : API key of the project to delete} {--force : Accepted for scripts; there is never a prompt}';
+    /** Exit code for a well-formed API key that matches no project (scripts treat it as "already gone"). */
+    public const NOT_FOUND = 3;
 
-    protected $description = 'Deletes a project by API key, immediately and without a prompt (its ClickHouse events are kept)';
+    protected $signature = 'project:delete {api_key : API key of the project to delete} {--force : Skip the confirmation prompt (non-interactive runs never prompt)}';
+
+    protected $description = 'Deletes a project by API key (its ClickHouse events are kept). Exit codes: 0 deleted, 1 failure or aborted, 2 invalid key format, 3 unknown key';
+
+    protected $help = <<<'HELP'
+Deletes the project with the given API key. Its events stay in ClickHouse.
+
+An interactive run asks for confirmation unless --force is given; a non-interactive run
+(-n/--no-interaction, docker compose exec -T, a pipe) never prompts.
+
+Exit codes (a stable contract for scripts):
+  0  the project was deleted
+  1  any other failure, or the confirmation was declined
+  2  the API key has an invalid format (nothing was looked up)
+  3  no project has this API key
+Errors and warnings go to stderr; stdout carries only the result.
+HELP;
 
     public function handle(ProjectResolver $resolver): int
     {
         $apiKey = (string) $this->argument('api_key');
         if (preg_match(Project::API_KEY_PATTERN, $apiKey) !== 1) {
-            $this->error('Invalid API key format.');
-
-            return self::FAILURE;
+            return $this->failWith('Invalid API key format.', self::INVALID);
         }
 
         $project = Project::where('api_key', $apiKey)->first();
         if ($project === null) {
-            $this->error('Project not found.');
+            return $this->failWith('Project not found.', self::NOT_FOUND);
+        }
 
-            return self::FAILURE;
+        if (! $this->option('force')
+            && $this->input->isInteractive()
+            && ! $this->confirm("Delete project #{$project->id} \"{$project->name}\"? Its events remain in ClickHouse.", false)) {
+            return $this->failWith('Aborted.', self::FAILURE);
         }
 
         // Through the model (not a query-builder delete) so the observer fires and forgets the cache.
@@ -44,5 +63,13 @@ class ProjectDelete extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /** Errors go to stderr so stdout stays reserved for results. */
+    private function failWith(string $message, int $exitCode): int
+    {
+        $this->getOutput()->getErrorStyle()->error($message);
+
+        return $exitCode;
     }
 }

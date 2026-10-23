@@ -5,23 +5,7 @@ use App\Models\Project;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Exceptions;
-use Tests\Support\FailingCacheStore;
-
-function positiveEntry(string $key): bool
-{
-    return Cache::has('project_id_by_key:'.$key);
-}
-
-function negativeEntry(string $key): bool
-{
-    return Cache::has('project_missing:'.sha1($key));
-}
-
-function breakCache(): void
-{
-    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
-    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
-}
+use Tests\Support\ProjectCache;
 
 it('is registered on the project model', function () {
     new Project; // #[ObservedBy] is resolved when the model boots
@@ -36,11 +20,11 @@ it('drops a negative entry when a project is created with a key that was probed 
     $resolver = app(ProjectResolver::class);
 
     expect($resolver->resolve($key))->toBeNull()
-        ->and(negativeEntry($key))->toBeTrue();
+        ->and(ProjectCache::hasNegative($key))->toBeTrue();
 
     $project = Project::create(['name' => 'late', 'api_key' => $key]);
 
-    expect(negativeEntry($key))->toBeFalse()
+    expect(ProjectCache::hasNegative($key))->toBeFalse()
         ->and($resolver->resolve($key))->toBe($project->id);
 });
 
@@ -52,13 +36,13 @@ it('forgets the old key and lets the new key resolve when the api key changes', 
 
     expect($resolver->resolve($old))->toBe($project->id)
         ->and($resolver->resolve($new))->toBeNull()
-        ->and(positiveEntry($old))->toBeTrue()
-        ->and(negativeEntry($new))->toBeTrue();
+        ->and(ProjectCache::hasPositive($old))->toBeTrue()
+        ->and(ProjectCache::hasNegative($new))->toBeTrue();
 
     $project->update(['api_key' => $new]);
 
-    expect(positiveEntry($old))->toBeFalse()
-        ->and(negativeEntry($new))->toBeFalse()
+    expect(ProjectCache::hasPositive($old))->toBeFalse()
+        ->and(ProjectCache::hasNegative($new))->toBeFalse()
         ->and($resolver->resolve($old))->toBeNull()
         ->and($resolver->resolve($new))->toBe($project->id);
 });
@@ -69,7 +53,7 @@ it('leaves the cache alone when something other than the api key changes', funct
 
     $project->update(['name' => 'Renamed']);
 
-    expect(positiveEntry($project->api_key))->toBeTrue();
+    expect(ProjectCache::hasPositive($project->api_key))->toBeTrue();
 });
 
 it('forgets the key when a project is deleted', function () {
@@ -79,7 +63,7 @@ it('forgets the key when a project is deleted', function () {
 
     $project->delete();
 
-    expect(positiveEntry($project->api_key))->toBeFalse()
+    expect(ProjectCache::hasPositive($project->api_key))->toBeFalse()
         ->and($resolver->resolve($project->api_key))->toBeNull();
 });
 
@@ -91,10 +75,10 @@ it('does not touch the cache before the transaction commits', function () {
         $project->delete();
 
         // Forgetting now would let a concurrent request re-cache the still-committed row.
-        expect(positiveEntry($project->api_key))->toBeTrue();
+        expect(ProjectCache::hasPositive($project->api_key))->toBeTrue();
     });
 
-    expect(positiveEntry($project->api_key))->toBeFalse();
+    expect(ProjectCache::hasPositive($project->api_key))->toBeFalse();
 });
 
 it('never forgets when the transaction rolls back', function () {
@@ -111,13 +95,13 @@ it('never forgets when the transaction rolls back', function () {
         // expected
     }
 
-    expect(positiveEntry($project->api_key))->toBeTrue()
+    expect(ProjectCache::hasPositive($project->api_key))->toBeTrue()
         ->and(Project::whereKey($project->id)->exists())->toBeTrue();
 });
 
 it('does not break a create when the cache is down, and reports it', function () {
     Exceptions::fake();
-    breakCache();
+    ProjectCache::breakStore();
 
     $project = Project::create(['name' => 'x', 'api_key' => Project::generateApiKey()]);
 
@@ -129,7 +113,7 @@ it('does not break a key update when the cache is down, and reports it', functio
     $project = Project::factory()->create();
     $new = Project::generateApiKey();
     Exceptions::fake();
-    breakCache();
+    ProjectCache::breakStore();
 
     $project->update(['api_key' => $new]);
 
@@ -140,7 +124,7 @@ it('does not break a key update when the cache is down, and reports it', functio
 it('does not break a delete when the cache is down, and reports it', function () {
     $project = Project::factory()->create();
     Exceptions::fake();
-    breakCache();
+    ProjectCache::breakStore();
 
     $project->delete();
 
@@ -171,7 +155,7 @@ it('KNOWN LIMITATION: a query-builder mass delete skips the observer (flip this 
     // projects must go through the model (see project:delete / project:rotate-key).
     Project::where('id', $project->id)->delete();
 
-    expect(positiveEntry($project->api_key))->toBeTrue();
+    expect(ProjectCache::hasPositive($project->api_key))->toBeTrue();
 });
 
 it('forgets the old key after commit when the key changes inside a transaction', function () {
@@ -184,10 +168,10 @@ it('forgets the old key after commit when the key changes inside a transaction',
     DB::transaction(function () use ($project, $old, $new) {
         $project->update(['api_key' => $new]);
 
-        expect(positiveEntry($old))->toBeTrue();
+        expect(ProjectCache::hasPositive($old))->toBeTrue();
     });
 
-    expect(positiveEntry($old))->toBeFalse()
+    expect(ProjectCache::hasPositive($old))->toBeFalse()
         ->and($resolver->resolve($old))->toBeNull()
         ->and($resolver->resolve($new))->toBe($project->id);
 });
@@ -207,9 +191,9 @@ it('forgets every key when one instance is re-keyed twice inside one transaction
     });
 
     $resolver = app(ProjectResolver::class);
-    expect(positiveEntry($a))->toBeFalse()
-        ->and(positiveEntry($b))->toBeFalse()
-        ->and(positiveEntry($c))->toBeFalse()
+    expect(ProjectCache::hasPositive($a))->toBeFalse()
+        ->and(ProjectCache::hasPositive($b))->toBeFalse()
+        ->and(ProjectCache::hasPositive($c))->toBeFalse()
         ->and($resolver->resolve($a))->toBeNull()
         ->and($resolver->resolve($b))->toBeNull()
         ->and($resolver->resolve($c))->toBe($project->id);
@@ -233,8 +217,8 @@ it('forgets nothing when a re-key is rolled back, and the old key still resolves
         // expected
     }
 
-    expect(positiveEntry($old))->toBeTrue()
-        ->and(negativeEntry($new))->toBeTrue()
+    expect(ProjectCache::hasPositive($old))->toBeTrue()
+        ->and(ProjectCache::hasNegative($new))->toBeTrue()
         ->and($resolver->resolve($old))->toBe($project->id)
         ->and($resolver->resolve($new))->toBeNull();
 });
@@ -247,7 +231,7 @@ it('KNOWN LIMITATION: saveQuietly() skips the observer (flip this when it is fix
     $project->api_key = Project::generateApiKey();
     $project->saveQuietly();
 
-    expect(positiveEntry($old))->toBeTrue();
+    expect(ProjectCache::hasPositive($old))->toBeTrue();
 });
 
 it('forgets the old key when other attributes change in the same save', function () {
@@ -258,7 +242,7 @@ it('forgets the old key when other attributes change in the same save', function
 
     $project->update(['name' => 'Renamed', 'api_key' => $new, 'timezone' => 'Europe/Istanbul']);
 
-    expect(positiveEntry($old))->toBeFalse();
+    expect(ProjectCache::hasPositive($old))->toBeFalse();
 });
 
 it('leaves the cache alone on touch()', function () {
@@ -267,5 +251,5 @@ it('leaves the cache alone on touch()', function () {
 
     $project->touch();
 
-    expect(positiveEntry($project->api_key))->toBeTrue();
+    expect(ProjectCache::hasPositive($project->api_key))->toBeTrue();
 });

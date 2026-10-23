@@ -2,9 +2,8 @@
 
 use App\Models\Project;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Exceptions;
-use Tests\Support\FailingCacheStore;
+use Tests\Support\ProjectCache;
 
 it('creates a project with a phc_ api key', function () {
     $this->artisan('project:create', ['name' => 'Demo', '--key-only' => true])->assertSuccessful();
@@ -65,8 +64,7 @@ it('keeps the default and --key-only outputs unchanged', function () {
 
 it('still prints exactly one json line with --json when the cache is down', function () {
     Exceptions::fake();
-    Cache::extend('failing', fn () => Cache::repository(new FailingCacheStore));
-    config(['cache.stores.failing' => ['driver' => 'failing'], 'cache.default' => 'failing']);
+    ProjectCache::breakStore();
 
     expect(Artisan::call('project:create', ['name' => 'Demo', '--json' => true]))->toBe(0);
 

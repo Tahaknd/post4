@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\Project;
 use Illuminate\Console\Command;
+use Symfony\Component\Console\Output\OutputInterface;
 
 class ProjectCreate extends Command
 {
@@ -14,7 +15,8 @@ class ProjectCreate extends Command
     public function handle(): int
     {
         if ($this->option('json') && $this->option('key-only')) {
-            $this->error('--json and --key-only cannot be used together.');
+            // stderr: stdout is reserved for the result.
+            $this->getOutput()->getErrorStyle()->error('--json and --key-only cannot be used together.');
 
             return self::INVALID;
         }
@@ -25,7 +27,8 @@ class ProjectCreate extends Command
         ]);
 
         if ($this->option('json')) {
-            $this->line(json_encode(['id' => $project->id, 'api_key' => $project->api_key], JSON_THROW_ON_ERROR));
+            // Raw: the formatter must never interpret anything in the payload (and `-q` prints nothing, by design).
+            $this->output->writeln(json_encode(['id' => $project->id, 'api_key' => $project->api_key], JSON_THROW_ON_ERROR), OutputInterface::OUTPUT_RAW);
         } elseif ($this->option('key-only')) {
             $this->line($project->api_key);
         } else {
