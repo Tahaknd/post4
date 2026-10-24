@@ -31,6 +31,15 @@ return [
     |
     */
 
+    /*
+    | Channel for the structured audit lines of project writes (App\Domain\Projects\ProjectAudit). Unset (the
+    | default) they go to the default channel like any other log line, so nothing changes; set LOG_AUDIT_CHANNEL=audit
+    | to write them to storage/logs/audit-*.log instead (see the `audit` channel below), or to any other channel,
+    | to keep them apart from stderr.
+    */
+
+    'audit_channel' => env('LOG_AUDIT_CHANNEL'),
+
     'deprecations' => [
         'channel' => env('LOG_DEPRECATIONS_CHANNEL', 'null'),
         'trace' => env('LOG_DEPRECATIONS_TRACE', false),
@@ -51,6 +60,14 @@ return [
     */
 
     'channels' => [
+
+        'audit' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/audit.log'),
+            'level' => 'info',
+            'days' => 90,
+            'replace_placeholders' => true,
+        ],
 
         'stack' => [
             'driver' => 'stack',

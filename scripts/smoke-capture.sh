@@ -151,18 +151,27 @@ chv() {
 }
 
 # Removes the throwaway project by its unique api_key. project:delete goes through the model, so the
-# observer also forgets the cached key lookups. The decision rests on the documented exit codes only:
-# 0 deleted and 3 unknown key (nothing left to delete) are both success; anything else is a failure.
-# On exit 0, anything on stderr is the command's cache-clearing warning and is echoed as WARN.
+# observer also forgets the cached key lookups, and it queues the purge of the project's events by default
+# (this script also deletes its own rows below, so the two cannot disagree). The decision rests on the
+# documented exit codes only: 0 deleted and 3 unknown key (nothing left to delete) are both success; 4 (deleted,
+# purge not queued) is a WARN, the rows are removed below anyway. On exit 0 only the cache-clearing warning
+# ('Could not clear the cached key') is echoed as WARN: stderr also carries the structured audit log line
+# (LOG_CHANNEL=stderr under Compose, see LOG_AUDIT_CHANNEL) and the 'KEPT'/purge notes, which are not warnings.
+# Scripts must call the app with `docker compose exec -T` (no TTY): without -T the output is not a clean stream.
 delete_project() {
   [[ -n "$KEY" ]] || return 0
   local out rc=0
   out="$(docker compose exec -T app php artisan project:delete "$KEY" --force 2>"$TMP/delete_err")" || rc=$?
   case "$rc" in
     0)
-      if [[ -s "$TMP/delete_err" ]]; then
-        echo "WARN: project:delete reported: $(head -c 300 "$TMP/delete_err" | tr '\n' ' ')" >&2
+      if grep -q 'Could not clear the cached key' "$TMP/delete_err"; then
+        echo "WARN: project:delete reported: $(grep 'Could not clear the cached key' "$TMP/delete_err" | head -c 300 | tr '\n' ' ')" >&2
       fi
+      KEY=""
+      return 0
+      ;;
+    4)
+      echo "WARN: project deleted but its events purge could not be queued (the rows are removed below)" >&2
       KEY=""
       return 0
       ;;

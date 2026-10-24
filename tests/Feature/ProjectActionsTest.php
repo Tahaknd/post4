@@ -296,3 +296,39 @@ describe('audit log', function () {
         expect($lines->count())->toBe(0);
     });
 });
+
+describe('audit channel', function () {
+    it('writes the audit lines to the configured channel and not to the default one', function () {
+        $audit = sys_get_temp_dir().'/audit-'.bin2hex(random_bytes(4)).'.log';
+        $default = sys_get_temp_dir().'/default-'.bin2hex(random_bytes(4)).'.log';
+        config([
+            'logging.channels.audit_test' => ['driver' => 'single', 'path' => $audit, 'level' => 'info'],
+            'logging.channels.default_test' => ['driver' => 'single', 'path' => $default, 'level' => 'info'],
+            'logging.default' => 'default_test',
+            'logging.audit_channel' => 'audit_test',
+        ]);
+
+        $project = app(CreateProject::class)->handle('Demo');
+
+        $auditText = (string) @file_get_contents($audit);
+        $defaultText = (string) @file_get_contents($default);
+        @unlink($audit);
+        @unlink($default);
+        expect($auditText)->toContain('project.create')->toContain('"project_id":'.$project->id)->not->toContain('phc_')
+            ->and($defaultText)->toBe('');
+    });
+
+    it('falls back to the default channel when none is configured', function () {
+        config(['logging.audit_channel' => null]);
+        $lines = captureAuditLog();
+
+        app(CreateProject::class)->handle('Demo');
+
+        expect($lines)->toHaveCount(1);
+    });
+
+    it('defines an audit channel to point LOG_AUDIT_CHANNEL at', function () {
+        expect(config('logging.channels.audit.driver'))->toBe('daily')
+            ->and(config('logging.channels.audit.path'))->toEndWith('storage/logs/audit.log');
+    });
+});
