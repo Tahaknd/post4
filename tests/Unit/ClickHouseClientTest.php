@@ -3,6 +3,11 @@
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseException;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
+use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\ConnectTimeoutException;
+use GuzzleHttp\Exception\NetworkTimeoutException;
+use GuzzleHttp\Exception\ResponseTimeoutException;
+use GuzzleHttp\Psr7\Response;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
@@ -448,6 +453,64 @@ describe('select() retries', function () {
         expect(fn () => $this->retrying->select('SELECT 1'))->toThrow(ConnectionException::class, 'cURL error 28');
         Http::assertSentCount(1);
     });
+
+    it('recognises a client timeout from the typed Guzzle exception, whatever the message says', function (Throwable $previous, bool $retried) {
+        $calls = 0;
+        Http::fake(function () use (&$calls, $previous) {
+            $calls++;
+            if ($calls === 1) {
+                throw new ConnectionException('worded differently', 0, $previous);
+            }
+
+            return Http::response('{"data":[]}');
+        });
+
+        if ($retried) {
+            expect($this->retrying->select('SELECT 1'))->toBe([]);
+        } else {
+            expect(fn () => $this->retrying->select('SELECT 1'))->toThrow(ConnectionException::class);
+        }
+        expect($calls)->toBe($retried ? 2 : 1);
+    })->with([
+        'connect timeout' => fn () => [new ConnectTimeoutException('x', new GuzzleHttp\Psr7\Request('POST', 'http://ch')), false],
+        'network timeout' => fn () => [new NetworkTimeoutException('x', new GuzzleHttp\Psr7\Request('POST', 'http://ch')), false],
+        'response timeout' => fn () => [new ResponseTimeoutException('x', new GuzzleHttp\Psr7\Request('POST', 'http://ch'), new Response), false],
+        'refused connection (not a timeout)' => fn () => [new ConnectException('cURL error 7: refused', new GuzzleHttp\Psr7\Request('POST', 'http://ch')), true],
+    ]);
+
+    it('uses a handler context errno when the Guzzle version has one, over the message text', function (int $errno, bool $retried) {
+        $previous = new class('ctx', new GuzzleHttp\Psr7\Request('POST', 'http://ch'), $errno) extends ConnectException
+        {
+            public function __construct(string $message, GuzzleHttp\Psr7\Request $request, private int $errno)
+            {
+                parent::__construct($message, $request);
+            }
+
+            public function getHandlerContext(): array
+            {
+                return ['errno' => $this->errno];
+            }
+        };
+        $calls = 0;
+        Http::fake(function () use (&$calls, $previous) {
+            $calls++;
+            if ($calls === 1) {
+                throw new ConnectionException('cURL error 28 in the text only', 0, $previous);
+            }
+
+            return Http::response('{"data":[]}');
+        });
+
+        if ($retried) {
+            expect($this->retrying->select('SELECT 1'))->toBe([]);
+        } else {
+            expect(fn () => $this->retrying->select('SELECT 1'))->toThrow(ConnectionException::class);
+        }
+        expect($calls)->toBe($retried ? 2 : 1);
+    })->with([
+        'errno 28' => [28, false],
+        'errno 7 although the text says 28' => [7, true],
+    ]);
 
     it('never retries execute()', function () {
         Http::fake(['*' => Http::sequence()->pushFailedConnection('cURL error 7: refused')->push('')]);

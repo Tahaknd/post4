@@ -5,6 +5,9 @@ namespace App\Infrastructure\ClickHouse;
 use DateTimeImmutable;
 use DateTimeInterface;
 use DateTimeZone;
+use GuzzleHttp\Exception\ConnectTimeoutException;
+use GuzzleHttp\Exception\NetworkTimeoutException;
+use GuzzleHttp\Exception\ResponseTimeoutException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use InvalidArgumentException;
@@ -84,12 +87,36 @@ class ClickHouseClient implements ClickHouseReads
             try {
                 return $this->send($sql, $params, $arguments, $timeout, $settings);
             } catch (ConnectionException $e) {
-                if ($attempt >= $this->selectRetries || str_contains($e->getMessage(), 'cURL error 28')) {
+                if ($attempt >= $this->selectRetries || self::isClientTimeout($e)) {
                     throw $e;
                 }
                 usleep($this->selectRetryBackoffMs * 1000 * (2 ** $attempt));
             }
         }
+    }
+
+    /**
+     * Is this a client side timeout (cURL error 28)? The answer comes from the typed Guzzle exception Laravel
+     * wraps (Guzzle 8: ConnectTimeoutException, NetworkTimeoutException, ResponseTimeoutException), or from the
+     * `errno` of a handler context on older Guzzle versions. Only when neither is available (a fake, another
+     * handler) is the message text the fallback.
+     */
+    private static function isClientTimeout(ConnectionException $e): bool
+    {
+        $previous = $e->getPrevious();
+
+        if ($previous instanceof ConnectTimeoutException || $previous instanceof NetworkTimeoutException || $previous instanceof ResponseTimeoutException) {
+            return true;
+        }
+
+        if ($previous !== null && method_exists($previous, 'getHandlerContext')) {
+            $errno = $previous->getHandlerContext()['errno'] ?? null;
+            if (is_int($errno)) {
+                return $errno === 28;
+            }
+        }
+
+        return str_contains($e->getMessage(), 'cURL error 28');
     }
 
     /**

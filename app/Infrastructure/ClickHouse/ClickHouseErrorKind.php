@@ -15,7 +15,11 @@ enum ClickHouseErrorKind: string
     /** 241 MEMORY_LIMIT_EXCEEDED. */
     case MemoryLimit = 'memory_limit';
 
-    /** 396 TOO_MANY_ROWS_OR_BYTES: a max_result_rows / max_rows_to_read style limit (overflow mode throw). */
+    /**
+     * A row or byte limit with overflow mode `throw`: 396 TOO_MANY_ROWS_OR_BYTES (max_result_rows /
+     * max_result_bytes), 158 TOO_MANY_ROWS (max_rows_to_read) and 307 TOO_MANY_BYTES (max_bytes_to_read).
+     * The numbers were checked against 25.8 with errorCodeToName() and real queries.
+     */
     case TooManyRows = 'too_many_rows';
 
     /** 202 TOO_MANY_SIMULTANEOUS_QUERIES: max_concurrent_queries_for_user reached. */
@@ -38,6 +42,8 @@ enum ClickHouseErrorKind: string
         159 => self::Timeout,
         241 => self::MemoryLimit,
         396 => self::TooManyRows,
+        158 => self::TooManyRows,
+        307 => self::TooManyRows,
         202 => self::Busy,
         452 => self::ConstraintViolation,
         516 => self::AuthenticationFailed,
