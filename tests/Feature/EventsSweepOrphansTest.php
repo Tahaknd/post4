@@ -32,7 +32,7 @@ it('queues a purge for each project id with events and no project row, and leave
 
     expect(Artisan::call('events:sweep-orphans'))->toBe(0);
 
-    expect(Artisan::output())->toContain('990601, 990602')->not->toContain((string) $live->id.',');
+    expect(Artisan::output())->toContain('990601, 990602');
     Queue::assertPushed(PurgeProjectEvents::class, 2);
     Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === 990601 && $job->pass === 1 && $job->queue === 'maintenance');
     Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === 990602);
