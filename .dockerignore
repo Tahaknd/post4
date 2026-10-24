@@ -26,3 +26,5 @@ storage/framework/views/*
 database/*.sqlite*
 /frankenphp
 public/frankenphp-worker.php
+.phpunit.cache
+/caddy

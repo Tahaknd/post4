@@ -14,3 +14,40 @@ services:
       - .:/app
       - /app/vendor
       - app-storage:/app/storage
+
+  # Vite dev server with HMR. Opt-in profile, so a plain `docker compose up` never starts it:
+  #   docker compose --profile dev up -d vite
+  #
+  # The bind mount above hides the public/build baked into the image, so there are two ways to see
+  # the UI in this stack:
+  #   * HMR: start this service. It writes public/hot (gitignored; the app reads it through the bind
+  #     mount) and the browser loads assets from http://localhost:5173 (set VITE_HMR_HOST when the
+  #     browser reaches this machine by another name). Stop the service and public/hot goes away.
+  #   * Built assets, no dev server:
+  #       docker compose run --rm --no-deps vite sh -c 'npm ci --ignore-scripts && npm run build'
+  #     writes public/build on the host, then `docker compose exec app php artisan octane:reload`
+  #     (Octane workers keep the Vite manifest in memory).
+  # node_modules lives in a named volume (container-native binaries); the host never needs Node.
+  vite:
+    profiles: ["dev"]
+    image: node:22-alpine
+    init: true
+    working_dir: /app
+    environment:
+      VITE_HMR_HOST: ${VITE_HMR_HOST:-localhost}
+    volumes:
+      - .:/app
+      - vite-node-modules:/app/node_modules
+    ports:
+      - "127.0.0.1:5173:5173"
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+          npm ci --ignore-scripts
+        fi
+        exec npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
+
+volumes:
+  vite-node-modules:
