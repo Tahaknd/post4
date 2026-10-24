@@ -83,7 +83,9 @@ return [
     |
     */
 
-    'middleware' => ['web'],
+    // `auth` sends a guest to /login (instead of a bare 403) and `auth.session` ends the session of a user whose
+    // password changed; the viewHorizon gate (App\Providers\HorizonServiceProvider) then requires an administrator.
+    'middleware' => ['web', 'auth', 'auth.session'],
 
     /*
     |--------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Models\User;
 use Illuminate\Support\Facades\Gate;
 use Laravel\Horizon\Horizon;
 use Laravel\Horizon\HorizonApplicationServiceProvider;
@@ -21,16 +22,28 @@ class HorizonServiceProvider extends HorizonApplicationServiceProvider
     }
 
     /**
-     * Register the Horizon gate.
+     * The gate alone decides, in every environment. The parent also lets everybody in when APP_ENV is
+     * `local`, which on a LAN-reachable dev stack would publish the dashboard (job payloads, failed
+     * jobs) to anyone; here a local environment still needs a signed-in administrator.
+     */
+    protected function authorization(): void
+    {
+        $this->gate();
+
+        Horizon::auth(fn ($request) => Gate::check('viewHorizon', [$request->user()]));
+    }
+
+    /**
+     * Only a signed-in administrator may open Horizon. The decision is the `is_admin` flag (not an email
+     * list in config, which the first plan sketched: an email list needs a second source of truth and a
+     * config value read from the environment, and "admin" already is a stored fact). `=== true` is strict on purpose: a guest has no
+     * user (null), and a loose check on a missing value must never read as "allowed".
      *
-     * This gate determines who can access Horizon in non-local environments.
+     * The nullable parameter is what lets Laravel call the closure for a guest at all (it denies guests
+     * without asking when the user is not optional); the answer for them is false.
      */
     protected function gate(): void
     {
-        Gate::define('viewHorizon', function ($user = null) {
-            return in_array(optional($user)->email, [
-                //
-            ]);
-        });
+        Gate::define('viewHorizon', fn (?User $user = null): bool => $user?->is_admin === true);
     }
 }
