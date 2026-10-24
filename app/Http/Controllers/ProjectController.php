@@ -6,12 +6,10 @@ use App\Actions\Projects\CreateProject;
 use App\Actions\Projects\DeleteProject;
 use App\Actions\Projects\RotateProjectKey;
 use App\Domain\Projects\ProjectRules;
-use App\Domain\Projects\ProjectWriteThrottle;
 use App\Http\Requests\Projects\DeleteProjectRequest;
 use App\Http\Requests\Projects\StoreProjectRequest;
 use App\Models\Project;
 use App\Models\User;
-use Illuminate\Http\Exceptions\ThrottleRequestsException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
@@ -61,11 +59,9 @@ class ProjectController extends Controller
         ]);
     }
 
-    public function store(StoreProjectRequest $request, CreateProject $createProject, ProjectWriteThrottle $throttle): RedirectResponse
+    public function store(StoreProjectRequest $request, CreateProject $createProject): RedirectResponse
     {
         $user = $this->user($request);
-        $this->throttle($throttle, $user);
-
         $project = $createProject->handle($request->validated('name'), $request->validated('timezone'), $user);
 
         return redirect()->route('projects.show', $project, 303)->with('status', 'Project created.');
@@ -99,24 +95,20 @@ class ProjectController extends Controller
         ]);
     }
 
-    public function rotateKey(Request $request, Project $project, RotateProjectKey $rotateProjectKey, ProjectWriteThrottle $throttle): RedirectResponse
+    public function rotateKey(Request $request, Project $project, RotateProjectKey $rotateProjectKey): RedirectResponse
     {
         Gate::authorize('rotateKey', $project);
 
         $user = $this->user($request);
-        $this->throttle($throttle, $user);
-
         $rotateProjectKey->handle($project, $user);
 
         // The new key is on the page the redirect lands on; the flash carries a sentence, never the key.
         return redirect()->route('projects.show', $project, 303)->with('status', 'API key replaced. The old key no longer works.');
     }
 
-    public function destroy(DeleteProjectRequest $request, Project $project, DeleteProject $deleteProject, ProjectWriteThrottle $throttle): RedirectResponse
+    public function destroy(DeleteProjectRequest $request, Project $project, DeleteProject $deleteProject): RedirectResponse
     {
         $user = $this->user($request);
-        $this->throttle($throttle, $user);
-
         $result = $deleteProject->handle($project, $user, purgeEvents: true);
 
         return redirect()->route('projects.index', status: 303)->with('status', $result->purgeFailedToQueue()
@@ -130,12 +122,5 @@ class ProjectController extends Controller
         abort_unless($user instanceof User, 401);
 
         return $user;
-    }
-
-    private function throttle(ProjectWriteThrottle $throttle, User $user): void
-    {
-        if (($wait = $throttle->hit($user)) !== null) {
-            throw new ThrottleRequestsException("Too many project changes. Try again in {$wait} seconds.", headers: ['Retry-After' => $wait]);
-        }
     }
 }

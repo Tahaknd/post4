@@ -26,7 +26,7 @@ final class CreateProject
     public function handle(string $name, ?string $timezone = null, ?User $actor = null): Project
     {
         $data = Validator::make(
-            ['name' => trim($name), 'timezone' => $timezone ?? ProjectRules::DEFAULT_TIMEZONE],
+            ['name' => ProjectRules::normaliseName($name), 'timezone' => $timezone ?? ProjectRules::DEFAULT_TIMEZONE],
             ['name' => ProjectRules::name(), 'timezone' => ProjectRules::timezone()],
         )->validate();
 

@@ -8,11 +8,12 @@ return [
     'warning_interval_seconds' => 60,
 
     /*
-     * Web project writes (create, rotate key, delete) per signed-in user and window. Fail-open like the other
-     * limiters (App\Domain\Projects\ProjectWriteThrottle).
+     * Per signed-in user and window, one bucket per family (App\Http\Middleware\ThrottleUser, route middleware
+     * `throttle.user:{family}`; fail-open like the other limiters, App\Support\RateLimit\UserThrottle).
      */
-    'project_writes' => [
-        'limit' => 30,
-        'window_seconds' => 60,
+    'user_throttles' => [
+        'projects.create' => ['limit' => 30, 'window_seconds' => 60],
+        'projects.rotate' => ['limit' => 30, 'window_seconds' => 60],
+        'projects.delete' => ['limit' => 30, 'window_seconds' => 60],
     ],
 ];

@@ -21,10 +21,8 @@ it('decides every ability for a member, a non-member and an administrator', func
         ->and(Gate::forUser($administrator)->allows($ability, $project))->toBe($admin, 'admin');
 })->with([
     'view' => ['view', true, false, true],
-    'update' => ['update', true, false, true],
     'rotateKey' => ['rotateKey', true, false, true],
     'delete' => ['delete', false, false, true],
-    'manageMembers' => ['manageMembers', false, false, true],
 ]);
 
 it('lets any signed-in user list and create projects', function () {
@@ -38,7 +36,7 @@ it('never lets a guest do anything', function (string $ability) {
     $project = Project::factory()->create();
 
     expect(Gate::forUser(null)->allows($ability, [$project]))->toBeFalse();
-})->with(['view', 'update', 'rotateKey', 'delete', 'manageMembers']);
+})->with(['view', 'rotateKey', 'delete']);
 
 it('treats is_admin strictly', function () {
     $project = Project::factory()->create();

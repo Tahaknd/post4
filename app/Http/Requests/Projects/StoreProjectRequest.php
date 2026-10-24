@@ -16,7 +16,7 @@ class StoreProjectRequest extends FormRequest
     protected function prepareForValidation(): void
     {
         if (is_string($this->input('name'))) {
-            $this->merge(['name' => trim($this->input('name'))]);
+            $this->merge(['name' => ProjectRules::normaliseName($this->input('name'))]);
         }
     }
 
@@ -39,7 +39,7 @@ class StoreProjectRequest extends FormRequest
             'name.required' => 'Enter a project name.',
             'name.string' => 'Enter a project name.',
             'name.max' => 'The name must be '.ProjectRules::NAME_MAX_LENGTH.' characters or fewer.',
-            'name.regex' => 'The name contains characters that are not allowed.',
+
             'timezone.required' => 'Choose a timezone.',
             'timezone.string' => 'Choose a timezone.',
             'timezone.in' => 'Choose a timezone from the list.',

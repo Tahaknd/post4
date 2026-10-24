@@ -2,7 +2,9 @@
 
 use App\Http\ErrorPages;
 use App\Http\Middleware\HandleInertiaRequests;
+use App\Http\Middleware\RejectMalformedUtf8;
 use App\Http\Middleware\RejectSessionlessGuests;
+use App\Http\Middleware\ThrottleUser;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
@@ -25,14 +27,21 @@ return Application::configure(basePath: dirname(__DIR__))
         // RejectSessionlessGuests goes first, ahead of StartSession: a visitor without a session cookie who
         // asks for a page that needs a sign-in is redirected without ever getting a session or a cookie.
         $middleware->web(
-            prepend: [RejectSessionlessGuests::class],
+            prepend: [RejectMalformedUtf8::class, RejectSessionlessGuests::class],
             append: [HandleInertiaRequests::class],
         );
+
+        // `throttle.user:{family}`: per-user budgets (config/ratelimit.php, user_throttles).
+        $middleware->alias(['throttle.user' => ThrottleUser::class]);
 
         // A guest with a stale session cookie reaches Authenticate: same /login?next= target as the cookie-less path.
         $middleware->redirectGuestsTo(fn (Request $request) => RejectSessionlessGuests::loginUrl($request));
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // Never flash these into the session after a failed validation: a project name is not a secret, but the
+        // confirmation text is typed into a destructive dialog and neither belongs in a flashed copy of the input.
+        $exceptions->dontFlash(['name', 'confirm_name']);
+
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
         );

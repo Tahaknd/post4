@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Projects;
 
+use App\Domain\Projects\ProjectRules;
 use App\Models\Project;
 use Closure;
 use Illuminate\Foundation\Http\FormRequest;
@@ -32,7 +33,7 @@ class DeleteProjectRequest extends FormRequest
             'confirm_name' => [
                 'required',
                 'string',
-                fn (string $attribute, mixed $value, Closure $fail) => is_string($value) && trim($value) === $project->name
+                fn (string $attribute, mixed $value, Closure $fail) => is_string($value) && ProjectRules::confirmationKey($value) === ProjectRules::confirmationKey($project->name)
                     ? null
                     : $fail('Type the project name exactly to confirm.'),
             ],

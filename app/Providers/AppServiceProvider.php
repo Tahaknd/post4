@@ -18,6 +18,7 @@ use App\Infrastructure\Kafka\RdKafkaLagProbe;
 use App\Models\Project;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
@@ -98,17 +99,21 @@ class AppServiceProvider extends ServiceProvider
 
         $this->configureTrustedProxies();
 
-        // `{project}` resolves only among the projects the signed-in user may open, so one they cannot open is a
-        // 404 (not a 403) and ids do not leak. SubstituteBindings runs after Authenticate, so the user is known;
-        // a missing user (a route outside `auth`) finds nothing.
-        Route::bind('project', fn (string $value) => Project::query()
-            ->when(
-                request()->user() !== null,
-                fn ($query) => $query->visibleTo(request()->user()),
-                fn ($query) => $query->whereRaw('1 = 0'),
-            )
-            ->whereKey($value)
-            ->firstOrFail());
+        // `{project}` is 1 to 18 digits for every route that has it (a bigint cannot take more; anything else never
+        // reaches Postgres as a query error).
+        Route::pattern('project', '[0-9]{1,18}');
+
+        // `{project}` resolves only among the projects the signed-in user may open, so one they cannot open is a 404
+        // (not a 403) and ids do not leak. SubstituteBindings runs after Authenticate, so the user is known; the
+        // default guard is asked through the request first and Auth second, and a missing user finds nothing (404).
+        // An id that arrives in a BODY is not bound by this: resolve it with Project::visibleTo($user)->find()
+        // (see App\Http\Requests\Concerns\ResolvesVisibleProject) from FormRequest::authorize(), answering 404.
+        Route::bind('project', function (string $value): Project {
+            $user = request()->user() ?? Auth::user();
+            abort_if($user === null, 404);
+
+            return Project::query()->visibleTo($user)->whereKey($value)->firstOrFail();
+        });
     }
 
     /**

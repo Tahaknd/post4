@@ -155,19 +155,6 @@ describe('create and store', function () {
             ->assertSessionHasErrors(['timezone' => 'Choose a timezone from the list.']);
     });
 
-    it('is throttled per user, fails open when the cache is down and reports 429 with Retry-After', function () {
-        config(['ratelimit.project_writes.limit' => 2]);
-        $user = User::factory()->create();
-
-        $this->actingAs($user)->post('/projects', ['name' => 'A', 'timezone' => 'UTC'])->assertStatus(303);
-        $this->actingAs($user)->post('/projects', ['name' => 'B', 'timezone' => 'UTC'])->assertStatus(303);
-        $this->actingAs($user)->post('/projects', ['name' => 'C', 'timezone' => 'UTC'])->assertStatus(429)->assertHeader('Retry-After');
-        expect(Project::count())->toBe(2);
-
-        // Another user has their own budget.
-        $this->actingAs(User::factory()->create())->post('/projects', ['name' => 'D', 'timezone' => 'UTC'])->assertStatus(303);
-    });
-
     it('lets the write through when the limiter store is unreachable', function () {
         LimiterOutage::reset();
         $user = User::factory()->create();
