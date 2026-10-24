@@ -114,4 +114,22 @@ return [
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Sign-in throttle
+    |--------------------------------------------------------------------------
+    |
+    | Failed sign-ins allowed per fixed window (App\Domain\Auth\LoginThrottle): per (email, ip) and per
+    | ip alone. Over either limit the answer is 429 + Retry-After, even for a correct password. The
+    | per-ip budget is larger because an office behind one NAT address shares it. There is deliberately
+    | no off switch.
+    |
+    */
+
+    'login_throttle' => [
+        'email_ip_limit' => (int) env('LOGIN_THROTTLE_EMAIL_IP_LIMIT', 5),
+        'ip_limit' => (int) env('LOGIN_THROTTLE_IP_LIMIT', 20),
+        'window_seconds' => (int) env('LOGIN_THROTTLE_WINDOW_SECONDS', 900),
+    ],
+
 ];

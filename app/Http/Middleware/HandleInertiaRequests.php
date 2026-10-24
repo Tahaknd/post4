@@ -33,8 +33,9 @@ class HandleInertiaRequests extends Middleware
     }
 
     /**
-     * Props shared with every page. Keep this to values that are safe for anyone who can load the
-     * page: there is no user here yet, and secrets (project keys, ClickHouse settings) never belong.
+     * Props shared with every page. Values safe for anyone who can load the page, as plain data (never an
+     * Eloquent model); secrets (project keys, ClickHouse settings) never belong here. `auth` and `flash` are
+     * closures, so they are only evaluated when the page is rendered (a redirect or a 409 never reads them).
      *
      * @return array<string, mixed>
      */
@@ -45,6 +46,32 @@ class HandleInertiaRequests extends Middleware
             'app' => [
                 'name' => config('app.name'),
             ],
+            'auth' => fn () => [
+                'user' => $this->user($request),
+            ],
+            'flash' => fn () => [
+                // Not every request that renders a page has a session (404 pages of unmatched routes).
+                'status' => $request->hasSession() ? $request->session()->get('status') : null,
+            ],
+        ];
+    }
+
+    /**
+     * @return array{id: int, name: string, email: string, is_admin: bool}|null
+     */
+    private function user(Request $request): ?array
+    {
+        $user = $request->user();
+
+        if ($user === null) {
+            return null;
+        }
+
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'is_admin' => $user->is_admin === true,
         ];
     }
 }

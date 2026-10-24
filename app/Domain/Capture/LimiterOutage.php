@@ -12,12 +12,14 @@ use Illuminate\Support\Str;
  */
 final class LimiterOutage
 {
-    /** Unix time of the last "limiter unavailable" warning, so a Redis outage cannot flood the log. */
-    private static int $lastWarningAt = 0;
+    /** @var array<string, int> unix time of the last "limiter unavailable" warning per limiter family, so a Redis outage cannot flood the log */
+    private static array $lastWarningAt = [];
 
     /**
      * Runs $callback and returns its result; on any \Throwable logs at most one warning per
-     * capture.limiter_warning_interval_seconds (per process) and returns $fallback.
+     * capture.limiter_warning_interval_seconds (per process and $limiter family) and returns $fallback.
+     * $limiter only names the family in the log line ('capture' for the ingest limiters, 'login' for the
+     * sign-in throttle) and keeps one family's warning from muting another's.
      *
      * @template T
      * @template F
@@ -26,12 +28,12 @@ final class LimiterOutage
      * @param  F  $fallback
      * @return T|F
      */
-    public static function guard(Closure $callback, mixed $fallback = null): mixed
+    public static function guard(Closure $callback, mixed $fallback = null, string $limiter = 'capture'): mixed
     {
         try {
             return $callback();
         } catch (\Throwable $e) {
-            self::warn($e);
+            self::warn($e, $limiter);
 
             return $fallback;
         }
@@ -40,18 +42,18 @@ final class LimiterOutage
     /** @internal Test seam: forgets the last warning so the next failure logs again. */
     public static function reset(): void
     {
-        self::$lastWarningAt = 0;
+        self::$lastWarningAt = [];
     }
 
-    private static function warn(\Throwable $e): void
+    private static function warn(\Throwable $e, string $limiter): void
     {
         $now = time();
-        if ($now - self::$lastWarningAt < (int) config('capture.limiter_warning_interval_seconds')) {
+        if ($now - (self::$lastWarningAt[$limiter] ?? 0) < (int) config('capture.limiter_warning_interval_seconds')) {
             return;
         }
-        self::$lastWarningAt = $now;
+        self::$lastWarningAt[$limiter] = $now;
 
-        Log::warning('capture rate limiter unavailable, failing open', [
+        Log::warning($limiter.' rate limiter unavailable, failing open', [
             'exception' => $e::class,
             // The class alone cannot tell a timeout from READONLY, OOM or WRONGTYPE (or a programming error).
             'message' => Str::limit($e->getMessage(), 200),

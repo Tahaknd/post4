@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Middleware\HandleInertiaRequests;
+use App\Models\Project;
+use App\Models\User;
 use Illuminate\Support\Facades\File;
 use Inertia\Testing\AssertableInertia;
 use Tests\Support\FakeViteBuild;
@@ -13,33 +15,77 @@ afterEach(function () {
     FakeViteBuild::remove($this->publicPath);
 });
 
-it('renders the Home page component', function () {
-    $this->get('/')
-        ->assertOk()
-        ->assertInertia(fn (AssertableInertia $page) => $page->component('Home'));
+it('redirects a guest from the Home page to the login page', function () {
+    $this->get('/')->assertRedirect('/login');
 });
 
-it('shares only the app name and validation errors with every page', function () {
-    $this->get('/')->assertInertia(fn (AssertableInertia $page) => $page
-        ->where('app.name', config('app.name'))
-        ->has('errors', 0)
-        ->has('app', fn (AssertableInertia $app) => $app->has('name')->etc())
-        ->missing('auth')
-        ->missing('user'));
+it('renders the Home page component for a signed-in user', function () {
+    $this->actingAs(User::factory()->create(['name' => 'Ada']))
+        ->get('/')
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('Home')
+            ->where('projects', [])
+            ->where('auth.user.name', 'Ada'));
+});
 
-    $props = $this->get('/')->viewData('page')['props'];
+it('lists only the projects the user can open on the Home page, without keys', function () {
+    $member = User::factory()->create();
+    $mine = Project::factory()->create(['name' => 'Mine']);
+    Project::factory()->create(['name' => 'Theirs']);
+    $mine->users()->attach($member);
 
-    expect(array_keys($props))->toEqualCanonicalizing(['errors', 'app'])
-        ->and(array_keys($props['app']))->toBe(['name']);
+    $props = $this->actingAs($member)->get('/')->viewData('page')['props'];
+
+    expect($props['projects'])->toBe([['id' => $mine->id, 'name' => 'Mine']]);
+
+    $admin = User::factory()->admin()->create();
+    $names = array_column($this->actingAs($admin)->get('/')->viewData('page')['props']['projects'], 'name');
+
+    expect($names)->toBe(['Mine', 'Theirs']);
+});
+
+it('shares exactly the app name, errors, auth and flash with a guest page', function () {
+    $props = $this->get('/login')->viewData('page')['props'];
+
+    expect(array_keys($props))->toEqualCanonicalizing(['errors', 'app', 'auth', 'flash', 'canRegister'])
+        ->and($props['app'])->toBe(['name' => config('app.name')])
+        ->and($props['auth'])->toBe(['user' => null])
+        ->and($props['flash'])->toBe(['status' => null]);
+});
+
+it('shares the signed-in user as plain id, name, email and is_admin only', function () {
+    $user = User::factory()->create(['name' => 'Ada', 'email' => 'ada@example.test']);
+
+    $props = $this->actingAs($user)->get('/')->viewData('page')['props'];
+
+    expect($props['auth'])->toBe(['user' => [
+        'id' => $user->id,
+        'name' => 'Ada',
+        'email' => 'ada@example.test',
+        'is_admin' => false,
+    ]]);
+
+    $admin = User::factory()->admin()->create();
+    $adminProps = $this->actingAs($admin)->get('/')->viewData('page')['props'];
+
+    expect($adminProps['auth']['user']['is_admin'])->toBeTrue()
+        ->and(json_encode($adminProps))->not->toContain('password')->not->toContain('remember_token');
+});
+
+it('shares the flash status message once', function () {
+    $this->withSession(['status' => 'Registration is closed.'])
+        ->get('/login')
+        ->assertInertia(fn (AssertableInertia $page) => $page->where('flash.status', 'Registration is closed.'));
 });
 
 it('answers an Inertia visit with JSON instead of the root view', function () {
     $version = hash_file('md5', $this->publicPath.'/build/manifest.json');
 
-    $this->get('/', ['X-Inertia' => 'true', 'X-Inertia-Version' => $version])
+    $this->get('/login', ['X-Inertia' => 'true', 'X-Inertia-Version' => $version])
         ->assertOk()
         ->assertHeader('X-Inertia', 'true')
-        ->assertJsonPath('component', 'Home')
+        ->assertJsonPath('component', 'Auth/Login')
         ->assertJsonPath('version', $version);
 });
 
@@ -48,7 +94,7 @@ it('derives the asset version from the Vite manifest and asks stale clients to r
 
     expect((new HandleInertiaRequests)->version(request()))->toBe($current);
 
-    $this->get('/', ['X-Inertia' => 'true', 'X-Inertia-Version' => 'a-build-from-last-week'])
+    $this->get('/login', ['X-Inertia' => 'true', 'X-Inertia-Version' => 'a-build-from-last-week'])
         ->assertStatus(409)
         ->assertHeader('X-Inertia-Location');
 });
@@ -70,7 +116,7 @@ it('has no asset version when nothing is built', function () {
 });
 
 it('references the built Vite assets from the root view', function () {
-    $html = $this->get('/')->assertOk()->getContent();
+    $html = $this->get('/login')->assertOk()->getContent();
 
     expect($html)
         ->toContain('<link rel="stylesheet" href="'.url('build/'.FakeViteBuild::CSS).'"')
@@ -80,7 +126,7 @@ it('references the built Vite assets from the root view', function () {
 });
 
 it('loads nothing from outside the application (no CDN, protocol-relative or font links)', function () {
-    $html = $this->get('/')->getContent();
+    $html = $this->get('/login')->getContent();
 
     preg_match_all('/(?:href|src)="([^"]+)"/', $html, $matches);
 
