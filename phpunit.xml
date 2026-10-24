@@ -15,6 +15,7 @@
     <groups>
         <exclude>
             <group>redis</group>
+            <group>clickhouse</group>
         </exclude>
     </groups>
     <source>
