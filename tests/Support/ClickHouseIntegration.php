@@ -27,6 +27,13 @@ final class ClickHouseIntegration
 
     public const PROJECT_C = 990103;
 
+    /** Projects of the trends tests (their own rows: TrendsIntegrationTest). C never gets a row. */
+    public const TREND_A = 990201;
+
+    public const TREND_B = 990202;
+
+    public const TREND_C = 990203;
+
     /** Rows seeded per project. */
     public const ROWS_A = 30;
 
@@ -39,6 +46,8 @@ final class ClickHouseIntegration
     ) {}
 
     private static bool $seeded = false;
+
+    private static bool $trendsSeeded = false;
 
     /**
      * Seeds once per process (the tests of the file only read) and remembers it, so afterAll() knows whether
@@ -70,6 +79,110 @@ final class ClickHouseIntegration
         } finally {
             Facade::clearResolvedInstances();
         }
+    }
+
+    /** Seeds the trends projects once per process (see seedTrends()); afterAll cleans up via cleanupTrendsAfterAll(). */
+    public function seedTrendsOnce(): void
+    {
+        if (! self::$trendsSeeded) {
+            self::$trendsSeeded = true;
+            $this->seedTrends();
+        }
+    }
+
+    /** Like cleanupAfterAll() for the trends projects. */
+    public static function cleanupTrendsAfterAll(): void
+    {
+        if (! self::$trendsSeeded) {
+            return;
+        }
+        self::$trendsSeeded = false;
+
+        Http::swap(new Factory);
+        try {
+            self::connect()->cleanupTrends();
+        } finally {
+            Facade::clearResolvedInstances();
+        }
+    }
+
+    /**
+     * Fixed, hand-computed rows (fixed instants, not relative to now) for TrendsIntegrationTest. Every row is
+     * its own INSERT with a fixed uuid. Project A (990201), `ts` in UTC:
+     *   a1  signup   u1 03-14 21:30 plan=pro  Chrome        a2 signup u2 03-14 22:30 plan=free Firefox
+     *   a12 signup   u1 03-14 23:00 plan=free Chrome        a11 signup u1 03-15 08:00 plan=pro Chrome
+     *   a3  signup   u1 03-15 10:00 plan=pro  Chrome        a4 signup u3 03-15 10:00 plan=null Safari
+     *   a6  signup   u2 03-16 09:00 (no plan) Firefox, inserted TWICE with the same uuid
+     *   a13 signup   u1 03-31 21:30 plan=pro  Chrome        a5 purchase u1 03-15 11:00 plan=pro Chrome
+     *   a10 purchase u2 03-16 23:30 plan=free               a9 other_event u1 03-15 12:00
+     *   a7  signup   u1 02-10 12:00 and a8 signup u1 04-20 12:00 (both outside every tested range)
+     * Project B (990202): signup u9 x3 (03-14 22:00, 22:10, 22:20) and u1 x4 (03-15 10:00..10:03) with
+     * plan=enterprise, Edge; purchase u1 03-15 11:00. Project C has no rows.
+     */
+    public function seedTrends(): void
+    {
+        $this->cleanupTrends();
+
+        $a = self::TREND_A;
+        $b = self::TREND_B;
+        $n = 0;
+        $row = function (int $project, string $event, string $distinct, string $ts, array $props = [], ?int $uuidNumber = null) use (&$n): void {
+            $uuid = sprintf('00000000-0000-4000-8000-%012d', $uuidNumber ?? ++$n);
+            $this->admin->execute(
+                'INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '
+                ."SELECT {uuid:UUID}, {p:UInt32}, {e:String}, {d:String}, {props:String}, parseDateTime64BestEffort({ts:String}, 3, 'UTC')",
+                ['uuid' => $uuid, 'p' => $project, 'e' => $event, 'd' => $distinct, 'props' => json_encode($props, JSON_THROW_ON_ERROR), 'ts' => $ts],
+            );
+        };
+
+        $row($a, 'signup', 'u1', '2026-03-14 21:30:00', ['plan' => 'pro', '$browser' => 'Chrome']);
+        $row($a, 'signup', 'u2', '2026-03-14 22:30:00', ['plan' => 'free', '$browser' => 'Firefox']);
+        $row($a, 'signup', 'u1', '2026-03-14 23:00:00', ['plan' => 'free', '$browser' => 'Chrome']);
+        $row($a, 'signup', 'u1', '2026-03-15 08:00:00', ['plan' => 'pro', '$browser' => 'Chrome']);
+        $row($a, 'signup', 'u1', '2026-03-15 10:00:00', ['plan' => 'pro', '$browser' => 'Chrome']);
+        $row($a, 'signup', 'u3', '2026-03-15 10:00:00', ['plan' => null, '$browser' => 'Safari']);
+        $row($a, 'signup', 'u2', '2026-03-16 09:00:00', ['$browser' => 'Firefox'], 900);
+        $row($a, 'signup', 'u2', '2026-03-16 09:00:00', ['$browser' => 'Firefox'], 900); // same uuid again
+        $row($a, 'signup', 'u1', '2026-03-31 21:30:00', ['plan' => 'pro', '$browser' => 'Chrome']);
+        $row($a, 'purchase', 'u1', '2026-03-15 11:00:00', ['plan' => 'pro', '$browser' => 'Chrome']);
+        $row($a, 'purchase', 'u2', '2026-03-16 23:30:00', ['plan' => 'free']);
+        $row($a, 'other_event', 'u1', '2026-03-15 12:00:00');
+        $row($a, 'signup', 'u1', '2026-02-10 12:00:00');
+        $row($a, 'signup', 'u1', '2026-04-20 12:00:00');
+
+        foreach (['2026-03-14 22:00:00', '2026-03-14 22:10:00', '2026-03-14 22:20:00'] as $ts) {
+            $row($b, 'signup', 'u9', $ts, ['plan' => 'enterprise', '$browser' => 'Edge']);
+        }
+        foreach (['10:00', '10:01', '10:02', '10:03'] as $time) {
+            $row($b, 'signup', 'u1', "2026-03-15 {$time}:00", ['plan' => 'enterprise', '$browser' => 'Edge']);
+        }
+        $row($b, 'purchase', 'u1', '2026-03-15 11:00:00', ['plan' => 'enterprise', '$browser' => 'Edge']);
+
+        // 22 inserts; the duplicate uuid collapses to one row only when a background merge ran (21), never fewer.
+        Assert::assertContains($this->trendRowCount(), [21, 22], 'trends seeding did not produce the expected rows');
+    }
+
+    /** Lightweight delete of exactly the trends projects, then waits until the rows are gone. */
+    public function cleanupTrends(): void
+    {
+        $ids = self::TREND_A.', '.self::TREND_B.', '.self::TREND_C;
+        $this->admin->execute("DELETE FROM posthog.events WHERE project_id IN ({$ids})", settings: ['lightweight_deletes_sync' => 0]);
+
+        $deadline = microtime(true) + 30;
+        while ($this->trendRowCount() !== 0) {
+            if (microtime(true) > $deadline) {
+                Assert::fail("Seeded trends rows of projects {$ids} were not deleted within 30 s: remove them by hand");
+            }
+            usleep(200_000);
+        }
+    }
+
+    /** Physical rows of the trends projects as the admin sees them (a duplicate uuid counts twice until merged). */
+    public function trendRowCount(): int
+    {
+        $rows = $this->admin->select('SELECT count() AS n FROM posthog.events WHERE project_id IN ('.self::TREND_A.', '.self::TREND_B.', '.self::TREND_C.')');
+
+        return (int) $rows[0]['n'];
     }
 
     /** Fails (never skips) when a CLICKHOUSE_INTEGRATION_* variable is missing. */
