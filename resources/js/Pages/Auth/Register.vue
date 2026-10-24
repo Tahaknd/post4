@@ -3,11 +3,17 @@ import { Head, Link, useForm } from '@inertiajs/vue3';
 
 import PrimaryButton from '@/Components/PrimaryButton.vue';
 import TextField from '@/Components/TextField.vue';
+import { useFormFocus } from '@/composables/useFormFocus';
 import { LOGIN_URL, REGISTER_URL } from '@/routes';
 
 const form = useForm({ name: '', email: '', password: '', password_confirmation: '' });
+const { formRef, alertRef } = useFormFocus(form);
 
 function submit() {
+    if (form.processing) {
+        return;
+    }
+
     form.post(REGISTER_URL, {
         onFinish: () => form.reset('password', 'password_confirmation'),
     });
@@ -23,7 +29,11 @@ function submit() {
             <p class="text-sm text-muted">This account becomes the administrator. Registration closes afterwards.</p>
         </div>
 
-        <form class="space-y-4" novalidate @submit.prevent="submit">
+        <p v-if="form.errors.form" ref="alertRef" role="alert" tabindex="-1" class="rounded-md border border-danger px-3 py-2 text-sm text-danger">
+            {{ form.errors.form }}
+        </p>
+
+        <form ref="formRef" class="space-y-4" novalidate @submit.prevent="submit">
             <TextField
                 v-model="form.name"
                 label="Name"
@@ -48,7 +58,7 @@ function submit() {
                 name="password"
                 type="password"
                 autocomplete="new-password"
-                hint="At least 12 characters."
+                hint="At least 12 characters and at most 72 bytes (a long non-ASCII password counts every byte)."
                 :error="form.errors.password"
                 required
             />

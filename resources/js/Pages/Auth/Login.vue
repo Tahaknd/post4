@@ -1,20 +1,26 @@
 <script setup>
-import { Head, Link, useForm, usePage } from '@inertiajs/vue3';
+import { Head, Link, useForm } from '@inertiajs/vue3';
 
 import PrimaryButton from '@/Components/PrimaryButton.vue';
 import TextField from '@/Components/TextField.vue';
+import { useFormFocus } from '@/composables/useFormFocus';
 import { LOGIN_URL, REGISTER_URL } from '@/routes';
 
-// canRegister is true only while no account exists (the first account becomes the administrator).
-defineProps({
+// canRegister is true only while no account exists (the first account becomes the administrator). `next` is the
+// page the visitor was heading for, already sanitised by the server (and checked again after the post).
+const props = defineProps({
     canRegister: { type: Boolean, default: false },
+    next: { type: String, default: null },
 });
 
-const page = usePage();
-
-const form = useForm({ email: '', password: '' });
+const form = useForm({ email: '', password: '', next: props.next ?? '' });
+const { formRef, alertRef } = useFormFocus(form);
 
 function submit() {
+    if (form.processing) {
+        return;
+    }
+
     form.post(LOGIN_URL, {
         onFinish: () => form.reset('password'),
     });
@@ -27,11 +33,11 @@ function submit() {
     <section aria-labelledby="login-heading" class="mx-auto w-full max-w-sm space-y-6">
         <h1 id="login-heading" class="text-2xl font-semibold tracking-tight">Sign in</h1>
 
-        <p v-if="page.props.flash.status" role="status" class="rounded-md border border-line bg-surface px-3 py-2 text-sm">
-            {{ page.props.flash.status }}
+        <p v-if="form.errors.form" ref="alertRef" role="alert" tabindex="-1" class="rounded-md border border-danger px-3 py-2 text-sm text-danger">
+            {{ form.errors.form }}
         </p>
 
-        <form class="space-y-4" novalidate @submit.prevent="submit">
+        <form ref="formRef" class="space-y-4" novalidate @submit.prevent="submit">
             <TextField
                 v-model="form.email"
                 label="Email"

@@ -27,6 +27,13 @@ const page = usePage();
             </div>
         </header>
 
+        <!-- Always in the DOM: a live region only announces text that is inserted into one that already exists. -->
+        <div class="mx-auto w-full max-w-6xl px-4 pt-4 sm:px-6" role="status" aria-live="polite" aria-atomic="true">
+            <p v-if="page.props.flash?.status" class="rounded-md border border-line bg-surface px-3 py-2 text-sm">
+                {{ page.props.flash.status }}
+            </p>
+        </div>
+
         <main id="main" tabindex="-1" class="mx-auto w-full max-w-6xl flex-1 px-4 py-8 focus:outline-none sm:px-6">
             <slot />
         </main>

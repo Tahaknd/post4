@@ -2,7 +2,7 @@
 import { Head, Link } from '@inertiajs/vue3';
 import { computed } from 'vue';
 
-import { HOME_URL } from '@/routes';
+import { HOME_URL, LOGIN_URL } from '@/routes';
 
 // Rendered by the server for HTML requests that fail on a web route (App\Http\ErrorPages): 403, 404,
 // 429, 500 and 503. `message` is only ever a fixed, safe sentence chosen on the server.
@@ -29,6 +29,11 @@ const title = computed(() => titles[props.status] ?? 'Something went wrong');
         <p class="text-sm font-medium text-muted">Error {{ status }}</p>
         <h1 id="error-heading" class="text-2xl font-semibold tracking-tight">{{ title }}</h1>
         <p v-if="message" class="text-muted">{{ message }}</p>
-        <Link :href="HOME_URL" class="inline-block font-medium text-accent hover:text-accent-hover">Back to the start page</Link>
+        <Link
+            :href="status === 429 ? LOGIN_URL : HOME_URL"
+            class="inline-block font-medium text-accent hover:text-accent-hover"
+        >
+            {{ status === 429 ? 'Back to sign in' : 'Back to the start page' }}
+        </Link>
     </section>
 </template>

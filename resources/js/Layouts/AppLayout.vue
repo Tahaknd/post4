@@ -1,6 +1,6 @@
 <script setup>
 import { Link, router, usePage } from '@inertiajs/vue3';
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
 import BaseLayout from '@/Layouts/BaseLayout.vue';
 import { HOME_URL, HORIZON_URL, LOGOUT_URL } from '@/routes';
@@ -12,8 +12,16 @@ const user = computed(() => page.props.auth?.user ?? null);
 // The primary navigation exists for signed-in users only.
 const navItems = [{ label: 'Home', href: HOME_URL }];
 
+const signingOut = ref(false);
+
+// aria-disabled instead of disabled (see PrimaryButton): the button keeps focus while the request runs.
 function logout() {
-    router.post(LOGOUT_URL);
+    if (signingOut.value) {
+        return;
+    }
+
+    signingOut.value = true;
+    router.post(LOGOUT_URL, {}, { onFinish: () => (signingOut.value = false) });
 }
 </script>
 
@@ -27,9 +35,16 @@ function logout() {
             <!-- Horizon is a separate Laravel page, not an Inertia one: a plain link, shown to administrators only. -->
             <a v-if="user.is_admin" :href="HORIZON_URL" class="text-muted hover:text-fg">Horizon</a>
 
-            <span class="hidden text-muted sm:inline" :title="user.email">{{ user.name }}</span>
+            <span class="max-w-32 truncate text-muted" :title="user.email">{{ user.name }}</span>
 
-            <button type="button" class="text-muted hover:text-fg" @click="logout">Sign out</button>
+            <button
+                type="button"
+                class="text-muted hover:text-fg aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+                :aria-disabled="signingOut ? 'true' : undefined"
+                @click="logout"
+            >
+                Sign out
+            </button>
         </template>
 
         <slot />
