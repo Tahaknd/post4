@@ -11,6 +11,10 @@
         @inertiaHead
     </head>
     <body>
+        <noscript>
+            <p class="mx-auto max-w-prose px-4 py-8 text-fg">{{ config('app.name') }} needs JavaScript to run. Enable JavaScript in your browser and reload the page.</p>
+        </noscript>
+
         @inertia
     </body>
 </html>

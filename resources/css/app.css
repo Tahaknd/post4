@@ -1,36 +1,118 @@
-@import 'tailwindcss';
+@import 'tailwindcss' source(none);
+
+/* Class names are scanned in the frontend and the Blade views only (deterministic, and the Docker
+   build copies exactly these folders). */
+@source '../js';
+@source '../views';
 
 /*
- * Design tokens. Components use the semantic utilities generated below (bg-canvas, text-fg,
- * border-line, ...) instead of palette colors, so light and dark are one switch of these variables.
- * Contrast pairs: fg on canvas/surface >= 15:1, muted on canvas/surface >= 7:1, accent-fg on accent >= 4.5:1.
+ * Design tokens. Components use the semantic utilities generated in @theme below (bg-canvas,
+ * text-fg, border-line, bg-danger, ...) instead of palette colors, so light and dark are one
+ * switch of these variables. The theme follows the OS; [data-theme="light"|"dark"] on <html>
+ * forces one (a user toggle can set it later).
+ *
+ * WCAG contrast, measured with the relative-luminance formula (canvas / surface in each theme):
+ *   fg on canvas                 light 16.6   dark 16.0 (surface)
+ *   muted on canvas              light 7.2    dark 7.6
+ *   line-strong (UI boundaries)  light 3.4    dark 3.7   (>= 3:1 on canvas and surface)
+ *   accent, danger, success, warning as text or fill   >= 4.5:1 on canvas and surface
+ *   each -fg on its solid token  >= 4.5:1
+ *   chart-1..8                   >= 3:1 on canvas and surface (graphical objects)
+ * `line` is decorative (dividers) and intentionally lighter than 3:1.
  */
-:root {
+:root,
+:root[data-theme='light'] {
     color-scheme: light;
 
     --canvas: #f6f6f7;
     --surface: #ffffff;
     --line: #dcdce0;
+    --line-strong: #85858f;
     --fg: #17171a;
-    --muted: #55555d;
+    --muted: #52525a;
     --accent: #4338ca;
+    --accent-hover: #3730a3;
     --accent-fg: #ffffff;
     --focus: #4338ca;
+    --danger: #b42318;
+    --danger-fg: #ffffff;
+    --success: #067647;
+    --success-fg: #ffffff;
+    --warning: #b54708;
+    --warning-fg: #ffffff;
+
+    /* Ordered so that any prefix (2 series, 3 series, ...) is as distinct as possible, including
+       under deuteranopia, protanopia and tritanopia (minimum CIE76 distance 17.6 in all four). */
+    --chart-1: #0072b2;
+    --chart-2: #df600c;
+    --chart-3: #6b3224;
+    --chart-4: #750cdf;
+    --chart-5: #151f79;
+    --chart-6: #b05e3b;
+    --chart-7: #880761;
+    --chart-8: #ad1f58;
 }
 
 @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme='light']) {
         color-scheme: dark;
 
         --canvas: #0e0e11;
         --surface: #17171b;
         --line: #2e2e35;
+        --line-strong: #70707b;
         --fg: #f2f2f4;
         --muted: #a8a8b2;
         --accent: #a5b4fc;
+        --accent-hover: #c7d2fe;
         --accent-fg: #0e0e11;
         --focus: #a5b4fc;
+        --danger: #f97066;
+        --danger-fg: #0e0e11;
+        --success: #47cd89;
+        --success-fg: #0e0e11;
+        --warning: #fdb022;
+        --warning-fg: #0e0e11;
+
+        --chart-1: #56b4e9;
+        --chart-2: #f48c25;
+        --chart-3: #e3d2ab;
+        --chart-4: #7b47f5;
+        --chart-5: #dd3c4c;
+        --chart-6: #d98cab;
+        --chart-7: #bde87d;
+        --chart-8: #6ef7f7;
     }
+}
+
+:root[data-theme='dark'] {
+    color-scheme: dark;
+
+    --canvas: #0e0e11;
+    --surface: #17171b;
+    --line: #2e2e35;
+    --line-strong: #70707b;
+    --fg: #f2f2f4;
+    --muted: #a8a8b2;
+    --accent: #a5b4fc;
+    --accent-hover: #c7d2fe;
+    --accent-fg: #0e0e11;
+    --focus: #a5b4fc;
+    --danger: #f97066;
+    --danger-fg: #0e0e11;
+    --success: #47cd89;
+    --success-fg: #0e0e11;
+    --warning: #fdb022;
+    --warning-fg: #0e0e11;
+
+    --chart-1: #56b4e9;
+    --chart-2: #f48c25;
+    --chart-3: #e3d2ab;
+    --chart-4: #7b47f5;
+    --chart-5: #dd3c4c;
+    --chart-6: #d98cab;
+    --chart-7: #bde87d;
+    --chart-8: #6ef7f7;
 }
 
 @theme inline {
@@ -41,11 +123,27 @@
     --color-canvas: var(--canvas);
     --color-surface: var(--surface);
     --color-line: var(--line);
+    --color-line-strong: var(--line-strong);
     --color-fg: var(--fg);
     --color-muted: var(--muted);
     --color-accent: var(--accent);
+    --color-accent-hover: var(--accent-hover);
     --color-accent-fg: var(--accent-fg);
     --color-focus: var(--focus);
+    --color-danger: var(--danger);
+    --color-danger-fg: var(--danger-fg);
+    --color-success: var(--success);
+    --color-success-fg: var(--success-fg);
+    --color-warning: var(--warning);
+    --color-warning-fg: var(--warning-fg);
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+    --color-chart-6: var(--chart-6);
+    --color-chart-7: var(--chart-7);
+    --color-chart-8: var(--chart-8);
 }
 
 @layer base {
@@ -57,7 +155,7 @@
     }
 
     body {
-        min-height: 100vh;
+        min-height: 100dvh;
     }
 
     :focus-visible {
