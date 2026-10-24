@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\ErrorPages;
 use App\Http\Middleware\HandleInertiaRequests;
 use App\Http\Middleware\RejectSessionlessGuests;
 use Illuminate\Foundation\Application;
@@ -7,6 +8,7 @@ use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use Symfony\Component\HttpFoundation\Response;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -31,4 +33,8 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
         );
+
+        // Error page for HTML requests on UI routes only; capture, SDK and JSON responses are untouched
+        // (see App\Http\ErrorPages).
+        $exceptions->respond(fn (Response $response, Throwable $e, Request $request) => app(ErrorPages::class)->respond($response, $e, $request));
     })->create();
