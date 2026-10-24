@@ -428,3 +428,27 @@ describe('failure levels and retry-after', function () {
         }
     });
 });
+
+describe('axis versus the buckets ClickHouse returned', function () {
+    it('uses the full computed axis when every returned bucket is on it', function () {
+        $result = TrendsResult::fromRows(def(), dayRows());
+
+        expect($result->buckets)->toBe(def()->buckets())->and($result->series[0]['data'])->toBe([4, 0, 9]);
+    });
+
+    it('uses the returned buckets as they are, inventing none and dropping none, when one is off the axis', function () {
+        Log::spy();
+        $day = strtotime('2026-03-01 UTC');
+        $rows = [
+            ['series' => 'signup', 'bucket' => $day + 1800, 'value' => 4],       // half hour off the daily grid
+            ['series' => 'signup', 'bucket' => $day + 86400, 'value' => 9],      // on the grid
+        ];
+
+        $result = TrendsResult::fromRows(def(), $rows);
+
+        expect($result->buckets)->toBe([$day + 1800, $day + 86400])
+            ->and($result->series[0]['data'])->toBe([4, 9])
+            ->and(count($result->labels))->toBe(2);
+        Log::shouldHaveReceived('warning')->withArgs(fn ($m, $c) => str_contains($m, 'differ from the computed axis') && $c['off_axis'] === 1)->once();
+    });
+});

@@ -27,12 +27,15 @@ final class ClickHouseIntegration
 
     public const PROJECT_C = 990103;
 
-    /** Projects of the trends tests (their own rows: TrendsIntegrationTest). C never gets a row. */
+    /** Projects of the trends tests (their own rows: TrendsIntegrationTest, BucketAxisOracleTest). C never gets a row. */
     public const TREND_A = 990201;
 
     public const TREND_B = 990202;
 
     public const TREND_C = 990203;
+
+    /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
+    public const TREND_D = 990204;
 
     /** Rows seeded per project. */
     public const ROWS_A = 30;
@@ -159,13 +162,18 @@ final class ClickHouseIntegration
         $row($b, 'purchase', 'u1', '2026-03-15 11:00:00', ['plan' => 'enterprise', '$browser' => 'Edge']);
 
         // 22 inserts; the duplicate uuid collapses to one row only when a background merge ran (21), never fewer.
-        Assert::assertContains($this->trendRowCount(), [21, 22], 'trends seeding did not produce the expected rows');
+        // Project D (Santiago gap): 2023-09-03 00:00 local (-04) does not exist, the clocks jump to 01:00 (-03) at 04:00 UTC.
+        $row(self::TREND_D, 'visit', 'd1', '2023-09-03 03:30:00');   // Sep 2 23:30 local
+        $row(self::TREND_D, 'visit', 'd1', '2023-09-03 04:30:00');   // Sep 3 01:30 local, after the gap
+        $row(self::TREND_D, 'visit', 'd2', '2023-09-04 12:00:00');   // Sep 4 09:00 local
+
+        Assert::assertContains($this->trendRowCount(), [24, 25], 'trends seeding did not produce the expected rows');
     }
 
     /** Lightweight delete of exactly the trends projects, then waits until the rows are gone. */
     public function cleanupTrends(): void
     {
-        $ids = self::TREND_A.', '.self::TREND_B.', '.self::TREND_C;
+        $ids = self::TREND_A.', '.self::TREND_B.', '.self::TREND_C.', '.self::TREND_D;
         $this->admin->execute("DELETE FROM posthog.events WHERE project_id IN ({$ids})", settings: ['lightweight_deletes_sync' => 0]);
 
         $deadline = microtime(true) + 30;
@@ -180,7 +188,7 @@ final class ClickHouseIntegration
     /** Physical rows of the trends projects as the admin sees them (a duplicate uuid counts twice until merged). */
     public function trendRowCount(): int
     {
-        $rows = $this->admin->select('SELECT count() AS n FROM posthog.events WHERE project_id IN ('.self::TREND_A.', '.self::TREND_B.', '.self::TREND_C.')');
+        $rows = $this->admin->select('SELECT count() AS n FROM posthog.events WHERE project_id IN ('.self::TREND_A.', '.self::TREND_B.', '.self::TREND_C.', '.self::TREND_D.')');
 
         return (int) $rows[0]['n'];
     }

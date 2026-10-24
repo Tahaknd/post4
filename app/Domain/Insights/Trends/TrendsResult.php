@@ -6,6 +6,7 @@ use App\Domain\Insights\InsightFailed;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use DateTimeImmutable;
 use DateTimeZone;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
 /**
@@ -14,7 +15,8 @@ use RuntimeException;
  * ISO 8601 with the project zone offset (unambiguous across DST). Series are in the order of the query's
  * events; within an event, breakdown series are ordered by their summed values (descending, a display aid:
  * for the unique metric the sum over buckets is not a distinct count), then by value, with the "other"
- * series last. `is_other` / `is_none` mark the Breakdown sentinels so the UI can render words.
+ * series last. The bucket axis is the computed one unless ClickHouse returned a bucket that is not on it, in which
+ * case the returned buckets are used as they are (see fromRows). `is_other` / `is_none` mark the Breakdown sentinels so the UI can render words.
  */
 final readonly class TrendsResult
 {
@@ -51,9 +53,24 @@ final readonly class TrendsResult
             $observed[$bucket] = true;
         }
 
-        // The expected axis, plus any bucket ClickHouse returned that the axis missed (never drop data).
-        $buckets = array_values(array_unique([...$query->buckets(), ...array_keys($observed)]));
-        sort($buckets);
+        // The PHP axis fills empty buckets with 0, but ClickHouse has the last word on where buckets are (the two
+        // ship different tzdata, and Australia/Lord_Howe's 30 minute DST shift keeps ClickHouse on the half hour
+        // grid after the change). When every returned bucket is on the axis, use the full axis. When any is not,
+        // the axis is NOT trusted for this answer: the buckets ClickHouse returned are used as they are (sparse,
+        // sorted), so no bucket is invented and none is dropped.
+        $axis = $query->buckets();
+        $offAxis = array_values(array_diff(array_keys($observed), $axis));
+        if ($offAxis === []) {
+            $buckets = $axis;
+        } else {
+            $buckets = array_map('intval', array_keys($observed));
+            sort($buckets);
+            Log::warning('trends buckets from ClickHouse differ from the computed axis, using the returned buckets', [
+                'timezone' => $query->timezone(),
+                'interval' => $query->interval->value,
+                'off_axis' => count($offAxis),
+            ]);
+        }
 
         $series = [];
         foreach ($query->events as $event) {
