@@ -16,6 +16,7 @@
         <exclude>
             <group>redis</group>
             <group>clickhouse</group>
+            <group>slow</group>
         </exclude>
     </groups>
     <source>

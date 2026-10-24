@@ -22,8 +22,10 @@ use DateTimeZone;
  * occurrences are kept, because the instant, not the local label, identifies a bucket (labels in TrendsResult
  * carry the offset).
  *
- * KNOWN LIMITS: a zone whose DST shift is not a whole hour (Australia/Lord_Howe, 30 minutes) is compared in
- * the oracle tests and any difference is documented there; PHP and ClickHouse each ship their own tzdata, so a
+ * KNOWN LIMITS: Australia/Lord_Howe (DST shift of 30 minutes): day, week and month agree with ClickHouse, the
+ * hourly axis does not after the change (ClickHouse stays on the half hour UTC grid; documented and pinned in
+ * BucketAxisOracleTest). Every other PHP zone agreed with ClickHouse 25.8 over a spring and an autumn window of 2023
+ * (BucketAxisAllZonesTest, group slow, `composer test:slow`), Africa/Casablanca's Ramadan shift included; PHP and ClickHouse each ship their own tzdata, so a
  * zone whose rules changed recently can differ until both are updated. {@see TrendsResult::fromRows()} never
  * invents or drops a bucket because of such a difference: it aligns on the buckets ClickHouse returned.
  */
@@ -84,12 +86,34 @@ final class BucketAxis
                 Interval::Month => $first->modify("+{$i} months"),
                 Interval::Hour => throw new \LogicException('hours are handled separately'),
             };
-            // First instant of that local day (a missing local midnight resolves to the end of the gap).
-            $start = DateTimeImmutable::createFromFormat('!Y-m-d', $day->format('Y-m-d'), $zone)->getTimestamp();
+            $start = self::firstInstantOfLocalDate($day->format('Y-m-d'), $zone);
             if ($start >= $to) {
                 return $starts;
             }
             $starts[] = $start;
         }
+    }
+
+    /**
+     * The EARLIEST instant whose local date is `$date`: a missing local midnight (DST gap) resolves to the end of
+     * the gap, and a local midnight that happens twice (the clocks go back across midnight: Havana, or Antarctica/
+     * Casey on 2023-03-09, which went back three hours) resolves to its FIRST occurrence, which is what
+     * toStartOfInterval returns. PHP gives some instant with that date, then the loop walks back in quarter hours
+     * while the instant before it is still on the same local date.
+     */
+    private static function firstInstantOfLocalDate(string $date, DateTimeZone $zone): int
+    {
+        $start = DateTimeImmutable::createFromFormat('!Y-m-d', $date, $zone)->getTimestamp();
+
+        // Bounded: a local date is at most a day and a few hours long.
+        for ($i = 0; $i < 112; $i++) {
+            $before = (new DateTimeImmutable('@'.($start - 900)))->setTimezone($zone);
+            if ($before->format('Y-m-d') !== $date) {
+                break;
+            }
+            $start -= 900;
+        }
+
+        return $start;
     }
 }

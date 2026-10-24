@@ -54,6 +54,9 @@
         "test:clickhouse": [
             "CLICKHOUSE_INTEGRATION_URL=\"${CLICKHOUSE_INTEGRATION_URL:-http://clickhouse:8123}\" CLICKHOUSE_INTEGRATION_ADMIN_PASSWORD=\"${CLICKHOUSE_INTEGRATION_ADMIN_PASSWORD:-${CLICKHOUSE_PASSWORD:-posthog}}\" CLICKHOUSE_INTEGRATION_RO_PASSWORD=\"${CLICKHOUSE_INTEGRATION_RO_PASSWORD:-${CLICKHOUSE_RO_PASSWORD:-posthog_ro}}\" php artisan test --group=clickhouse"
         ],
+        "test:slow": [
+            "CLICKHOUSE_INTEGRATION_URL=\"${CLICKHOUSE_INTEGRATION_URL:-http://clickhouse:8123}\" CLICKHOUSE_INTEGRATION_ADMIN_PASSWORD=\"${CLICKHOUSE_INTEGRATION_ADMIN_PASSWORD:-${CLICKHOUSE_PASSWORD:-posthog}}\" CLICKHOUSE_INTEGRATION_RO_PASSWORD=\"${CLICKHOUSE_INTEGRATION_RO_PASSWORD:-${CLICKHOUSE_RO_PASSWORD:-posthog_ro}}\" php artisan test --group=slow"
+        ],
         "post-autoload-dump": [
             "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
             "@php artisan package:discover --ansi"
@@ -90,6 +93,7 @@
     "minimum-stability": "stable",
     "prefer-stable": true,
     "scripts-descriptions": {
+        "test:slow": "Runs the exhaustive all-zones BucketAxis comparison (group slow, minutes) against a real ClickHouse; same CLICKHOUSE_INTEGRATION_* variables as test:clickhouse. Run: docker compose exec -T app composer test:slow",
         "test:clickhouse": "Runs the opt-in two-tenant ClickHouse tests (group clickhouse) against a real ClickHouse; reads CLICKHOUSE_INTEGRATION_URL (default http://clickhouse:8123), CLICKHOUSE_INTEGRATION_ADMIN_PASSWORD (default CLICKHOUSE_PASSWORD or posthog) and CLICKHOUSE_INTEGRATION_RO_PASSWORD (default CLICKHOUSE_RO_PASSWORD or posthog_ro). Run: docker compose exec -T app composer test:clickhouse"
     }
 }

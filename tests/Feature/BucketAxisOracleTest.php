@@ -85,6 +85,8 @@ it('agrees with toStartOfInterval for a set of DST zones, every interval, around
     'Cairo 2023 (DST back after 2014)' => ['Africa/Cairo', '2023-04-15', '2023-05-10'],
     'Beirut (midnight gap)' => ['Asia/Beirut', '2023-03-15', '2023-04-05'],
     'Casablanca Ramadan 2023' => ['Africa/Casablanca', '2023-03-10', '2023-04-30'],
+    'Casey 2023-03-09 (clocks went back 3 hours across midnight: midnight happens twice)' => ['Antarctica/Casey', '2023-03-01', '2023-03-20'],
+    'Havana autumn (midnight happens twice)' => ['America/Havana', '2023-10-25', '2023-11-12'],
     'Kolkata (no DST, half hour offset)' => ['Asia/Kolkata', '2023-03-01', '2023-03-20'],
     'Kathmandu (+05:45)' => ['Asia/Kathmandu', '2023-03-01', '2023-03-20'],
     'Istanbul (no DST since 2016)' => ['Europe/Istanbul', '2023-03-01', '2023-04-15'],
