@@ -13,6 +13,6 @@ return [
     'cache_store' => env('INSIGHTS_CACHE_STORE', 'redis'),
 
     // At most one "cache unavailable, running live" warning per process per this many seconds, so a Redis
-    // outage cannot flood the log (same idea as capture.limiter_warning_interval_seconds).
+    // outage cannot flood the log (same idea as ratelimit.warning_interval_seconds).
     'cache_warning_interval_seconds' => 60,
 ];

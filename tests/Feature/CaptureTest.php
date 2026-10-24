@@ -1,10 +1,10 @@
 <?php
 
 use App\Domain\Capture\EventProducer;
-use App\Domain\Capture\LimiterOutage;
 use App\Domain\Capture\ProjectRateLimiter;
 use App\Models\Project;
 use App\Providers\AppServiceProvider;
+use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
@@ -29,7 +29,7 @@ afterEach(function () {
 /** The trusted proxies are applied when the provider boots, so re-boot it after changing the config. */
 function bootTrustedProxies(string|array|null $proxies): void
 {
-    config(['capture.trusted_proxies' => $proxies]);
+    config(['proxies.trusted' => $proxies]);
     app()->getProvider(AppServiceProvider::class)->boot();
 }
 
@@ -416,7 +416,7 @@ it('parses TRUSTED_PROXIES into the config value', function (string $env, mixed 
     $_SERVER['TRUSTED_PROXIES'] = $env;
 
     try {
-        expect((require config_path('capture.php'))['trusted_proxies'])->toBe($expected);
+        expect((require config_path('proxies.php'))['trusted'])->toBe($expected);
     } finally {
         putenv('TRUSTED_PROXIES');
         unset($_ENV['TRUSTED_PROXIES'], $_SERVER['TRUSTED_PROXIES']);

@@ -2,6 +2,7 @@
 
 namespace App\Domain\Capture;
 
+use App\Support\RateLimit\LimiterOutage;
 use Closure;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Support\Facades\Cache;

@@ -103,7 +103,7 @@ class AppServiceProvider extends ServiceProvider
      */
     protected function configureTrustedProxies(): void
     {
-        $proxies = config('capture.trusted_proxies');
+        $proxies = config('proxies.trusted');
         if ($proxies === null) {
             return;
         }

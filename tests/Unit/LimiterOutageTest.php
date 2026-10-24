@@ -1,10 +1,10 @@
 <?php
 
-use App\Domain\Capture\LimiterOutage;
+use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Support\Facades\Log;
 
 beforeEach(function () {
-    config(['capture.limiter_warning_interval_seconds' => 60]);
+    config(['ratelimit.warning_interval_seconds' => 60]);
     LimiterOutage::reset();
 });
 

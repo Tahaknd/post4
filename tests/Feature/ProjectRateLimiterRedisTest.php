@@ -1,7 +1,7 @@
 <?php
 
-use App\Domain\Capture\LimiterOutage;
 use App\Domain\Capture\ProjectRateLimiter;
+use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Support\Facades\Cache;
 use Tests\Support\RedisIntegration;

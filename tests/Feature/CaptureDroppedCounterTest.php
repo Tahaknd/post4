@@ -1,8 +1,8 @@
 <?php
 
 use App\Domain\Capture\EventProducer;
-use App\Domain\Capture\LimiterOutage;
 use App\Models\Project;
+use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;

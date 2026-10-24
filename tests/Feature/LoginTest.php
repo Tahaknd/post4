@@ -1,9 +1,9 @@
 <?php
 
 use App\Domain\Auth\LoginThrottle;
-use App\Domain\Capture\LimiterOutage;
 use App\Http\Controllers\Auth\LoginController;
 use App\Models\User;
+use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Cache\RateLimiter as CacheRateLimiter;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;

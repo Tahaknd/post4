@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Domain\Capture;
+namespace App\Support\RateLimit;
 
 use Closure;
 use Illuminate\Support\Facades\Log;
@@ -17,7 +17,7 @@ final class LimiterOutage
 
     /**
      * Runs $callback and returns its result; on any \Throwable logs at most one warning per
-     * capture.limiter_warning_interval_seconds (per process and $limiter family) and returns $fallback.
+     * ratelimit.warning_interval_seconds (per process and $limiter family) and returns $fallback.
      * $limiter only names the family in the log line ('capture' for the ingest limiters, 'login' for the
      * sign-in throttle) and keeps one family's warning from muting another's.
      *
@@ -48,7 +48,7 @@ final class LimiterOutage
     private static function warn(\Throwable $e, string $limiter): void
     {
         $now = time();
-        if ($now - (self::$lastWarningAt[$limiter] ?? 0) < (int) config('capture.limiter_warning_interval_seconds')) {
+        if ($now - (self::$lastWarningAt[$limiter] ?? 0) < (int) config('ratelimit.warning_interval_seconds')) {
             return;
         }
         self::$lastWarningAt[$limiter] = $now;

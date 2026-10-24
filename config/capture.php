@@ -49,25 +49,4 @@ return [
         'min_free_bytes' => (int) env('CAPTURE_STATUS_MIN_FREE_BYTES', 2 * 1024 ** 3),
         'snapshot_ttl_seconds' => 86400,
     ],
-
-    /* At most one "limiter unavailable, failing open" warning per process per this many seconds, so a Redis outage cannot flood the log. */
-    'limiter_warning_interval_seconds' => 60,
-
-    /*
-     * Reverse proxies whose X-Forwarded-* headers are trusted (env TRUSTED_PROXIES):
-     * unset/empty => null (trust nothing, so a direct client cannot spoof its ip),
-     * "*" => every caller, otherwise a comma-separated list of IPs/CIDRs.
-     */
-    'trusted_proxies' => (static function (): array|string|null {
-        $raw = trim((string) env('TRUSTED_PROXIES', ''));
-
-        if ($raw === '') {
-            return null;
-        }
-        if ($raw === '*') {
-            return '*';
-        }
-
-        return array_values(array_filter(array_map('trim', explode(',', $raw)), static fn (string $p): bool => $p !== ''));
-    })(),
 ];

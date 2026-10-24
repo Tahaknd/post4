@@ -1,7 +1,7 @@
 <?php
 
 use App\Domain\Capture\FailureLimiter;
-use App\Domain\Capture\LimiterOutage;
+use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 

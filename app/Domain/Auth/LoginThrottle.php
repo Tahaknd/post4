@@ -2,9 +2,9 @@
 
 namespace App\Domain\Auth;
 
-use App\Domain\Capture\ClientIp;
-use App\Domain\Capture\LimiterOutage;
 use App\Models\User;
+use App\Support\RateLimit\ClientIp;
+use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Support\Facades\RateLimiter;
 
 /**

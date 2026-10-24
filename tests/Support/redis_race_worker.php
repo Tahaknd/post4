@@ -24,11 +24,13 @@ require __DIR__.'/../../vendor/autoload.php';
 putenv("REDIS_INTEGRATION_HOST={$host}");
 
 $app = new Application(dirname(__DIR__, 2));
-$app->instance('config', new Config(['capture' => [
-    'project_events_per_minute' => (int) $limit,
-    'max_batch_size' => (int) $maxBatch,
-    'limiter_warning_interval_seconds' => 60,
-]]));
+$app->instance('config', new Config([
+    'capture' => [
+        'project_events_per_minute' => (int) $limit,
+        'max_batch_size' => (int) $maxBatch,
+    ],
+    'ratelimit' => ['warning_interval_seconds' => 60],
+]));
 $app->instance('log', new NullLogger);
 $app->instance('cache', RedisIntegration::repository(RedisIntegration::manager($app), $storePrefix));
 Facade::setFacadeApplication($app);

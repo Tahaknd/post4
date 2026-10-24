@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Domain\Capture;
+namespace App\Support\RateLimit;
 
 /**
  * Normalises a client ip into the string the per-ip limiters key on (capture failures and sign-in
