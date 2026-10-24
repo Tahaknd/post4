@@ -2,11 +2,11 @@
 import { Head, Link, usePage } from '@inertiajs/vue3';
 import { computed } from 'vue';
 
-import { PROJECTS_CREATE_URL, PROJECTS_URL, projectUrl } from '@/routes';
+import { PROJECTS_CREATE_URL, PROJECTS_URL } from '@/routes';
 
 const page = usePage();
 
-// The shared `projects` prop: id and name of the projects the user can open (at most 50), never a key.
+// The shared `projects` prop: id, name and server-built url of the projects the user can open (at most 50), never a key.
 const projects = computed(() => page.props.projects ?? []);
 </script>
 
@@ -31,7 +31,7 @@ const projects = computed(() => page.props.projects ?? []);
             <h2 class="font-medium">Your projects</h2>
             <ul class="divide-y divide-line rounded-md border border-line bg-surface">
                 <li v-for="project in projects" :key="project.id">
-                    <Link :href="projectUrl(project.id)" class="block px-4 py-3 font-medium text-accent hover:text-accent-hover">{{ project.name }}</Link>
+                    <Link :href="project.url" class="block px-4 py-3 font-medium text-accent hover:text-accent-hover">{{ project.name }}</Link>
                 </li>
             </ul>
             <p class="flex gap-4 text-sm">

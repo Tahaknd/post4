@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, ref } from 'vue';
+import { nextTick, onBeforeUnmount, ref } from 'vue';
 
 import SecondaryButton from '@/Components/SecondaryButton.vue';
 
@@ -35,6 +35,11 @@ function copyWithSelection() {
 
 async function copy() {
     clearTimeout(timer);
+
+    // Empty first and set on a later tick: a live region announces a CHANGE, so copying twice in a row would
+    // otherwise stay silent the second time (the text would not change).
+    message.value = '';
+    await nextTick();
 
     let copied = false;
 

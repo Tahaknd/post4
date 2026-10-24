@@ -8,6 +8,12 @@ use Inertia\Middleware;
 
 class HandleInertiaRequests extends Middleware
 {
+    /** The navigation lists at most this many projects; the project list page shows them all. */
+    public const int PROJECT_LIMIT = 50;
+
+    /** @var array{list: list<array{id: int, name: string, url: string}>, truncated: bool}|null the nav projects of this request, read once */
+    private ?array $navProjects = null;
+
     /**
      * The root template that is loaded on the first page visit.
      *
@@ -35,8 +41,8 @@ class HandleInertiaRequests extends Middleware
 
     /**
      * Props shared with every page. Values safe for anyone who can load the page, as plain data (never an
-     * Eloquent model); secrets (project keys, ClickHouse settings) never belong here. `auth`, `flash` and
-     * `projects` are closures, so they are only evaluated when a page is rendered (a redirect never reads
+     * Eloquent model); secrets (project keys, ClickHouse settings) never belong here. `auth`, `flash`,
+     * `projects` and `projectsTruncated` are closures, so they are only evaluated when a page is rendered (a redirect never reads
      * them, and a partial reload skips them).
      *
      * @return array<string, mixed>
@@ -51,8 +57,10 @@ class HandleInertiaRequests extends Middleware
             'auth' => fn () => [
                 'user' => $this->user($request),
             ],
-            // The project selector of the navigation: id and name only, at most PROJECT_LIMIT, never a key.
-            'projects' => fn () => $this->projects($request),
+            // The project menu of the navigation: id, name and the server-built URL, at most PROJECT_LIMIT, never a key.
+            // The project being viewed is always in the list; `projectsTruncated` says there are more.
+            'projects' => fn () => $this->navProjects($request)['list'],
+            'projectsTruncated' => fn () => $this->navProjects($request)['truncated'],
             'flash' => fn () => [
                 // Not every request that renders a page has a session (404 pages of unmatched routes).
                 'status' => $request->hasSession() ? $request->session()->get('status') : null,
@@ -60,28 +68,43 @@ class HandleInertiaRequests extends Middleware
         ];
     }
 
-    /** The navigation lists at most this many projects; the project list page shows them all. */
-    public const int PROJECT_LIMIT = 50;
-
     /**
-     * @return list<array{id: int, name: string}>
+     * @return array{list: list<array{id: int, name: string, url: string}>, truncated: bool}
      */
-    private function projects(Request $request): array
+    private function navProjects(Request $request): array
     {
+        if ($this->navProjects !== null) {
+            return $this->navProjects;
+        }
+
         $user = $request->user();
 
         if ($user === null) {
-            return [];
+            return $this->navProjects = ['list' => [], 'truncated' => false];
         }
 
-        return Project::query()
-            ->visibleTo($user)
-            ->orderBy('name')
-            ->orderBy('id')
-            ->limit(self::PROJECT_LIMIT)
-            ->get(['id', 'name'])
-            ->map(fn (Project $project) => ['id' => $project->id, 'name' => $project->name])
-            ->all();
+        // One more than the limit tells whether the list is cut.
+        $found = Project::query()->visibleTo($user)->orderBy('name')->orderBy('id')->limit(self::PROJECT_LIMIT + 1)->get(['id', 'name']);
+        $truncated = $found->count() > self::PROJECT_LIMIT;
+        $projects = $found->take(self::PROJECT_LIMIT)->all();
+
+        // The project on screen must be in the menu even when it sorts past the cut (route binding has already
+        // limited it to what the user may open).
+        $current = $request->route('project');
+        if ($current instanceof Project && ! in_array($current->getKey(), array_map(fn (Project $project) => $project->getKey(), $projects), true)) {
+            array_pop($projects);
+            $projects[] = $current;
+            usort($projects, fn (Project $a, Project $b) => [mb_strtolower($a->name), $a->id] <=> [mb_strtolower($b->name), $b->id]);
+        }
+
+        return $this->navProjects = [
+            'list' => array_map(fn (Project $project) => [
+                'id' => $project->id,
+                'name' => $project->name,
+                'url' => route('projects.show', $project, absolute: false),
+            ], $projects),
+            'truncated' => $truncated,
+        ];
     }
 
     /**

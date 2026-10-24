@@ -29,7 +29,7 @@ it('lists only the projects the user can open on the Home page, without keys', f
 
     $props = $this->actingAs($member)->get('/')->viewData('page')['props'];
 
-    expect($props['projects'])->toBe([['id' => $mine->id, 'name' => 'Mine']]);
+    expect($props['projects'])->toBe([['id' => $mine->id, 'name' => 'Mine', 'url' => "/projects/{$mine->id}"]]);
 
     $admin = User::factory()->admin()->create();
     $names = array_column($this->actingAs($admin)->get('/')->viewData('page')['props']['projects'], 'name');
@@ -40,10 +40,11 @@ it('lists only the projects the user can open on the Home page, without keys', f
 it('shares exactly the app name, errors, auth and flash with a guest page', function () {
     $props = $this->get('/login')->viewData('page')['props'];
 
-    expect(array_keys($props))->toEqualCanonicalizing(['errors', 'app', 'auth', 'projects', 'flash', 'canRegister', 'next'])
+    expect(array_keys($props))->toEqualCanonicalizing(['errors', 'app', 'auth', 'projects', 'projectsTruncated', 'flash', 'canRegister', 'next'])
         ->and($props['app'])->toBe(['name' => config('app.name')])
         ->and($props['auth'])->toBe(['user' => null])
         ->and($props['projects'])->toBe([])
+        ->and($props['projectsTruncated'])->toBeFalse()
         ->and($props['flash'])->toBe(['status' => null]);
 });
 

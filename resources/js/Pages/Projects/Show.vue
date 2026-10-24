@@ -92,9 +92,9 @@ function destroy() {
             <p class="text-sm text-muted">Events must carry this key. Keep it out of public repositories.</p>
             <p class="break-all rounded-md border border-line bg-surface px-3 py-2 font-mono text-sm" data-testid="api-key">{{ shownKey }}</p>
             <div class="flex flex-wrap items-center gap-3">
-                <SecondaryButton :aria-pressed="revealed ? 'true' : 'false'" @click="revealed = !revealed">
-                    {{ revealed ? 'Hide key' : 'Show key' }}
-                </SecondaryButton>
+                <!-- A constant name with aria-pressed: the state is announced once ("Reveal key, toggle button, pressed"),
+                     not twice by a label that flips as well. -->
+                <SecondaryButton :aria-pressed="revealed ? 'true' : 'false'" @click="revealed = !revealed">Reveal key</SecondaryButton>
                 <CopyButton :text="api_key" label="Copy key" />
             </div>
         </section>
@@ -142,9 +142,9 @@ function destroy() {
     </div>
 
     <ConfirmDialog :open="rotateOpen" title="Replace the API key?" @close="rotateOpen = false">
-        <p class="text-sm text-muted">
+        <template #description>
             The current key is rejected from now on. Update every place that sends events with the new key afterwards.
-        </p>
+        </template>
         <div class="flex justify-end gap-3">
             <SecondaryButton autofocus @click="rotateOpen = false">Cancel</SecondaryButton>
             <DangerButton type="button" :disabled="rotating" @click="rotate">Replace key</DangerButton>
@@ -152,11 +152,11 @@ function destroy() {
     </ConfirmDialog>
 
     <ConfirmDialog :open="deleteOpen" title="Delete this project?" @close="deleteOpen = false">
+        <template #description>
+            The project and all of its events will be deleted. Events are removed in the background, which can take a
+            few minutes. Type <strong class="text-fg">{{ project.name }}</strong> to confirm.
+        </template>
         <form ref="deleteFormRef" class="space-y-4" novalidate @submit.prevent="destroy">
-            <p class="text-sm text-muted">
-                The project and all of its events will be deleted. Events are removed in the background, which can take a
-                few minutes. Type <strong class="text-fg">{{ project.name }}</strong> to confirm.
-            </p>
             <TextField
                 v-model="deleteForm.confirm_name"
                 label="Project name"

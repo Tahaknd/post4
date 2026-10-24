@@ -70,12 +70,8 @@ it('detects a constant that matches no route', function () {
         ->and(routeExists('POST', '/login-typo'))->toBeFalse();
 });
 
-it('keeps the projectUrl() helper of routes.js on the project page route', function () {
+it('has no id-templated URL helper: URLs with parameters come from the server', function () {
     $source = file_get_contents(dirname(__DIR__, 2).'/resources/js/routes.js');
-    $urls = frontendUrlConstants();
 
-    expect($source)->toContain('export const projectUrl = (id) => `${PROJECTS_URL}/${id}`;')
-        ->and(routeExists('GET', $urls['PROJECTS_URL'].'/1'))->toBeTrue()
-        ->and(routeExists('GET', $urls['PROJECTS_CREATE_URL']))->toBeTrue()
-        ->and(routeExists('POST', $urls['PROJECTS_URL']))->toBeTrue();
+    expect($source)->not->toContain('projectUrl')->not->toContain('${');
 });

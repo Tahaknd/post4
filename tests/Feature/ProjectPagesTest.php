@@ -7,6 +7,7 @@ use App\Jobs\PurgeProjectEvents;
 use App\Models\Project;
 use App\Models\User;
 use App\Support\RateLimit\LimiterOutage;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Inertia\Testing\AssertableInertia;
@@ -62,28 +63,63 @@ describe('index', function () {
 });
 
 describe('shared props', function () {
-    it('shares the nav project list as id and name only, ordered, capped at 50, and never a key', function () {
+    it('shares the nav project list as id, name and server-built url, ordered, capped at 50, and never a key', function () {
         $user = User::factory()->admin()->create();
         foreach (range(1, 55) as $n) {
             Project::factory()->create(['name' => sprintf('P%02d', $n)]);
         }
 
         $props = $this->actingAs($user)->get('/')->viewData('page')['props'];
+        $first = $props['projects'][0];
 
         expect($props['projects'])->toHaveCount(HandleInertiaRequests::PROJECT_LIMIT)
-            ->and(array_keys($props['projects'][0]))->toBe(['id', 'name'])
-            ->and($props['projects'][0]['name'])->toBe('P01')
+            ->and($props['projectsTruncated'])->toBeTrue()
+            ->and(array_keys($first))->toBe(['id', 'name', 'url'])
+            ->and($first['name'])->toBe('P01')
+            ->and($first['url'])->toBe("/projects/{$first['id']}")
             ->and(json_encode($props))->not->toContain('phc_');
     });
 
-    it('does not read the project list for a request that only redirects', function () {
-        $project = Project::factory()->create();
+    it('says nothing is truncated when every project fits', function () {
+        Project::factory()->count(3)->create();
+
+        $props = $this->actingAs(User::factory()->admin()->create())->get('/')->viewData('page')['props'];
+
+        expect($props['projects'])->toHaveCount(3)->and($props['projectsTruncated'])->toBeFalse();
+    });
+
+    it('always lists the project on screen, even when it sorts past the cap', function () {
+        foreach (range(1, 55) as $n) {
+            Project::factory()->create(['name' => sprintf('P%02d', $n)]);
+        }
+        $last = Project::factory()->create(['name' => 'Zulu']);
+
+        $props = $this->actingAs(User::factory()->admin()->create())->get("/projects/{$last->id}")->viewData('page')['props'];
+
+        expect($props['projects'])->toHaveCount(HandleInertiaRequests::PROJECT_LIMIT)
+            ->and($props['projectsTruncated'])->toBeTrue()
+            ->and(array_column($props['projects'], 'id'))->toContain($last->id)
+            ->and(array_column($props['projects'], 'name'))->toBe(array_values(array_unique(array_column($props['projects'], 'name'))));
+    });
+
+    it('builds the shared props lazily: nothing is read until a page renders', function () {
+        Project::factory()->create();
+        $request = Request::create('/');
+        $request->setUserResolver(fn () => User::factory()->admin()->create());
         DB::enableQueryLog();
 
-        $this->actingAs(User::factory()->admin()->create())->put("/projects/{$project->id}/api-key")->assertStatus(303);
+        $shared = (new HandleInertiaRequests)->share($request);
 
-        $navQueries = array_filter(DB::getQueryLog(), fn ($q) => str_contains($q['query'], 'limit 50'));
-        expect($navQueries)->toBe([]);
+        expect($shared['projects'])->toBeInstanceOf(Closure::class)
+            ->and($shared['projectsTruncated'])->toBeInstanceOf(Closure::class)
+            ->and($shared['auth'])->toBeInstanceOf(Closure::class)
+            ->and(array_filter(DB::getQueryLog(), fn (array $q) => str_contains($q['query'], 'projects')))->toBe([]);
+
+        // And once it is called, it reads the list once for both props.
+        DB::flushQueryLog();
+        $shared['projects']();
+        $shared['projectsTruncated']();
+        expect(array_filter(DB::getQueryLog(), fn (array $q) => str_contains($q['query'], 'from "projects"')))->toHaveCount(1);
     });
 
     it('shows a member only their projects in the nav list', function () {
@@ -91,7 +127,7 @@ describe('shared props', function () {
 
         $props = $this->actingAs($member)->get('/')->viewData('page')['props'];
 
-        expect($props['projects'])->toBe([['id' => $mine->id, 'name' => 'Mine']]);
+        expect($props['projects'])->toBe([['id' => $mine->id, 'name' => 'Mine', 'url' => "/projects/{$mine->id}"]]);
     });
 });
 
@@ -104,7 +140,6 @@ describe('create and store', function () {
                 ->where('default_timezone', 'UTC')
                 ->where('store_url', '/projects')
                 ->where('index_url', '/projects')
-                ->has('timezones', fn ($zones) => $zones->etc())
                 ->where('timezones', DateTimeZone::listIdentifiers()));
     });
 
@@ -366,6 +401,6 @@ describe('home', function () {
 
         [$member, $mine] = memberWithProjects();
         $this->actingAs($member)->get('/')
-            ->assertInertia(fn (AssertableInertia $page) => $page->where('projects', [['id' => $mine->id, 'name' => 'Mine']]));
+            ->assertInertia(fn (AssertableInertia $page) => $page->where('projects', [['id' => $mine->id, 'name' => 'Mine', 'url' => "/projects/{$mine->id}"]]));
     });
 });
