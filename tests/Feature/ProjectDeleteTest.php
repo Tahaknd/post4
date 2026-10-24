@@ -1,11 +1,14 @@
 <?php
 
+use App\Actions\Projects\DeleteProject;
 use App\Console\Commands\ProjectDelete;
 use App\Domain\Capture\ProjectResolver;
+use App\Jobs\PurgeProjectEvents;
 use App\Models\Project;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Exceptions;
+use Illuminate\Support\Facades\Queue;
 use Tests\Support\ProjectCache;
 
 function deletePrompt(Project $project): string
@@ -117,4 +120,36 @@ it('still deletes and exits 0 with a warning when the cache is down', function (
         ->toContain((string) ProjectResolver::POSITIVE_TTL_SECONDS)
         ->and(Project::whereKey($project->id)->exists())->toBeFalse();
     Exceptions::assertReported(RuntimeException::class);
+});
+
+it('keeps the events by default, queues no purge and warns loudly on stderr', function () {
+    Queue::fake();
+    $project = Project::factory()->create();
+
+    expect(Artisan::call('project:delete', ['api_key' => $project->api_key, '--force' => true]))->toBe(0);
+
+    $output = preg_replace('/\s+/', ' ', Artisan::output());
+    expect($output)->toContain("Events of project #{$project->id} were KEPT in ClickHouse")->toContain('--purge-events');
+    Queue::assertNothingPushed();
+});
+
+it('queues the two purge passes with --purge-events and says so', function () {
+    Queue::fake();
+    $project = Project::factory()->create();
+
+    expect(Artisan::call('project:delete', ['api_key' => $project->api_key, '--force' => true, '--purge-events' => true]))->toBe(0);
+
+    expect(Artisan::output())->toContain('Events purge queued')->not->toContain('KEPT');
+    Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 1);
+    Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 2 && $job->delay === DeleteProject::SECOND_PASS_DELAY_SECONDS);
+});
+
+it('words the confirmation prompt after what will happen to the events', function () {
+    $project = Project::factory()->create(['name' => 'Shop']);
+
+    $this->artisan('project:delete', ['api_key' => $project->api_key, '--purge-events' => true])
+        ->expectsConfirmation("Delete project #{$project->id} \"Shop\"? Its events will be deleted from ClickHouse too.", 'no')
+        ->assertExitCode(1);
+
+    expect(Project::whereKey($project->id)->exists())->toBeTrue();
 });

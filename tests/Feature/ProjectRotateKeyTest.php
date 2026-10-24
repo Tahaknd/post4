@@ -47,14 +47,14 @@ it('rejects a non-numeric project id without touching the database', function (s
 
     expect(Artisan::call('project:rotate-key', ['id' => $id]))->toBe(1);
 
-    expect(Artisan::output())->toContain('Geçersiz proje kimliği.')
+    expect(Artisan::output())->toContain('Invalid project id.')
         ->and(DB::getQueryLog())->toBeEmpty();
 })->with(['letters' => 'abc', 'negative' => '-1', 'decimal' => '1.5', 'mixed' => '12a', 'whitespace' => ' 1']);
 
 it('rejects an id too long for a bigint', function () {
     expect(Artisan::call('project:rotate-key', ['id' => '99999999999999999999']))->toBe(1);
 
-    expect(Artisan::output())->toContain('Geçersiz proje kimliği.');
+    expect(Artisan::output())->toContain('Invalid project id.');
 });
 
 it('still prints the new key when the cache cannot be cleared', function () {
@@ -75,5 +75,6 @@ it('derives the cache warning duration from the resolver TTL', function () {
 
     expect(Artisan::call('project:rotate-key', ['id' => $project->id]))->toBe(0);
 
-    expect(Artisan::output())->toContain('en fazla '.intdiv(ProjectResolver::POSITIVE_TTL_SECONDS, 60).' dakika');
+    // The console wraps long lines: compare without line breaks.
+    expect(preg_replace('/\s+/', ' ', Artisan::output()))->toContain('up to '.ProjectResolver::POSITIVE_TTL_SECONDS.' seconds');
 });

@@ -56,7 +56,7 @@ it('rejects --json together with --key-only without creating anything', function
 it('keeps the default and --key-only outputs unchanged', function () {
     expect(Artisan::call('project:create', ['name' => 'A']))->toBe(0);
     $project = Project::firstOrFail();
-    expect(Artisan::output())->toBe("Proje #{$project->id} oluşturuldu. API anahtarı: {$project->api_key}\n");
+    expect(Artisan::output())->toBe("Project #{$project->id} created. API key: {$project->api_key}\n");
 
     expect(Artisan::call('project:create', ['name' => 'B', '--key-only' => true]))->toBe(0);
     expect(Artisan::output())->toBe(Project::where('name', 'B')->value('api_key')."\n");
