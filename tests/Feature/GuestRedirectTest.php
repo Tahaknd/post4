@@ -4,10 +4,8 @@ use App\Models\User;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
-use Tests\Support\FakeViteBuild;
 
 beforeEach(function () {
-    $this->publicPath = FakeViteBuild::install();
     Route::middleware(['web', 'auth'])->group(function () {
         Route::put('/t-protected', fn () => 'x');
         Route::patch('/t-protected', fn () => 'x');
@@ -19,10 +17,6 @@ beforeEach(function () {
         Route::put('/t-open', fn () => 'x');
         Route::delete('/t-open', fn () => 'x');
     });
-});
-
-afterEach(function () {
-    FakeViteBuild::remove($this->publicPath);
 });
 
 function sessionCookie(): string

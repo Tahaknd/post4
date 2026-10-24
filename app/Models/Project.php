@@ -26,8 +26,6 @@ class Project extends Model
 
     protected $fillable = ['name', 'api_key', 'timezone'];
 
-    public const ROLE_MEMBER = 'member';
-
     public static function generateApiKey(): string
     {
         return self::API_KEY_PREFIX.Str::random(self::API_KEY_RANDOM_LENGTH);
@@ -38,7 +36,7 @@ class Project extends Model
      */
     public function users(): BelongsToMany
     {
-        return $this->belongsToMany(User::class)->withPivot('role')->withTimestamps();
+        return $this->belongsToMany(User::class)->using(ProjectUser::class)->withPivot('role')->withTimestamps();
     }
 
     /**

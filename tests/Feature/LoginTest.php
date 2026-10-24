@@ -13,15 +13,12 @@ use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia;
 use Tests\Support\FailingCacheStore;
-use Tests\Support\FakeViteBuild;
 
 beforeEach(function () {
-    $this->publicPath = FakeViteBuild::install();
     $this->user = User::factory()->create(['email' => 'ada@example.test', 'password' => 'correct horse battery']);
 });
 
 afterEach(function () {
-    FakeViteBuild::remove($this->publicPath);
     LimiterOutage::reset();
 });
 
@@ -158,7 +155,7 @@ it('blocks the sixth failed attempt for the same email and ip with 429 and Retry
     expect(Auth::check())->toBeFalse();
 });
 
-it('keeps a blocked email from being probed from another address only by that pair', function () {
+it('blocks only the failing (email, ip) pair and lets the same account sign in from another address', function () {
     foreach (range(1, 5) as $attempt) {
         login(['password' => 'wrong wrong wrong']);
     }

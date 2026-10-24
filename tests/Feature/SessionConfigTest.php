@@ -4,7 +4,6 @@ use Dotenv\Repository\Adapter\ArrayAdapter;
 use Dotenv\Repository\RepositoryBuilder;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Support\Env;
-use Tests\Support\FakeViteBuild;
 
 /**
  * Evaluates a config file as the framework would with the given environment values. The real env
@@ -80,12 +79,9 @@ it('keeps the session cookie HttpOnly, SameSite=Lax and rolling for two hours', 
 });
 
 it('sends the session cookie with HttpOnly and SameSite=Lax, plus Secure over https', function () {
-    $public = FakeViteBuild::install();
     config(['session.secure' => true]);
 
     $cookie = collect($this->get('/login')->headers->getCookies())->first(fn ($c) => $c->getName() === config('session.cookie'));
-
-    FakeViteBuild::remove($public);
 
     expect($cookie->isHttpOnly())->toBeTrue()
         ->and($cookie->getSameSite())->toBe('lax')

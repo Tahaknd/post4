@@ -43,7 +43,7 @@ services:
   #   * The three anonymous vendor volumes (app, worker, scheduler) are independent copies. A package
   #     installed with `composer require` inside ONE container exists only in that container's volume, and a
   #     long-running worker hides the gap until it is recreated and then crash-loops with 'Class ... not
-  #     found' (seen with inertia-laravel in 3.4). Rebuild the image (`docker compose build app`) so every
+  #     found'. Rebuild the image (`docker compose build app`) so every
   #     volume is seeded from the same vendor tree, or `composer install` in each of the three.
   #   * An unclean stop of this service (docker kill, daemon crash) can leave public/hot behind and
   #     the app then points at a dead dev server: `rm -f public/hot`. A normal `stop`/`down` removes it.

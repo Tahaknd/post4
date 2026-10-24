@@ -7,14 +7,6 @@ use Illuminate\Support\Facades\File;
 use Inertia\Testing\AssertableInertia;
 use Tests\Support\FakeViteBuild;
 
-beforeEach(function () {
-    $this->publicPath = FakeViteBuild::install();
-});
-
-afterEach(function () {
-    FakeViteBuild::remove($this->publicPath);
-});
-
 it('redirects a guest from the Home page to the login page', function () {
     $this->get('/')->assertRedirect('/login');
 });

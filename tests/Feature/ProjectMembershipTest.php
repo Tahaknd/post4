@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\Project;
+use App\Models\ProjectRole;
 use App\Models\User;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
@@ -12,7 +13,7 @@ it('links users and projects through the project_user pivot with a default membe
     $user->projects()->attach($project);
 
     expect($user->projects)->toHaveCount(1)
-        ->and($user->projects->first()->pivot->role)->toBe(Project::ROLE_MEMBER)
+        ->and($user->projects->first()->pivot->role)->toBe(ProjectRole::Member)
         ->and($project->users->pluck('id')->all())->toBe([$user->id])
         ->and($project->users->first()->pivot->created_at)->not->toBeNull();
 });

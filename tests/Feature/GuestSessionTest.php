@@ -5,15 +5,6 @@ use App\Models\User;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Session\Middleware\StartSession;
 use Illuminate\Support\Facades\Route;
-use Tests\Support\FakeViteBuild;
-
-beforeEach(function () {
-    $this->publicPath = FakeViteBuild::install();
-});
-
-afterEach(function () {
-    FakeViteBuild::remove($this->publicPath);
-});
 
 /** Names of every cookie the response sets. */
 function setCookieNames($response): array

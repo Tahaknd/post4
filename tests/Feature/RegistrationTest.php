@@ -8,15 +8,6 @@ use App\Models\User;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Inertia\Testing\AssertableInertia;
-use Tests\Support\FakeViteBuild;
-
-beforeEach(function () {
-    $this->publicPath = FakeViteBuild::install();
-});
-
-afterEach(function () {
-    FakeViteBuild::remove($this->publicPath);
-});
 
 function registrationPayload(array $overrides = []): array
 {

@@ -3,15 +3,9 @@
 use App\Models\User;
 use Illuminate\Support\Facades\Route;
 use Inertia\Testing\AssertableInertia;
-use Tests\Support\FakeViteBuild;
 
 beforeEach(function () {
-    $this->publicPath = FakeViteBuild::install();
     config(['app.debug' => false]);
-});
-
-afterEach(function () {
-    FakeViteBuild::remove($this->publicPath);
 });
 
 it('renders the Error page for an unknown HTML path', function () {
