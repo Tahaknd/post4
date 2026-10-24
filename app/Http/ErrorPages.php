@@ -3,10 +3,12 @@
 namespace App\Http;
 
 use App\Http\Middleware\HandleInertiaRequests;
+use App\Http\Middleware\RejectSessionlessGuests;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Router;
 use Inertia\ExceptionResponse;
+use Inertia\Inertia;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\TooManyRequestsHttpException;
 use Throwable;
@@ -37,9 +39,6 @@ final class ErrorPages
         503 => 'The service is temporarily unavailable. Try again shortly.',
     ];
 
-    /** App-owned prefixes that stay plain (see class comment). Horizon is deliberately not listed. */
-    private const array PLAIN_PREFIXES = ['up', 'build', 'storage', '_inertia', 'api'];
-
     public function __construct(private readonly Router $router, private readonly Kernel $kernel) {}
 
     public function respond(Response $response, Throwable $exception, Request $request): Response
@@ -53,7 +52,7 @@ final class ErrorPages
         if ($status === 419) {
             // A session that expired while a form was open: go back to the page with a message instead of a dead end.
             return $request->hasSession()
-                ? redirect()->back()->with('status', 'The page expired. Please try again.')
+                ? RejectSessionlessGuests::redirectFor($request, $this->returnUrl($request))->with('status', 'The page expired. Please try again.')
                 : $response;
         }
 
@@ -64,6 +63,11 @@ final class ErrorPages
         $message = $exception instanceof TooManyRequestsHttpException && $exception->getMessage() !== ''
             ? $exception->getMessage()
             : self::PAGE_STATUSES[$status];
+
+        if ($request->user() !== null) {
+            // Signed-in pages are served with encrypted history; their error pages must not be the exception.
+            Inertia::encryptHistory();
+        }
 
         $page = (new ExceptionResponse($exception, $request, $response, $this->router, $this->kernel))
             ->usingMiddleware(HandleInertiaRequests::class)
@@ -79,6 +83,29 @@ final class ErrorPages
         return $page;
     }
 
+    /**
+     * Where to send someone whose form expired: the page they came from, but only when the Referer names this
+     * very host (a forged or foreign Referer must not turn the 419 into an open redirect), else the start page.
+     */
+    private function returnUrl(Request $request): string
+    {
+        $referer = parse_url((string) $request->headers->get('referer'));
+
+        if (
+            is_array($referer)
+            && ($referer['host'] ?? null) === $request->getHost()
+            && ($referer['port'] ?? ($request->isSecure() ? 443 : 80)) === $request->getPort()
+        ) {
+            $path = NextUrl::sanitise(($referer['path'] ?? '/').(isset($referer['query']) ? '?'.$referer['query'] : ''), allowAuthPages: true);
+
+            if ($path !== null) {
+                return $path;
+            }
+        }
+
+        return $request->user() !== null ? route('home', absolute: false) : route('login', absolute: false);
+    }
+
     /** An HTML (or Inertia) request for a path the UI owns. */
     private function isUiRequest(Request $request): bool
     {
@@ -92,6 +119,9 @@ final class ErrorPages
             return false;
         }
 
-        return ! in_array(strtolower(explode('/', ltrim($path, '/'), 2)[0]), self::PLAIN_PREFIXES, true);
+        // App-owned prefixes (health, assets, storage, API ...) stay plain; Horizon's pages are UI and do not.
+        $plain = array_diff(ReservedPaths::APP_OWNED, ['horizon']);
+
+        return ! in_array(strtolower(explode('/', ltrim($path, '/'), 2)[0]), $plain, true);
     }
 }

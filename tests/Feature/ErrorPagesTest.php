@@ -79,20 +79,19 @@ it('renders the Error page for a 403 on an HTML request and plain JSON on a JSON
     $this->actingAs(User::factory()->create())->getJson('/horizon/api/stats')->assertForbidden()->assertHeaderMissing('X-Inertia');
 });
 
-it('renders the Error page for a 429 with the wait and keeps Retry-After', function () {
+it('renders the Error page for a 429 on a plain form post, with the wait and Retry-After', function () {
     User::factory()->create(['email' => 'ada@example.test']);
 
     foreach (range(1, 5) as $attempt) {
         $this->post('/login', ['email' => 'ada@example.test', 'password' => 'wrong wrong wrong']);
     }
 
-    $response = $this->post('/login', ['email' => 'ada@example.test', 'password' => 'wrong wrong wrong'], ['X-Inertia' => 'true', 'X-Inertia-Version' => hash_file('md5', $this->publicPath.'/build/manifest.json')]);
+    $response = $this->post('/login', ['email' => 'ada@example.test', 'password' => 'wrong wrong wrong']);
 
     $response->assertStatus(429)
-        ->assertJsonPath('component', 'Error')
-        ->assertJsonPath('props.status', 429);
+        ->assertInertia(fn (AssertableInertia $page) => $page->component('Error')->where('status', 429));
 
-    expect($response->json('props.message'))->toStartWith('Too many sign-in attempts. Try again in ')
+    expect($response->viewData('page')['props']['message'])->toStartWith('Too many sign-in attempts. Try again in ')
         ->and((int) $response->headers->get('Retry-After'))->toBeGreaterThan(0);
 });
 
@@ -122,8 +121,9 @@ it('redirects back with a message when the page expired (419)', function () {
     // CSRF verification is skipped while running unit tests; any other environment switches it on.
     app()->detectEnvironment(fn () => 'production');
 
-    $this->from('/login')
+    $this->from(url('/login'))
         ->post('/login', ['email' => 'ada@example.test', 'password' => 'whatever'])
+        ->assertStatus(303)
         ->assertRedirect('/login')
         ->assertSessionHas('status', 'The page expired. Please try again.');
 });

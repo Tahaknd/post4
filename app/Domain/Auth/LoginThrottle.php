@@ -8,24 +8,35 @@ use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Support\Facades\RateLimiter;
 
 /**
- * Throttles FAILED sign-ins on two budgets: per (email, ip) and per ip alone (so one address cannot
- * walk through many accounts). Both are fixed windows (config auth.login_throttle) kept in the cache
- * store (Redis, with bounded timeouts). It is a safety net like the capture limiters: when the
- * store is unreachable the attempt is let through (fail open, one throttled warning).
+ * Rate-limits sign-in attempts on three fixed-window budgets (config auth.login_throttle): per (email, ip),
+ * per ip alone (one address walking through many accounts) and per email alone (a botnet that gives every
+ * address its own few tries). Over ANY budget the answer is 429 + Retry-After for the window: it limits
+ * the rate, it never locks an account (the owner can sign in again as soon as the window passes, and a
+ * sign-in that is already open is not affected).
  *
- * The email is hashed in the key (no addresses in Redis), and counting failures for unknown emails
- * the same way as for real ones keeps the throttle from revealing which accounts exist.
+ * The attempt is counted BEFORE the password is checked: hit() increments atomically (INCR in Redis) and
+ * only the callers that land at or under the limit go on to verify, so N parallel requests cannot all slip
+ * through on a stale read; the overshoot is zero. A successful sign-in then gives its attempt back (the
+ * (email, ip) counter is cleared, the other two lose one), so a user who types the right password is not
+ * what exhausts a budget. The per-email budget is the one an attacker can use against the victim (spend it
+ * and the victim waits for the window): it is therefore well above the (email, ip) one.
+ *
+ * Like the capture limiters this is a safety net that FAILS OPEN: if the store is unreachable the attempt is
+ * let through and a throttled warning is logged. Emails are hashed in the keys (no addresses in Redis).
+ * Behind a reverse proxy the ip is the proxy's unless TRUSTED_PROXIES is set (config/proxies.php).
  */
 final class LoginThrottle
 {
-    /** Seconds until the caller may try again, or null when it is not blocked. */
-    public function blockedFor(string $email, string $ip): ?int
+    /**
+     * Counts one attempt. Returns the seconds to wait when it is over a budget, null when it may proceed.
+     */
+    public function hit(string $email, string $ip): ?int
     {
         return LimiterOutage::guard(function () use ($email, $ip): ?int {
             $wait = null;
 
-            foreach ([[$this->pairKey($email, $ip), $this->pairLimit()], [$this->ipKey($ip), $this->ipLimit()]] as [$key, $limit]) {
-                if (RateLimiter::tooManyAttempts($key, $limit)) {
+            foreach ($this->budgets($email, $ip) as [$key, $limit]) {
+                if (RateLimiter::hit($key, $this->window()) > $limit) {
                     $wait = max($wait ?? 1, RateLimiter::availableIn($key));
                 }
             }
@@ -34,39 +45,39 @@ final class LoginThrottle
         }, limiter: 'login');
     }
 
-    /** Counts a failed sign-in against both budgets. */
-    public function recordFailure(string $email, string $ip): void
+    /** Gives a successful sign-in's attempt back (see the class comment). */
+    public function succeeded(string $email, string $ip): void
     {
         LimiterOutage::guard(function () use ($email, $ip): void {
-            RateLimiter::hit($this->pairKey($email, $ip), $this->window());
-            RateLimiter::hit($this->ipKey($ip), $this->window());
+            RateLimiter::clear($this->pairKey($email, $ip));
+            RateLimiter::decrement($this->ipKey($ip), $this->window());
+            RateLimiter::decrement($this->emailKey($email), $this->window());
         }, limiter: 'login');
-    }
-
-    /** A successful sign-in forgives the (email, ip) failures; the per-ip budget keeps its count. */
-    public function clear(string $email, string $ip): void
-    {
-        LimiterOutage::guard(fn () => RateLimiter::clear($this->pairKey($email, $ip)), limiter: 'login');
     }
 
     public function pairKey(string $email, string $ip): string
     {
-        return 'login-fail:pair:'.hash('sha256', User::normaliseEmail($email).'|'.ClientIp::normalise($ip));
+        return 'login-attempts:pair:'.hash('sha256', User::normaliseEmail($email).'|'.ClientIp::normalise($ip));
     }
 
     public function ipKey(string $ip): string
     {
-        return 'login-fail:ip:'.ClientIp::normalise($ip);
+        return 'login-attempts:ip:'.ClientIp::normalise($ip);
     }
 
-    private function pairLimit(): int
+    public function emailKey(string $email): string
     {
-        return (int) config('auth.login_throttle.email_ip_limit');
+        return 'login-attempts:email:'.hash('sha256', User::normaliseEmail($email));
     }
 
-    private function ipLimit(): int
+    /** @return list<array{string, int}> */
+    private function budgets(string $email, string $ip): array
     {
-        return (int) config('auth.login_throttle.ip_limit');
+        return [
+            [$this->pairKey($email, $ip), (int) config('auth.login_throttle.email_ip_limit')],
+            [$this->ipKey($ip), (int) config('auth.login_throttle.ip_limit')],
+            [$this->emailKey($email), (int) config('auth.login_throttle.email_limit')],
+        ];
     }
 
     private function window(): int

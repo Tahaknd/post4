@@ -28,3 +28,8 @@ Route::middleware(['auth', 'auth.session', EncryptHistory::class])->group(functi
     Route::get('/', HomeController::class)->name('home');
     Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
 });
+
+// Unknown paths answer 404 inside the web group, so a signed-in user's error page knows who they are.
+// RejectSessionlessGuests answers 404 itself, without a session, when there is no session cookie or the path
+// belongs to capture/SDK; only a visitor presenting a session cookie gets here.
+Route::fallback(fn () => abort(404));

@@ -52,10 +52,22 @@ it('matches the email case-insensitively', function () {
     expect(Auth::id())->toBe($this->user->id);
 });
 
-it('sends the user back to the page they asked for', function () {
-    $this->withSession(['url.intended' => url('/horizon')])->post('/login', ['email' => 'ada@example.test', 'password' => 'correct horse battery'])
-        ->assertRedirect(url('/horizon'));
+it('sends the user back to the page they asked for through next', function () {
+    login(['next' => '/horizon'])->assertRedirect('/horizon');
 });
+
+it('falls back to the home page for a next that is not a same-origin path', function (string $next) {
+    login(['next' => $next])->assertRedirect('/');
+})->with([
+    'absolute url' => ['https://evil.example/'],
+    'protocol relative' => ['//evil.example/x'],
+    'backslash host' => ['/\\evil.example'],
+    'javascript' => ['javascript:alert(1)'],
+    'tab smuggled slash' => ["/\t/evil.example"],
+    'capture path' => ['/e/x'],
+    'login itself' => ['/login'],
+    'too long' => ['/'.str_repeat('a', 250)],
+]);
 
 it('does not set a remember-me cookie', function () {
     login(['remember' => true])->assertCookieMissing(Auth::guard('web')->getRecallerName());
@@ -221,3 +233,80 @@ it('fails open and warns once when the limiter store is unavailable', function (
             && $context === ['exception' => RuntimeException::class, 'message' => 'cache store unavailable'],
     );
 });
+
+it('blocks an email across addresses once its own budget is spent, without locking the account afterwards', function () {
+    config(['auth.login_throttle.email_limit' => 3, 'auth.login_throttle.email_ip_limit' => 50, 'auth.login_throttle.ip_limit' => 50]);
+
+    foreach (['203.0.113.1', '203.0.113.2', '203.0.113.3'] as $ip) {
+        $this->withServerVariables(['REMOTE_ADDR' => $ip])
+            ->post('/login', ['email' => 'ada@example.test', 'password' => 'wrong wrong wrong'])
+            ->assertSessionHasErrors('email');
+    }
+
+    // A fourth address is refused, even with the right password: the email is being rated.
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.4'])
+        ->post('/login', ['email' => 'ada@example.test', 'password' => 'correct horse battery'])
+        ->assertStatus(429);
+
+    // Another account on the same addresses is untouched.
+    User::factory()->create(['email' => 'bob@example.test', 'password' => 'correct horse battery']);
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.4'])
+        ->post('/login', ['email' => 'bob@example.test', 'password' => 'correct horse battery'])
+        ->assertRedirect('/');
+    Auth::logout();
+
+    // Rate limit, not lockout: the next window starts clean.
+    $this->travel(901)->seconds();
+    $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.4'])
+        ->post('/login', ['email' => 'ada@example.test', 'password' => 'correct horse battery'])
+        ->assertRedirect('/');
+});
+
+it('does not let successful sign-ins use up the per-address or per-email budgets', function () {
+    config(['auth.login_throttle.ip_limit' => 2, 'auth.login_throttle.email_limit' => 2]);
+
+    foreach (range(1, 6) as $attempt) {
+        login()->assertRedirect('/');
+        Auth::logout();
+    }
+
+    $key = fn (string $name, string ...$args) => (new LoginThrottle)->{$name}(...$args);
+
+    expect(RateLimiter::attempts($key('ipKey', '127.0.0.1')))->toBe(0)
+        ->and(RateLimiter::attempts($key('emailKey', 'ada@example.test')))->toBe(0);
+});
+
+it('answers a throttled Inertia form with a validation error on email and keeps the 429 for other clients', function () {
+    foreach (range(1, 5) as $attempt) {
+        login(['password' => 'wrong wrong wrong']);
+    }
+
+    $version = hash_file('md5', $this->publicPath.'/build/manifest.json');
+
+    $this->from('/login')
+        ->post('/login', ['email' => 'ada@example.test', 'password' => 'wrong wrong wrong'], ['X-Inertia' => 'true', 'X-Inertia-Version' => $version])
+        ->assertRedirect('/login')
+        ->assertSessionHasErrors('email');
+
+    expect(session('errors')->first('email'))->toStartWith('Too many sign-in attempts. Try again in ');
+
+    $json = $this->postJson('/login', ['email' => 'ada@example.test', 'password' => 'wrong wrong wrong'])->assertStatus(429);
+    expect((int) $json->headers->get('Retry-After'))->toBeGreaterThan(0);
+});
+
+it('counts the attempt before the password is checked', function () {
+    config(['auth.login_throttle.email_ip_limit' => 1]);
+    $throttle = new LoginThrottle;
+
+    // The first caller proceeds, and by the time it verifies the next one is already refused.
+    expect($throttle->hit('ada@example.test', '198.51.100.1'))->toBeNull()
+        ->and($throttle->hit('ada@example.test', '198.51.100.1'))->toBeInt();
+});
+
+it('runs exactly one password hash check whether or not the email exists', function (string $email) {
+    $hasher = Hash::partialMock();
+    $hasher->shouldReceive('make')->andReturn('$2y$04$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234');
+    $hasher->shouldReceive('check')->once()->andReturn(false);
+
+    login(['email' => $email, 'password' => 'wrong wrong wrong'])->assertSessionHasErrors('email');
+})->with(['existing user, wrong password' => ['ada@example.test'], 'unknown email' => ['nobody@example.test']]);

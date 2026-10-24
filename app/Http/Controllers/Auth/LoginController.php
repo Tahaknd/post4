@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Auth;
 
 use App\Domain\Auth\LoginThrottle;
 use App\Http\Controllers\Controller;
+use App\Http\NextUrl;
 use App\Http\Requests\Auth\LoginRequest;
 use App\Models\User;
 use Illuminate\Http\Exceptions\ThrottleRequestsException;
@@ -14,20 +15,23 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use SensitiveParameter;
 
 class LoginController extends Controller
 {
     /** Shown for an unknown email and for a wrong password alike: the answer must not reveal which accounts exist. */
     public const string FAILED_MESSAGE = 'These credentials do not match our records.';
 
-    /** Cached hash that stands in for the password of a missing user (see verifies()). */
+    /** Hash that stands in for the password of a missing user (see store()). One per worker process. */
     private static ?string $dummyHash = null;
 
-    public function create(): Response
+    public function create(Request $request): Response
     {
         return Inertia::render('Auth/Login', [
             // Only true until the first account exists: the page then offers "Create the first account".
             'canRegister' => User::query()->doesntExist(),
+            // The page the visitor was heading for; sanitised here and again after the post.
+            'next' => NextUrl::sanitise($request->query('next')),
         ]);
     }
 
@@ -37,26 +41,31 @@ class LoginController extends Controller
         $password = (string) $request->validated('password');
         $ip = (string) $request->ip();
 
-        if (($wait = $throttle->blockedFor($email, $ip)) !== null) {
-            throw new ThrottleRequestsException(
-                "Too many sign-in attempts. Try again in {$wait} seconds.",
-                headers: ['Retry-After' => $wait],
-            );
+        // Counted before anything is verified (atomically), so parallel guesses cannot all get through.
+        if (($wait = $throttle->hit($email, $ip)) !== null) {
+            $message = "Too many sign-in attempts. Try again in {$wait} seconds.";
+
+            // An Inertia form stays on the page and shows the message; other clients get the 429.
+            if ($request->header('X-Inertia')) {
+                throw ValidationException::withMessages(['email' => $message]);
+            }
+
+            throw new ThrottleRequestsException($message, headers: ['Retry-After' => $wait]);
         }
 
-        if (! $this->verifies($email, $password)) {
-            $throttle->recordFailure($email, $ip);
+        $user = $this->authenticate($email, $password);
 
+        if ($user === null) {
             throw ValidationException::withMessages(['email' => self::FAILED_MESSAGE]);
         }
 
-        $throttle->clear($email, $ip);
+        $throttle->succeeded($email, $ip);
 
-        // Auth::attempt already migrated the session; regenerating again is cheap and keeps the
-        // fixation guarantee independent of the guard's internals.
+        // Login::migrate() and an explicit regenerate: a new session id, the old one destroyed (no fixation).
+        Auth::login($user, remember: false);
         $request->session()->regenerate();
 
-        return redirect()->intended(route('home', absolute: false));
+        return redirect(NextUrl::sanitise($request->input('next')) ?? route('home', absolute: false));
     }
 
     public function destroy(Request $request): RedirectResponse
@@ -74,18 +83,19 @@ class LoginController extends Controller
     }
 
     /**
-     * Signs the user in without "remember me": the session cookie is the only credential and it expires with
-     * the session. A missing user still costs one password hash, so response time does not tell an unknown email from a
-     * wrong password.
+     * One lookup, one password hash, on every path: a missing user is checked against a dummy hash of the
+     * same cost, so neither the work done nor the response time says whether the email exists. The dummy is
+     * made before the lookup so the first request of a worker is no different for a hit and a miss.
+     * There is no "remember me": the session cookie is the only credential and it expires with the session.
      */
-    private function verifies(string $email, string $password): bool
+    private function authenticate(string $email, #[SensitiveParameter] string $password): ?User
     {
-        if (! User::query()->where('email', $email)->exists()) {
-            Hash::check($password, self::$dummyHash ??= Hash::make('dummy-password-for-timing'));
+        $dummy = self::$dummyHash ??= Hash::make('dummy-password-for-timing');
 
-            return false;
-        }
+        $user = User::query()->where('email', $email)->first();
 
-        return Auth::attempt(['email' => $email, 'password' => $password], remember: false);
+        $matches = Hash::check($password, $user?->password ?? $dummy);
+
+        return $user !== null && $matches ? $user : null;
     }
 }

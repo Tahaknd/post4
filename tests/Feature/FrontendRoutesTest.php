@@ -26,9 +26,8 @@ function routeExists(string $method, string $path): bool
     app(HttpKernel::class);
 
     try {
-        Route::getRoutes()->match(Request::create($path, $method));
-
-        return true;
+        // The catch-all 404 route of the web group matches every GET; it is not a page.
+        return ! Route::getRoutes()->match(Request::create($path, $method))->isFallback;
     } catch (HttpExceptionInterface) {
         return false;
     }

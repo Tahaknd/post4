@@ -119,16 +119,26 @@ return [
     | Sign-in throttle
     |--------------------------------------------------------------------------
     |
-    | Failed sign-ins allowed per fixed window (App\Domain\Auth\LoginThrottle): per (email, ip) and per
-    | ip alone. Over either limit the answer is 429 + Retry-After, even for a correct password. The
-    | per-ip budget is larger because an office behind one NAT address shares it. There is deliberately
-    | no off switch.
+    | Attempts allowed per fixed window (App\Domain\Auth\LoginThrottle). Over any budget the answer is 429 +
+    | Retry-After until the window ends, even for a correct password; an account is never locked, only rated.
+    |
+    |  - email_ip_limit: per (email, ip). The tight one: five wrong guesses and that pair waits.
+    |  - ip_limit: per ip across all emails. Larger because an office behind one NAT address shares it.
+    |  - email_limit: per email across all ips, so a botnet cannot get email_ip_limit tries from every
+    |    address forever. It is also the budget a stranger can spend to make the owner wait for the window
+    |    (rate limiting the victim, not locking them), so it sits well above the others: 30 per 15 minutes
+    |    is ~2900 guesses a day, nothing against a 12+ character password.
+    |
+    | The ip is the one Laravel resolves. Behind a reverse proxy TRUSTED_PROXIES MUST be set (see
+    | config/proxies.php) or every client shares the proxy's address and ONE ip budget; Docker Desktop's NAT
+    | gives a developer machine the same single address. There is deliberately no off switch.
     |
     */
 
     'login_throttle' => [
         'email_ip_limit' => (int) env('LOGIN_THROTTLE_EMAIL_IP_LIMIT', 5),
         'ip_limit' => (int) env('LOGIN_THROTTLE_IP_LIMIT', 20),
+        'email_limit' => (int) env('LOGIN_THROTTLE_EMAIL_LIMIT', 30),
         'window_seconds' => (int) env('LOGIN_THROTTLE_WINDOW_SECONDS', 900),
     ],
 

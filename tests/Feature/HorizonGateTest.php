@@ -5,7 +5,7 @@ use Illuminate\Support\Facades\Gate;
 use Laravel\Horizon\Horizon;
 
 it('redirects a guest from the Horizon dashboard to the login page without a session', function () {
-    $response = $this->get('/horizon')->assertRedirect('/login');
+    $response = $this->get('/horizon')->assertRedirect('/login?next=%2Fhorizon');
 
     expect($response->headers->getCookies())->toBe([]);
 });
@@ -28,7 +28,7 @@ it('keeps requiring an administrator when the environment is local', function ()
 
     expect(app()->environment('local'))->toBeTrue();
 
-    $this->get('/horizon')->assertRedirect('/login');
+    $this->get('/horizon')->assertRedirect('/login?next=%2Fhorizon');
     $this->actingAs(User::factory()->create())->get('/horizon')->assertForbidden();
     $this->actingAs(User::factory()->admin()->create())->get('/horizon')->assertOk();
 });

@@ -28,6 +28,9 @@ return Application::configure(basePath: dirname(__DIR__))
             prepend: [RejectSessionlessGuests::class],
             append: [HandleInertiaRequests::class],
         );
+
+        // A guest with a stale session cookie reaches Authenticate: same /login?next= target as the cookie-less path.
+        $middleware->redirectGuestsTo(fn (Request $request) => RejectSessionlessGuests::loginUrl($request));
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
