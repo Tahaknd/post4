@@ -16,7 +16,9 @@ use PHPUnit\Framework\Assert;
  * The phpunit environment pins CLICKHOUSE_URL to a dead address on purpose, so these helpers never go
  * through the app's clickhouse config: they build their OWN admin and read-only clients from
  * CLICKHOUSE_INTEGRATION_URL and explicit passwords (users `posthog` / `posthog_ro`, database `posthog`).
- * They only ever touch rows of the two fixed project ids below and delete exactly those rows afterwards.
+ * They only ever touch rows of the fixed project ids below (990101-3 tenant tests, 990201-4 trends tests) and delete
+ * exactly those rows afterwards. The ids are FIXED, not random, because the hand-computed expectations name them and
+ * the seed starts from a clean slate: run the clickhouse group sequentially (one run at a time against one ClickHouse).
  */
 final class ClickHouseIntegration
 {
@@ -167,7 +169,10 @@ final class ClickHouseIntegration
         $row(self::TREND_D, 'visit', 'd1', '2023-09-03 04:30:00');   // Sep 3 01:30 local, after the gap
         $row(self::TREND_D, 'visit', 'd2', '2023-09-04 12:00:00');   // Sep 4 09:00 local
 
-        Assert::assertContains($this->trendRowCount(), [24, 25], 'trends seeding did not produce the expected rows');
+        // Typed property values (25.8: JSONExtractString turns a number or a boolean into its text), UTC day 2023-09-05.
+        $row(self::TREND_D, 'typed', 'd3', '2023-09-05 12:00:00', ['n' => 5, 'flag' => true, 'ratio' => 1.5, 'nothing' => null]);
+
+        Assert::assertContains($this->trendRowCount(), [25, 26], 'trends seeding did not produce the expected rows');
     }
 
     /** Lightweight delete of exactly the trends projects, then waits until the rows are gone. */

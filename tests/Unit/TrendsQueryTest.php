@@ -11,36 +11,17 @@ use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
-
-function utcWindow(string $from = '2026-03-01', string $to = '2026-03-08'): DateRange
-{
-    return new DateRange(new DateTimeImmutable($from.' UTC'), new DateTimeImmutable($to.' UTC'));
-}
-
-function tq(array $override = []): TrendsQuery
-{
-    $a = $override + [
-        'events' => ['$pageview'],
-        'metric' => Metric::TotalEvents,
-        'range' => utcWindow(),
-        'interval' => Interval::Day,
-        'timezone' => 'UTC',
-        'breakdown' => null,
-        'filters' => [],
-    ];
-
-    return new TrendsQuery($a['events'], $a['metric'], $a['range'], $a['interval'], $a['timezone'], $a['breakdown'], $a['filters']);
-}
+use Tests\Support\TrendsFixtures as T;
 
 describe('definition rules', function () {
     it('accepts a minimal definition', function () {
-        $q = tq();
+        $q = T::query();
 
-        expect($q->events)->toBe(['$pageview'])->and($q->timezone())->toBe('UTC')->and($q->filters)->toBe([]);
+        expect($q->events)->toBe(['signup'])->and($q->timezone())->toBe('UTC')->and($q->filters)->toBe([]);
     });
 
     it('requires between 1 and 10 distinct event names', function (array $events) {
-        expect(fn () => tq(['events' => $events]))->toThrow(InvalidTrendsQuery::class);
+        expect(fn () => T::query(['events' => $events]))->toThrow(InvalidTrendsQuery::class);
     })->with([
         'none' => [[]],
         'eleven' => [array_map(fn ($i) => "e{$i}", range(1, 11))],
@@ -52,8 +33,8 @@ describe('definition rules', function () {
     ]);
 
     it('accepts ten events and an event name of 200 characters', function () {
-        expect(tq(['events' => array_map(fn ($i) => "e{$i}", range(1, 10))])->events)->toHaveCount(10)
-            ->and(tq(['events' => [str_repeat('é', 200)]])->events)->toHaveCount(1);
+        expect(T::query(['events' => array_map(fn ($i) => "e{$i}", range(1, 10))])->events)->toHaveCount(10)
+            ->and(T::query(['events' => [str_repeat('é', 200)]])->events)->toHaveCount(1);
     });
 
     it('requires an end after the start and at most 366 days', function () {
@@ -80,9 +61,9 @@ describe('definition rules', function () {
 
     it('accepts only PHP time zone identifiers', function (string $tz, bool $ok) {
         if ($ok) {
-            expect(tq(['timezone' => $tz])->timezone())->toBe($tz);
+            expect(T::query(['timezone' => $tz])->timezone())->toBe($tz);
         } else {
-            expect(fn () => tq(['timezone' => $tz]))->toThrow(InvalidTrendsQuery::class, 'time zone');
+            expect(fn () => T::query(['timezone' => $tz]))->toThrow(InvalidTrendsQuery::class, 'time zone');
         }
     })->with([
         ['UTC', true], ['Europe/Istanbul', true], ['Asia/Kolkata', true], ['America/St_Johns', true],
@@ -92,9 +73,9 @@ describe('definition rules', function () {
     it('limits property filters to ten and validates each', function () {
         $ok = array_map(fn ($i) => new PropertyFilter("k{$i}", FilterOperator::IsSet), range(1, 10));
 
-        expect(tq(['filters' => $ok])->filters)->toHaveCount(10)
-            ->and(fn () => tq(['filters' => [...$ok, new PropertyFilter('k11', FilterOperator::IsSet)]]))->toThrow(InvalidTrendsQuery::class)
-            ->and(fn () => tq(['filters' => ['not a filter']]))->toThrow(InvalidTrendsQuery::class);
+        expect(T::query(['filters' => $ok])->filters)->toHaveCount(10)
+            ->and(fn () => T::query(['filters' => [...$ok, new PropertyFilter('k11', FilterOperator::IsSet)]]))->toThrow(InvalidTrendsQuery::class)
+            ->and(fn () => T::query(['filters' => ['not a filter']]))->toThrow(InvalidTrendsQuery::class);
     });
 
     it('validates filters', function (callable $make) {
@@ -133,13 +114,13 @@ describe('definition rules', function () {
 
     it('refuses a query whose result could pass the row cap', function () {
         // hourly over 366 days: 8785 buckets x 1 series is ok, x 2 is not
-        $year = utcWindow('2026-01-01', '2026-12-31');
+        $year = T::window('2026-01-01', '2026-12-31');
 
-        expect(count(tq(['range' => $year, 'interval' => Interval::Hour])->buckets()))->toBeGreaterThan(8000);
-        expect(fn () => tq(['range' => $year, 'interval' => Interval::Hour, 'events' => ['a', 'b']]))->toThrow(InvalidTrendsQuery::class, 'rows');
-        expect(fn () => tq(['range' => utcWindow('2026-01-01', '2026-03-01'), 'interval' => Interval::Hour, 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]))->toThrow(InvalidTrendsQuery::class);
+        expect(count(T::query(['range' => $year, 'interval' => Interval::Hour])->buckets()))->toBeGreaterThan(8000);
+        expect(fn () => T::query(['range' => $year, 'interval' => Interval::Hour, 'events' => ['a', 'b']]))->toThrow(InvalidTrendsQuery::class, 'rows');
+        expect(fn () => T::query(['range' => T::window('2026-01-01', '2026-03-01'), 'interval' => Interval::Hour, 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]))->toThrow(InvalidTrendsQuery::class);
         // the same breakdown at day granularity is fine: 31 x 1 x 11
-        expect(tq(['range' => utcWindow('2026-01-01', '2026-02-01'), 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)])->buckets())->toHaveCount(31);
+        expect(T::query(['range' => T::window('2026-01-01', '2026-02-01'), 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)])->buckets())->toHaveCount(31);
     });
 });
 
@@ -148,27 +129,27 @@ describe('canonical form and hash', function () {
         $f1 = new PropertyFilter('a', FilterOperator::Equals, '1');
         $f2 = new PropertyFilter('b', FilterOperator::Contains, 'x');
 
-        expect(tq(['filters' => [$f1, $f2]])->hash())->toBe(tq(['filters' => [$f2, $f1]])->hash())
-            ->and(tq()->hash())->toBe(tq()->hash())
-            ->and(tq()->hash())->toMatch('/^[0-9a-f]{64}$/');
+        expect(T::query(['filters' => [$f1, $f2]])->hash())->toBe(T::query(['filters' => [$f2, $f1]])->hash())
+            ->and(T::query()->hash())->toBe(T::query()->hash())
+            ->and(T::query()->hash())->toMatch('/^[0-9a-f]{64}$/');
     });
 
     it('changes with every part of the definition', function () {
-        $base = tq()->hash();
+        $base = T::query()->hash();
         $variants = [
-            tq(['events' => ['$pageview', 'x']]),
-            tq(['events' => ['other']]),
-            tq(['metric' => Metric::UniqueUsers]),
-            tq(['range' => utcWindow('2026-03-01', '2026-03-09')]),
-            tq(['range' => utcWindow('2026-03-02', '2026-03-08')]),
-            tq(['interval' => Interval::Week]),
-            tq(['timezone' => 'Europe/Istanbul']),
-            tq(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]),
-            tq(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser, 5)]),
-            tq(['breakdown' => Breakdown::byProperty('browser')]),
-            tq(['filters' => [new PropertyFilter('a', FilterOperator::Equals, '1')]]),
-            tq(['filters' => [new PropertyFilter('a', FilterOperator::Equals, '2')]]),
-            tq(['filters' => [new PropertyFilter('a', FilterOperator::NotEquals, '1')]]),
+            T::query(['events' => ['$pageview', 'x']]),
+            T::query(['events' => ['other']]),
+            T::query(['metric' => Metric::UniqueUsers]),
+            T::query(['range' => T::window('2026-03-01', '2026-03-09')]),
+            T::query(['range' => T::window('2026-03-02', '2026-03-08')]),
+            T::query(['interval' => Interval::Week]),
+            T::query(['timezone' => 'Europe/Istanbul']),
+            T::query(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]),
+            T::query(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser, 5)]),
+            T::query(['breakdown' => Breakdown::byProperty('browser')]),
+            T::query(['filters' => [new PropertyFilter('a', FilterOperator::Equals, '1')]]),
+            T::query(['filters' => [new PropertyFilter('a', FilterOperator::Equals, '2')]]),
+            T::query(['filters' => [new PropertyFilter('a', FilterOperator::NotEquals, '1')]]),
         ];
         $hashes = array_map(fn (TrendsQuery $q) => $q->hash(), $variants);
 
@@ -176,11 +157,11 @@ describe('canonical form and hash', function () {
     });
 
     it('keeps the event order, which is the series order', function () {
-        expect(tq(['events' => ['a', 'b']])->hash())->not->toBe(tq(['events' => ['b', 'a']])->hash());
+        expect(T::query(['events' => ['a', 'b']])->hash())->not->toBe(T::query(['events' => ['b', 'a']])->hash());
     });
 
     it('carries a version in the canonical form', function () {
-        expect(tq()->canonical())->toMatchArray(['v' => TrendsQuery::VERSION, 'timezone' => 'UTC', 'interval' => 'day', 'metric' => 'total_events']);
+        expect(T::query()->canonical())->toMatchArray(['v' => TrendsQuery::VERSION, 'timezone' => 'UTC', 'interval' => 'day', 'metric' => 'total_events']);
     });
 });
 
@@ -244,19 +225,19 @@ describe('fromCanonical', function () {
         expect($back->canonical())->toBe($q->canonical())->and($back->hash())->toBe($q->hash())
             ->and(TrendsQuery::fromCanonical(json_decode(json_encode($q->canonical(), JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR))->hash())->toBe($q->hash());
     })->with([
-        'minimal' => fn () => tq(),
-        'everything' => fn () => tq([
+        'minimal' => fn () => T::query(),
+        'everything' => fn () => T::query([
             'events' => ['a', 'ünï', '$pageview'], 'metric' => Metric::UniqueUsers, 'interval' => Interval::Week, 'timezone' => 'Asia/Kolkata',
-            'range' => utcWindow('2026-03-01', '2026-05-01'),
+            'range' => T::window('2026-03-01', '2026-05-01'),
             'breakdown' => Breakdown::byProperty('$browser', 7),
             'filters' => [new PropertyFilter('a', FilterOperator::Equals, ''), new PropertyFilter('b', FilterOperator::Contains, "x'y"), new PropertyFilter('c', FilterOperator::IsSet)],
         ]),
-        'column breakdown' => fn () => tq(['breakdown' => Breakdown::byColumn(BreakdownColumn::CountryCode, 3)]),
-        'sub second range' => fn () => tq(['range' => new DateRange(new DateTimeImmutable('2026-03-01 00:00:00.123 UTC'), new DateTimeImmutable('2026-03-02 00:00:00.456 UTC'))]),
+        'column breakdown' => fn () => T::query(['breakdown' => Breakdown::byColumn(BreakdownColumn::CountryCode, 3)]),
+        'sub second range' => fn () => T::query(['range' => new DateRange(new DateTimeImmutable('2026-03-01 00:00:00.123 UTC'), new DateTimeImmutable('2026-03-02 00:00:00.456 UTC'))]),
     ]);
 
     it('rejects malformed or hostile canonical arrays with InvalidTrendsQuery, never a TypeError', function (callable $mutate) {
-        $data = tq(['breakdown' => Breakdown::byProperty('p'), 'filters' => [new PropertyFilter('k', FilterOperator::Equals, 'v')]])->canonical();
+        $data = T::query(['breakdown' => Breakdown::byProperty('p'), 'filters' => [new PropertyFilter('k', FilterOperator::Equals, 'v')]])->canonical();
 
         expect(fn () => TrendsQuery::fromCanonical($mutate($data)))->toThrow(InvalidTrendsQuery::class);
     })->with([
@@ -298,7 +279,7 @@ describe('fromCanonical', function () {
     ]);
 
     it('treats hostile strings inside a valid shape as plain data', function () {
-        $q = TrendsQuery::fromCanonical(tq([
+        $q = TrendsQuery::fromCanonical(T::query([
             'events' => ["x' OR '1'='1"], 'breakdown' => Breakdown::byProperty('/* c */'),
             'filters' => [new PropertyFilter("'; DROP TABLE x; --", FilterOperator::Equals, '{p:UInt32}')],
         ])->canonical());

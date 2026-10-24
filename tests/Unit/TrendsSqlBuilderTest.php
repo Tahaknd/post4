@@ -11,62 +11,19 @@ use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsSqlBuilder;
-use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
-
-/** A recording stand-in for the read-only client, so the REAL reader lint runs over every generated query. */
-function recordingReader(): array
-{
-    $fake = new class implements ClickHouseReads
-    {
-        public array $calls = [];
-
-        public function select(string $sql, array $params = [], array $settings = [], ?int $timeout = null): array
-        {
-            $this->calls[] = compact('sql', 'params', 'settings', 'timeout');
-
-            return [];
-        }
-    };
-
-    return [$fake, new ProjectScopedReader($fake)];
-}
-
-function sample(array $o = []): TrendsQuery
-{
-    $a = $o + [
-        'events' => ['a', 'b'],
-        'metric' => Metric::TotalEvents,
-        'interval' => Interval::Day,
-        'timezone' => 'Europe/Istanbul',
-        'breakdown' => null,
-        'filters' => [],
-        'from' => '2026-03-01',
-        'to' => '2026-03-08',
-    ];
-
-    return new TrendsQuery(
-        $a['events'], $a['metric'],
-        new DateRange(new DateTimeImmutable($a['from'].' UTC'), new DateTimeImmutable($a['to'].' UTC')),
-        $a['interval'], $a['timezone'], $a['breakdown'], $a['filters'],
-    );
-}
-
-/** @return array<string, mixed> every parameter with dates as strings */
-function plain(array $params): array
-{
-    return array_map(fn ($v) => $v instanceof DateTimeInterface ? $v->format('Y-m-d H:i:s.v') : $v, $params);
-}
+use Tests\Support\ScriptedReads;
+use Tests\Support\TrendsFixtures as T;
 
 describe('SQL snapshots', function () {
     it('builds the plain total-events query', function () {
-        $built = (new TrendsSqlBuilder)->build(sample());
+        $built = (new TrendsSqlBuilder)->build(T::sample());
 
         expect($built->sql)->toBe(
             'SELECT event AS series, toUnixTimestamp(toDateTime(toStartOfInterval(timestamp, INTERVAL 1 DAY, {tz:String}), {tz:String})) AS bucket, uniqExact(uuid) AS value '
             .'FROM project_events WHERE event IN {names:Array(String)} AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)} '
             .'GROUP BY series, bucket ORDER BY bucket ASC, series ASC LIMIT 10001'
-        )->and(plain($built->params))->toBe([
+        )->and(T::plain($built->params))->toBe([
             'names' => ['a', 'b'],
             'from' => '2026-03-01 00:00:00.000',
             'to' => '2026-03-08 00:00:00.000',
@@ -75,7 +32,7 @@ describe('SQL snapshots', function () {
     });
 
     it('uses uniqExact(distinct_id) for unique users and one fixed fragment per interval', function (Interval $interval, string $fragment) {
-        $sql = (new TrendsSqlBuilder)->build(sample(['metric' => Metric::UniqueUsers, 'interval' => $interval]))->sql;
+        $sql = (new TrendsSqlBuilder)->build(T::sample(['metric' => Metric::UniqueUsers, 'interval' => $interval]))->sql;
 
         expect($sql)->toContain('uniqExact(distinct_id) AS value')->and($sql)->toContain("toStartOfInterval(timestamp, {$fragment}, {tz:String})");
     })->with([
@@ -83,24 +40,24 @@ describe('SQL snapshots', function () {
     ]);
 
     it('builds a column breakdown with a top N subquery and an other bucket, all as parameters', function () {
-        $built = (new TrendsSqlBuilder)->build(sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser, 3)]));
+        $built = (new TrendsSqlBuilder)->build(T::sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser, 3)]));
 
         expect($built->sql)->toContain('if(bd IN (SELECT bd FROM (SELECT if(empty(toString(browser)), {none:String}, toString(browser)) AS bd, uniqExact(uuid) AS c FROM project_events WHERE ')
             ->and($built->sql)->toContain('GROUP BY bd ORDER BY c DESC, bd ASC LIMIT {top_n:UInt8})), bd, {other:String}) AS breakdown')
             ->and($built->sql)->toContain('GROUP BY series, bucket, breakdown ORDER BY bucket ASC, series ASC, breakdown ASC LIMIT 10001')
-            ->and(plain($built->params))->toMatchArray(['top_n' => 3, 'other' => Breakdown::OTHER_LABEL, 'none' => Breakdown::NONE_LABEL])
+            ->and(T::plain($built->params))->toMatchArray(['top_n' => 3, 'other' => Breakdown::OTHER_LABEL, 'none' => Breakdown::NONE_LABEL])
             ->and($built->params)->not->toHaveKey('bd_key');
     });
 
     it('builds a property breakdown with the key as a parameter', function () {
-        $built = (new TrendsSqlBuilder)->build(sample(['breakdown' => Breakdown::byProperty('$browser', 5)]));
+        $built = (new TrendsSqlBuilder)->build(T::sample(['breakdown' => Breakdown::byProperty('$browser', 5)]));
 
         expect($built->sql)->toContain('JSONExtractString(properties, {bd_key:String})')
             ->and($built->params['bd_key'])->toBe('$browser');
     });
 
     it('builds each filter operator with the key and value as parameters', function () {
-        $built = (new TrendsSqlBuilder)->build(sample(['filters' => [
+        $built = (new TrendsSqlBuilder)->build(T::sample(['filters' => [
             new PropertyFilter('a', FilterOperator::Equals, '1'),
             new PropertyFilter('b', FilterOperator::NotEquals, '2'),
             new PropertyFilter('c', FilterOperator::Contains, '3'),
@@ -120,14 +77,14 @@ describe('SQL snapshots', function () {
         expect($sql)->toContain('timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}')
             ->and($sql)->toContain('GROUP BY')->and($sql)->toContain('uniqExact(')->and($sql)->toEndWith('LIMIT '.(TrendsQuery::MAX_ROWS + 1));
     })->with([
-        'plain' => fn () => sample(),
-        'breakdown' => fn () => sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Event)]),
-        'filtered unique' => fn () => sample(['metric' => Metric::UniqueUsers, 'filters' => [new PropertyFilter('a', FilterOperator::IsSet)]]),
+        'plain' => fn () => T::sample(),
+        'breakdown' => fn () => T::sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Event)]),
+        'filtered unique' => fn () => T::sample(['metric' => Metric::UniqueUsers, 'filters' => [new PropertyFilter('a', FilterOperator::IsSet)]]),
     ]);
 });
 
 it('asks for one row more than the cap and stays under the profile result limit', function () {
-    $sql = (new TrendsSqlBuilder)->build(sample())->sql;
+    $sql = (new TrendsSqlBuilder)->build(T::sample())->sql;
 
     expect(TrendsQuery::MAX_ROWS + 1)->toBe(10001)->and($sql)->toEndWith('LIMIT 10001')
         ->and(TrendsQuery::MAX_ROWS + 1)->toBeLessThan(20000);
@@ -135,7 +92,8 @@ it('asks for one row more than the cap and stays under the profile result limit'
 
 describe('what reaches the reader', function () {
     it('passes the reader lint for every shape (no quote, no $, no comment, no table name)', function (TrendsQuery $q) {
-        [$fake, $reader] = recordingReader();
+        $fake = new ScriptedReads;
+        $reader = new ProjectScopedReader($fake);
         $built = (new TrendsSqlBuilder)->build($q);
 
         $reader->select(7, $built->sql, $built->params);
@@ -144,9 +102,9 @@ describe('what reaches the reader', function () {
             ->and($fake->calls[0]['sql'])->toStartWith('WITH project_events AS (SELECT uuid,')
             ->and($built->sql)->not->toContain("'")->not->toContain('$')->not->toContain('--')->not->toContain(';');
     })->with([
-        'plain' => fn () => sample(),
-        'column breakdown' => fn () => sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::CurrentUrl)]),
-        'property breakdown and all operators' => fn () => sample([
+        'plain' => fn () => T::sample(),
+        'column breakdown' => fn () => T::sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::CurrentUrl)]),
+        'property breakdown and all operators' => fn () => T::sample([
             'metric' => Metric::UniqueUsers,
             'breakdown' => Breakdown::byProperty('plan'),
             'filters' => [
@@ -154,13 +112,13 @@ describe('what reaches the reader', function () {
                 new PropertyFilter('c', FilterOperator::Contains, 'x'), new PropertyFilter('d', FilterOperator::IsSet),
             ],
         ]),
-        'hourly week' => fn () => sample(['interval' => Interval::Hour, 'to' => '2026-03-02']),
-        'month' => fn () => sample(['interval' => Interval::Month, 'from' => '2025-12-01', 'to' => '2026-03-01']),
+        'hourly week' => fn () => T::sample(['interval' => Interval::Hour, 'to' => '2026-03-02']),
+        'month' => fn () => T::sample(['interval' => Interval::Month, 'from' => '2025-12-01', 'to' => '2026-03-01']),
     ]);
 
     it('puts only bound parameters in the query: never a value in the SQL text', function () {
         // every value of the definition must be absent from the SQL text and present in the params
-        $q = sample([
+        $q = T::sample([
             'events' => ['UNIQUE_EVENT_NAME'], 'timezone' => 'Asia/Kolkata',
             'breakdown' => Breakdown::byProperty('UNIQUE_BREAKDOWN_KEY'),
             'filters' => [new PropertyFilter('UNIQUE_FILTER_KEY', FilterOperator::Equals, 'UNIQUE_FILTER_VALUE')],
@@ -170,7 +128,7 @@ describe('what reaches the reader', function () {
         foreach (['UNIQUE_EVENT_NAME', 'Asia/Kolkata', 'UNIQUE_BREAKDOWN_KEY', 'UNIQUE_FILTER_KEY', 'UNIQUE_FILTER_VALUE', '2026'] as $needle) {
             expect($built->sql)->not->toContain($needle);
         }
-        expect(json_encode(plain($built->params)))->toContain('UNIQUE_EVENT_NAME', 'Asia\/Kolkata', 'UNIQUE_BREAKDOWN_KEY', 'UNIQUE_FILTER_KEY', 'UNIQUE_FILTER_VALUE');
+        expect(json_encode(T::plain($built->params)))->toContain('UNIQUE_EVENT_NAME', 'Asia\/Kolkata', 'UNIQUE_BREAKDOWN_KEY', 'UNIQUE_FILTER_KEY', 'UNIQUE_FILTER_VALUE');
     });
 });
 
@@ -218,7 +176,7 @@ describe('property test: hostile values change only the parameters', function ()
                 ->and($built->params['f0_value'])->toBe($h)
                 ->and($built->params['bd_key'])->toBe($h)
                 ->and($built->params['names'][0])->toBe($h);
-            $paramSets[] = json_encode(plain($built->params));
+            $paramSets[] = json_encode(T::plain($built->params));
         }
 
         // the parameters really differ from one hostile value to the next (the test is not vacuous)
@@ -226,7 +184,8 @@ describe('property test: hostile values change only the parameters', function ()
     });
 
     it('lets every hostile value through the real reader lint, as parameters', function () use ($hostile) {
-        [$fake, $reader] = recordingReader();
+        $fake = new ScriptedReads;
+        $reader = new ProjectScopedReader($fake);
         foreach ($hostile as $h) {
             $q = new TrendsQuery(
                 [$h], Metric::TotalEvents,
@@ -243,22 +202,22 @@ describe('property test: hostile values change only the parameters', function ()
 
     it('keeps the SQL text identical for the same shape whatever the dates and the zone are', function () {
         $builder = new TrendsSqlBuilder;
-        $a = $builder->build(sample(['timezone' => 'UTC', 'from' => '2026-03-01', 'to' => '2026-03-08']));
-        $b = $builder->build(sample(['timezone' => 'Pacific/Chatham', 'from' => '2025-07-04', 'to' => '2025-07-30']));
+        $a = $builder->build(T::sample(['timezone' => 'UTC', 'from' => '2026-03-01', 'to' => '2026-03-08']));
+        $b = $builder->build(T::sample(['timezone' => 'Pacific/Chatham', 'from' => '2025-07-04', 'to' => '2025-07-30']));
 
-        expect($a->sql)->toBe($b->sql)->and(plain($a->params))->not->toBe(plain($b->params));
+        expect($a->sql)->toBe($b->sql)->and(T::plain($a->params))->not->toBe(T::plain($b->params));
     });
 
     it('changes the SQL text only with the shape: metric, interval, breakdown kind, filter operators', function () {
         $builder = new TrendsSqlBuilder;
         $texts = [
-            $builder->build(sample())->sql,
-            $builder->build(sample(['metric' => Metric::UniqueUsers]))->sql,
-            $builder->build(sample(['interval' => Interval::Week]))->sql,
-            $builder->build(sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]))->sql,
-            $builder->build(sample(['breakdown' => Breakdown::byProperty('x')]))->sql,
-            $builder->build(sample(['filters' => [new PropertyFilter('x', FilterOperator::Equals, 'y')]]))->sql,
-            $builder->build(sample(['filters' => [new PropertyFilter('x', FilterOperator::IsSet)]]))->sql,
+            $builder->build(T::sample())->sql,
+            $builder->build(T::sample(['metric' => Metric::UniqueUsers]))->sql,
+            $builder->build(T::sample(['interval' => Interval::Week]))->sql,
+            $builder->build(T::sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]))->sql,
+            $builder->build(T::sample(['breakdown' => Breakdown::byProperty('x')]))->sql,
+            $builder->build(T::sample(['filters' => [new PropertyFilter('x', FilterOperator::Equals, 'y')]]))->sql,
+            $builder->build(T::sample(['filters' => [new PropertyFilter('x', FilterOperator::IsSet)]]))->sql,
         ];
 
         expect(array_unique($texts))->toHaveCount(count($texts));
