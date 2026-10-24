@@ -7,10 +7,10 @@ use Illuminate\Support\Env;
 use Tests\Support\FakeViteBuild;
 
 /**
- * Evaluates config/session.php as the framework would with the given environment values. The real env
+ * Evaluates a config file as the framework would with the given environment values. The real env
  * repository is immutable (Compose already defines APP_URL), so a private mutable one is swapped in.
  */
-function sessionConfigWith(array $env): array
+function configFileWith(string $file, array $env): array
 {
     $repository = RepositoryBuilder::createWithNoAdapters()->addAdapter(ArrayAdapter::class)->make();
 
@@ -25,7 +25,7 @@ function sessionConfigWith(array $env): array
     $property->setValue(null, $repository);
 
     try {
-        return require config_path('session.php');
+        return require config_path($file);
     } finally {
         $property->setValue(null, $original);
     }
@@ -62,14 +62,14 @@ it('makes the redis session driver use the session connection', function () {
 });
 
 it('marks the session cookie Secure when APP_URL is https', function () {
-    expect(sessionConfigWith(['APP_URL' => 'https://analytics.example.test', 'SESSION_SECURE_COOKIE' => null])['secure'])->toBeTrue()
-        ->and(sessionConfigWith(['APP_URL' => 'http://localhost:8000', 'SESSION_SECURE_COOKIE' => null])['secure'])->toBeFalse()
-        ->and(sessionConfigWith(['APP_URL' => 'https://analytics.example.test', 'SESSION_SECURE_COOKIE' => 'false'])['secure'])->toBeFalse()
-        ->and(sessionConfigWith(['APP_URL' => 'http://localhost:8000', 'SESSION_SECURE_COOKIE' => 'true'])['secure'])->toBeTrue();
+    expect(configFileWith('session.php', ['APP_URL' => 'https://analytics.example.test', 'SESSION_SECURE_COOKIE' => null])['secure'])->toBeTrue()
+        ->and(configFileWith('session.php', ['APP_URL' => 'http://localhost:8000', 'SESSION_SECURE_COOKIE' => null])['secure'])->toBeFalse()
+        ->and(configFileWith('session.php', ['APP_URL' => 'https://analytics.example.test', 'SESSION_SECURE_COOKIE' => 'false'])['secure'])->toBeFalse()
+        ->and(configFileWith('session.php', ['APP_URL' => 'http://localhost:8000', 'SESSION_SECURE_COOKIE' => 'true'])['secure'])->toBeTrue();
 });
 
 it('keeps the session cookie HttpOnly, SameSite=Lax and rolling for two hours', function () {
-    $config = sessionConfigWith(['SESSION_LIFETIME' => null, 'SESSION_HTTP_ONLY' => null, 'SESSION_SAME_SITE' => null]);
+    $config = configFileWith('session.php', ['SESSION_LIFETIME' => null, 'SESSION_HTTP_ONLY' => null, 'SESSION_SAME_SITE' => null]);
 
     expect($config['http_only'])->toBeTrue()
         ->and($config['same_site'])->toBe('lax')
@@ -92,19 +92,30 @@ it('sends the session cookie with HttpOnly and SameSite=Lax, plus Secure over ht
         ->and($cookie->isSecure())->toBeTrue();
 });
 
-it('wires the compose stack for Redis sessions and a bounded, eviction-safe Redis', function () {
-    $compose = file_get_contents(base_path('docker-compose.yml'));
+it('points the session connection at the dedicated sessions instance when REDIS_SESSION_HOST is set', function () {
+    $session = configFileWith('database.php', [
+        'REDIS_HOST' => 'redis', 'REDIS_SESSION_HOST' => 'redis-sessions', 'REDIS_SESSION_DB' => '0', 'REDIS_PASSWORD' => 'shared',
+    ])['redis']['session'];
 
-    expect($compose)
-        ->toContain('SESSION_DRIVER: redis')
-        ->toContain('SESSION_CONNECTION: session')
-        ->toContain('--maxmemory-policy')
-        ->toContain('${REDIS_MAXMEMORY_POLICY:-volatile-ttl}')
-        ->toContain('${REDIS_MAXMEMORY:-256mb}');
+    expect($session['host'])->toBe('redis-sessions')
+        ->and($session['database'])->toBe('0')
+        ->and($session['password'])->toBe('shared');
+
+    // The main and cache connections stay on the main Redis.
+    $redis = configFileWith('database.php', ['REDIS_HOST' => 'redis', 'REDIS_SESSION_HOST' => 'redis-sessions'])['redis'];
+    expect($redis['default']['host'])->toBe('redis')->and($redis['cache']['host'])->toBe('redis');
 });
 
-it('documents the session settings in .env.example without a stale database driver for Compose', function () {
-    $example = file_get_contents(base_path('.env.example'));
+it('falls back to the main Redis, database 2, when no session host is configured', function () {
+    $session = configFileWith('database.php', ['REDIS_HOST' => 'cache-box', 'REDIS_SESSION_HOST' => null])['redis']['session'];
 
-    expect($example)->toContain('SESSION_CONNECTION=session')->toContain('REDIS_SESSION_DB=2')->toContain('REDIS_MAXMEMORY');
+    expect($session['host'])->toBe('cache-box')->and($session['database'])->toBe('2');
+});
+
+it('lets the session connection have its own password and port', function () {
+    $session = configFileWith('database.php', [
+        'REDIS_SESSION_HOST' => 's', 'REDIS_SESSION_PORT' => '6380', 'REDIS_SESSION_PASSWORD' => 'own', 'REDIS_PORT' => '6379', 'REDIS_PASSWORD' => 'main',
+    ])['redis']['session'];
+
+    expect($session['port'])->toBe('6380')->and($session['password'])->toBe('own');
 });

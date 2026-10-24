@@ -1,5 +1,10 @@
 x-app: &app
   image: ${APP_IMAGE:-post4-app}
+  # app has `build: .`, worker and scheduler share its image and have no build section. `never` stops all
+  # three from trying to pull `post4-app` from a registry on a fresh clone (it does not exist there, and
+  # the pull attempt fails the `up` for worker and scheduler): the first `docker compose up` builds the
+  # image once through app and the others reuse it. Verified with `docker compose --dry-run up --no-start`.
+  pull_policy: never
   init: true
   restart: unless-stopped
   environment: &app-env
@@ -21,14 +26,24 @@ x-app: &app
     CACHE_STORE: redis
     QUEUE_CONNECTION: redis
     SESSION_DRIVER: redis
-    # Dedicated bounded Redis connection (config/database.php, database REDIS_SESSION_DB, default 2).
+    # Sessions live on their OWN Redis instance (the redis-sessions service below), over the bounded `session`
+    # connection of config/database.php, so a flood of guest sessions can only ever evict sessions.
     SESSION_CONNECTION: session
+    REDIS_SESSION_HOST: redis-sessions
+    REDIS_SESSION_DB: 0
+    REDIS_SESSION_TIMEOUT: ${REDIS_SESSION_TIMEOUT:-0.5}
+    REDIS_SESSION_READ_TIMEOUT: ${REDIS_SESSION_READ_TIMEOUT:-1.0}
+    # The cache connection (limiters, project lookups) is bounded the same way.
+    REDIS_CACHE_TIMEOUT: ${REDIS_CACHE_TIMEOUT:-0.5}
+    REDIS_CACHE_READ_TIMEOUT: ${REDIS_CACHE_READ_TIMEOUT:-1.0}
+    HORIZON_MAX_PROCESSES: ${HORIZON_MAX_PROCESSES:-2}
     TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     CAPTURE_PROJECT_EVENTS_PER_MINUTE: ${CAPTURE_PROJECT_EVENTS_PER_MINUTE:-60000}
     CAPTURE_AUTH_FAIL_LIMIT: ${CAPTURE_AUTH_FAIL_LIMIT:-120}
     CAPTURE_AUTH_FAIL_WINDOW_SECONDS: ${CAPTURE_AUTH_FAIL_WINDOW_SECONDS:-60}
     LOGIN_THROTTLE_EMAIL_IP_LIMIT: ${LOGIN_THROTTLE_EMAIL_IP_LIMIT:-5}
     LOGIN_THROTTLE_IP_LIMIT: ${LOGIN_THROTTLE_IP_LIMIT:-20}
+    LOGIN_THROTTLE_EMAIL_LIMIT: ${LOGIN_THROTTLE_EMAIL_LIMIT:-30}
     LOGIN_THROTTLE_WINDOW_SECONDS: ${LOGIN_THROTTLE_WINDOW_SECONDS:-900}
     OCTANE_WORKERS: ${OCTANE_WORKERS:-4}
     OCTANE_MAX_REQUESTS: ${OCTANE_MAX_REQUESTS:-500}
@@ -51,6 +66,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      redis-sessions: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully }
     healthcheck:
@@ -68,6 +84,7 @@ services:
       disable: true
     depends_on:
       app: { condition: service_healthy }
+      redis-sessions: { condition: service_healthy }
 
   scheduler:
     <<: *app
@@ -76,6 +93,7 @@ services:
       disable: true
     depends_on:
       app: { condition: service_healthy }
+      redis-sessions: { condition: service_healthy }
 
   postgres:
     image: postgres:17-alpine
@@ -92,23 +110,26 @@ services:
       timeout: 3s
       retries: 20
 
-  # One Redis instance, three databases: 0 = queues and Horizon, 1 = cache and limiters, 2 = sessions.
-  # maxmemory is per INSTANCE, not per database, so the policy has to suit all three:
+  # Main Redis: database 0 = queues and Horizon, 1 = cache and limiters. Sessions are NOT here any more (see
+  # redis-sessions). maxmemory is per instance, so the policy has to suit both databases:
   #   volatile-ttl evicts only keys that have an expiry, soonest-expiring first, and never touches the
   #   rest. Verified against the live keyspace: queue payloads (`queues:*` lists and the reserved/delayed
   #   zsets) and Horizon's own sets (`laravel_horizon:supervisors`, `:masters`, snapshots) carry no TTL,
   #   so a job that is queued, delayed or running is never evicted. What can go under memory pressure:
-  #     - sessions (a user is signed out),
   #     - the cache and ALL limiter counters (capture failure and per-project caps, the sign-in
   #       throttle, project key lookups, insight results, `capture:status` snapshots and drop counters):
-  #       a limiter whose key is evicted starts counting from zero, i.e. it briefly lets more through;
+  #       a limiter whose key is evicted starts counting from zero, i.e. it briefly lets more through.
+  #       The short-lived ones (limiter windows, insight results: 60 s) go FIRST, which is the right order
+  #       for the limiter-versus-cache tradeoff but means a memory squeeze weakens limiters before anything else;
+  #       that is acceptable because nothing a user or a bot does at the front door adds memory here any more
+  #       (sessions moved out), so only capture traffic and queued jobs can fill it;
   #     - Horizon job metadata hashes (`laravel_horizon:<job id>`, recent/failed job details); the jobs
   #       themselves are not affected.
   #   If memory is full and nothing is evictable, writes fail with OOM (queue pushes then error instead
   #   of silently dropping data); the cache connection fails open and capture keeps working.
   #   allkeys-lru would be unsafe here (it could evict queue payloads); noeviction would turn a full
-  #   Redis into hard errors for sessions and limiters.
-  # REDIS_MAXMEMORY=0 removes the limit (the pre-3.4 behaviour); REDIS_MAXMEMORY_POLICY overrides the policy.
+  #   Redis into hard errors for the limiters.
+  # REDIS_MAXMEMORY=0 removes the limit; REDIS_MAXMEMORY_POLICY overrides the policy.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -120,6 +141,32 @@ services:
       - ${REDIS_MAXMEMORY_POLICY:-volatile-ttl}
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Sessions only. A separate instance so that the one thing an anonymous visitor can create in bulk (a guest
+  # session for every /login page view) can only evict other sessions: allkeys-lru drops the least recently
+  # used key, which under a flood is an idle user's session, never a queue payload or a limiter counter. No
+  # persistence on purpose: restarting this service signs everybody out, which is acceptable and keeps it
+  # tiny. Residual risk, accepted: a sustained flood of /login views can still log other users out. There is
+  # no per-address cap on guest session creation (a reverse proxy rate limit belongs in front of /login).
+  # REDIS_SESSIONS_MAXMEMORY (default 128mb) bounds it.
+  redis-sessions:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_SESSIONS_MAXMEMORY:-128mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

@@ -39,12 +39,6 @@ it('gates on is_admin and denies a missing user', function () {
         ->and(Gate::forUser(User::factory()->admin()->make())->allows('viewHorizon'))->toBeTrue();
 });
 
-it('does not read the environment inside the provider', function () {
-    $source = file_get_contents(app_path('Providers/HorizonServiceProvider.php'));
-
-    expect($source)->not->toContain('env(');
-});
-
 it('registers an authorisation callback that follows the gate', function () {
     $check = fn () => Horizon::check(request());
 

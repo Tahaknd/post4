@@ -1,19 +1,24 @@
 services:
+  # The PHP settings file is mounted too: the image's copy is baked in at build time, and a dev stack that
+  # runs a stale image would otherwise miss changes to it (zend.exception_ignore_args among them).
   app:
     volumes:
       - .:/app
       - /app/vendor
       - app-storage:/app/storage
+      - ./docker/zz-app.ini:/usr/local/etc/php/conf.d/zz-app.ini:ro
   worker:
     volumes:
       - .:/app
       - /app/vendor
       - app-storage:/app/storage
+      - ./docker/zz-app.ini:/usr/local/etc/php/conf.d/zz-app.ini:ro
   scheduler:
     volumes:
       - .:/app
       - /app/vendor
       - app-storage:/app/storage
+      - ./docker/zz-app.ini:/usr/local/etc/php/conf.d/zz-app.ini:ro
 
   # Vite dev server with HMR. Opt-in profile, so a plain `docker compose up` never starts it:
   #   docker compose --profile dev up -d vite

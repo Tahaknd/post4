@@ -183,16 +183,18 @@ return [
             'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
         ],
 
-        // Sessions (SESSION_CONNECTION=session): their own Redis database so they never share a keyspace with
-        // Horizon and the queues (0) or the cache and limiters (1). Bounded like `cache`: phpredis waits
-        // forever by default and a frozen Redis would otherwise hang every UI worker that touches a
-        // session. A session read that times out is a 500 for that page view; capture never starts a session.
+        // Sessions (SESSION_CONNECTION=session). Under Compose this is the dedicated redis-sessions instance
+        // (REDIS_SESSION_HOST, database 0), so session floods cannot evict queue payloads or limiter counters.
+        // Without REDIS_SESSION_HOST it shares the main Redis and uses database 2, away from Horizon and the
+        // queues (0) and the cache and limiters (1). Bounded like `cache`: phpredis waits forever by
+        // default and a frozen Redis would otherwise hang every UI worker that touches a session. A session
+        // read that times out is a 500 for that page view; capture never starts a session.
         'session' => [
-            'url' => env('REDIS_URL'),
-            'host' => env('REDIS_HOST', '127.0.0.1'),
-            'username' => env('REDIS_USERNAME'),
-            'password' => env('REDIS_PASSWORD'),
-            'port' => env('REDIS_PORT', '6379'),
+            'url' => env('REDIS_SESSION_URL'),
+            'host' => env('REDIS_SESSION_HOST', env('REDIS_HOST', '127.0.0.1')),
+            'username' => env('REDIS_SESSION_USERNAME', env('REDIS_USERNAME')),
+            'password' => env('REDIS_SESSION_PASSWORD', env('REDIS_PASSWORD')),
+            'port' => env('REDIS_SESSION_PORT', env('REDIS_PORT', '6379')),
             'database' => env('REDIS_SESSION_DB', '2'),
             'timeout' => (float) env('REDIS_SESSION_TIMEOUT', 0.5),
             'read_timeout' => (float) env('REDIS_SESSION_READ_TIMEOUT', 1.0),
