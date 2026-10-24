@@ -36,6 +36,11 @@ final class ClickHouseIntegration
 
     public const TREND_C = 990203;
 
+    /** Projects of the purge tests (PurgeProjectEventsClickHouseTest): one is purged, the other must be untouched. */
+    public const PURGE_A = 990501;
+
+    public const PURGE_B = 990502;
+
     /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
     public const TREND_D = 990204;
 

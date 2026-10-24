@@ -18,12 +18,13 @@ arch('only the ClickHouse infrastructure and its container wiring use the read-o
         'App\Providers\AppServiceProvider',
     ]);
 
-arch('the admin client is used only by ClickHouse infrastructure, its wiring and capture:status')
+arch('the admin client is used only by ClickHouse infrastructure, its wiring, capture:status and the project purge job')
     ->expect(ClickHouseClient::class)
     ->toOnlyBeUsedIn([
         'App\Infrastructure\ClickHouse',
         'App\Providers\AppServiceProvider',
         'App\Console\Commands\CaptureStatus',
+        'App\Jobs\PurgeProjectEvents',
     ]);
 
 arch('the scoped reader is the only class that takes the read-only client as a dependency')
