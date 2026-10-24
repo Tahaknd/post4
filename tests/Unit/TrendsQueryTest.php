@@ -236,3 +236,73 @@ describe('bucket axis', function () {
         expect(BucketAxis::starts($r, Interval::Hour, $zone))->toHaveCount(25);
     });
 });
+
+describe('fromCanonical', function () {
+    it('round-trips every shape: the rebuilt definition has the same canonical form and hash', function (TrendsQuery $q) {
+        $back = TrendsQuery::fromCanonical($q->canonical());
+
+        expect($back->canonical())->toBe($q->canonical())->and($back->hash())->toBe($q->hash())
+            ->and(TrendsQuery::fromCanonical(json_decode(json_encode($q->canonical(), JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR))->hash())->toBe($q->hash());
+    })->with([
+        'minimal' => fn () => tq(),
+        'everything' => fn () => tq([
+            'events' => ['a', 'ünï', '$pageview'], 'metric' => Metric::UniqueUsers, 'interval' => Interval::Week, 'timezone' => 'Asia/Kolkata',
+            'range' => utcWindow('2026-03-01', '2026-05-01'),
+            'breakdown' => Breakdown::byProperty('$browser', 7),
+            'filters' => [new PropertyFilter('a', FilterOperator::Equals, ''), new PropertyFilter('b', FilterOperator::Contains, "x'y"), new PropertyFilter('c', FilterOperator::IsSet)],
+        ]),
+        'column breakdown' => fn () => tq(['breakdown' => Breakdown::byColumn(BreakdownColumn::CountryCode, 3)]),
+        'sub second range' => fn () => tq(['range' => new DateRange(new DateTimeImmutable('2026-03-01 00:00:00.123 UTC'), new DateTimeImmutable('2026-03-02 00:00:00.456 UTC'))]),
+    ]);
+
+    it('rejects malformed or hostile canonical arrays with InvalidTrendsQuery, never a TypeError', function (callable $mutate) {
+        $data = tq(['breakdown' => Breakdown::byProperty('p'), 'filters' => [new PropertyFilter('k', FilterOperator::Equals, 'v')]])->canonical();
+
+        expect(fn () => TrendsQuery::fromCanonical($mutate($data)))->toThrow(InvalidTrendsQuery::class);
+    })->with([
+        'unknown version' => [fn ($d) => ['v' => 2] + $d],
+        'missing key' => [function ($d) {
+            unset($d['filters']);
+
+            return $d;
+        }],
+        'extra key' => [fn ($d) => $d + ['sql' => 'SELECT 1']],
+        'events not a list' => [fn ($d) => ['events' => 'a'] + $d],
+        'event not a string' => [fn ($d) => ['events' => [1]] + $d],
+        'empty events' => [fn ($d) => ['events' => []] + $d],
+        'unknown metric' => [fn ($d) => ['metric' => 'sum'] + $d],
+        'metric not a string' => [fn ($d) => ['metric' => ['total_events']] + $d],
+        'unknown interval' => [fn ($d) => ['interval' => 'year'] + $d],
+        'unknown timezone' => [fn ($d) => ['timezone' => "UTC'; --"] + $d],
+        'timezone not a string' => [fn ($d) => ['timezone' => 3] + $d],
+        'range not an array' => [fn ($d) => ['range' => '2026'] + $d],
+        'range extra key' => [fn ($d) => ['range' => $d['range'] + ['x' => 1]] + $d],
+        'range bad format' => [fn ($d) => ['range' => ['from' => '2026-03-01', 'to' => '2026-03-02']] + $d],
+        'range lenient date' => [fn ($d) => ['range' => ['from' => '2026-02-30T00:00:00.000Z', 'to' => '2026-03-02T00:00:00.000Z']] + $d],
+        'range reversed' => [fn ($d) => ['range' => ['from' => $d['range']['to'], 'to' => $d['range']['from']]] + $d],
+        'range too long' => [fn ($d) => ['range' => ['from' => '2020-01-01T00:00:00.000Z', 'to' => '2026-01-01T00:00:00.000Z']] + $d],
+        'breakdown not an array' => [fn ($d) => ['breakdown' => 'browser'] + $d],
+        'breakdown both' => [fn ($d) => ['breakdown' => ['column' => 'browser', 'property' => 'p', 'top_n' => 5]] + $d],
+        'breakdown neither' => [fn ($d) => ['breakdown' => ['column' => null, 'property' => null, 'top_n' => 5]] + $d],
+        'breakdown unknown column' => [fn ($d) => ['breakdown' => ['column' => 'uuid', 'property' => null, 'top_n' => 5]] + $d],
+        'breakdown top n string' => [fn ($d) => ['breakdown' => ['column' => 'browser', 'property' => null, 'top_n' => '5']] + $d],
+        'breakdown top n too big' => [fn ($d) => ['breakdown' => ['column' => 'browser', 'property' => null, 'top_n' => 26]] + $d],
+        'breakdown property not a string' => [fn ($d) => ['breakdown' => ['column' => null, 'property' => ['x'], 'top_n' => 5]] + $d],
+        'filters not a list' => [fn ($d) => ['filters' => ['a' => 1]] + $d],
+        'filter not an array' => [fn ($d) => ['filters' => ['x']] + $d],
+        'filter unknown operator' => [fn ($d) => ['filters' => [['key' => 'k', 'operator' => 'regex', 'value' => 'v']]] + $d],
+        'filter value not a string' => [fn ($d) => ['filters' => [['key' => 'k', 'operator' => 'equals', 'value' => 5]]] + $d],
+        'filter extra key' => [fn ($d) => ['filters' => [['key' => 'k', 'operator' => 'equals', 'value' => 'v', 'raw' => 'x']]] + $d],
+        'filter is set with a value' => [fn ($d) => ['filters' => [['key' => 'k', 'operator' => 'is_set', 'value' => 'v']]] + $d],
+        'eleven filters' => [fn ($d) => ['filters' => array_fill(0, 11, ['key' => 'k', 'operator' => 'is_set', 'value' => null])] + $d],
+    ]);
+
+    it('treats hostile strings inside a valid shape as plain data', function () {
+        $q = TrendsQuery::fromCanonical(tq([
+            'events' => ["x' OR '1'='1"], 'breakdown' => Breakdown::byProperty('/* c */'),
+            'filters' => [new PropertyFilter("'; DROP TABLE x; --", FilterOperator::Equals, '{p:UInt32}')],
+        ])->canonical());
+
+        expect($q->events)->toBe(["x' OR '1'='1"])->and($q->filters[0]->value)->toBe('{p:UInt32}');
+    });
+});

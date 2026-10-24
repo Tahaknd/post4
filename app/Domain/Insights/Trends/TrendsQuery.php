@@ -2,6 +2,7 @@
 
 namespace App\Domain\Insights\Trends;
 
+use DateTimeImmutable;
 use DateTimeZone;
 
 /**
@@ -118,6 +119,118 @@ final readonly class TrendsQuery
             'breakdown' => $this->breakdown?->canonical(),
             'filters' => array_map(fn (PropertyFilter $f) => $f->canonical(), $this->filters),
         ];
+    }
+
+    /**
+     * The inverse of {@see self::canonical()}: rebuilds a definition from its canonical array (what a queued job
+     * or a stored insight carries instead of a serialized object). Strict: unknown or missing keys, wrong types
+     * or an unknown version throw {@see InvalidTrendsQuery} (never a TypeError), and every value goes through the
+     * constructor rules like any other definition, so hostile input cannot build an invalid query.
+     *
+     * @param  array<array-key, mixed>  $data
+     */
+    public static function fromCanonical(array $data): self
+    {
+        self::expectKeys($data, ['v', 'events', 'metric', 'range', 'interval', 'timezone', 'breakdown', 'filters'], 'definition');
+        if ($data['v'] !== self::VERSION) {
+            throw new InvalidTrendsQuery('Unsupported definition version');
+        }
+        if (! is_array($data['events']) || ! is_string($data['timezone']) || ! is_string($data['metric']) || ! is_string($data['interval'])) {
+            throw new InvalidTrendsQuery('Malformed definition');
+        }
+
+        $metric = Metric::tryFrom($data['metric']) ?? throw new InvalidTrendsQuery('Unknown metric');
+        $interval = Interval::tryFrom($data['interval']) ?? throw new InvalidTrendsQuery('Unknown interval');
+
+        return new self(
+            $data['events'],
+            $metric,
+            self::rangeFrom($data['range']),
+            $interval,
+            $data['timezone'],
+            self::breakdownFrom($data['breakdown']),
+            self::filtersFrom($data['filters']),
+        );
+    }
+
+    /** @param  array<array-key, mixed>  $data */
+    private static function expectKeys(array $data, array $keys, string $what): void
+    {
+        $actual = array_keys($data);
+        sort($actual);
+        $expected = $keys;
+        sort($expected);
+        if ($actual !== $expected) {
+            throw new InvalidTrendsQuery("Malformed {$what}: unexpected or missing keys");
+        }
+    }
+
+    private static function rangeFrom(mixed $range): DateRange
+    {
+        if (! is_array($range)) {
+            throw new InvalidTrendsQuery('Malformed date range');
+        }
+        self::expectKeys($range, ['from', 'to'], 'date range');
+
+        $parse = function (mixed $value): DateTimeImmutable {
+            $date = is_string($value) ? DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s.v\Z', $value, new DateTimeZone('UTC')) : false;
+            if ($date === false || $date->format('Y-m-d\TH:i:s.v\Z') !== $value) {
+                throw new InvalidTrendsQuery('Dates must look like 2026-03-01T00:00:00.000Z');
+            }
+
+            return $date;
+        };
+
+        return new DateRange($parse($range['from']), $parse($range['to']));
+    }
+
+    private static function breakdownFrom(mixed $breakdown): ?Breakdown
+    {
+        if ($breakdown === null) {
+            return null;
+        }
+        if (! is_array($breakdown)) {
+            throw new InvalidTrendsQuery('Malformed breakdown');
+        }
+        self::expectKeys($breakdown, ['column', 'property', 'top_n'], 'breakdown');
+        if (! is_int($breakdown['top_n']) || (($breakdown['column'] === null) === ($breakdown['property'] === null))) {
+            throw new InvalidTrendsQuery('A breakdown has a top N and exactly one of column and property');
+        }
+
+        if ($breakdown['column'] !== null) {
+            $column = is_string($breakdown['column']) ? BreakdownColumn::tryFrom($breakdown['column']) : null;
+
+            return Breakdown::byColumn($column ?? throw new InvalidTrendsQuery('Unknown breakdown column'), $breakdown['top_n']);
+        }
+        if (! is_string($breakdown['property'])) {
+            throw new InvalidTrendsQuery('Malformed breakdown property');
+        }
+
+        return Breakdown::byProperty($breakdown['property'], $breakdown['top_n']);
+    }
+
+    /** @return list<PropertyFilter> */
+    private static function filtersFrom(mixed $filters): array
+    {
+        if (! is_array($filters) || ! array_is_list($filters)) {
+            throw new InvalidTrendsQuery('Malformed filters');
+        }
+
+        return array_map(function (mixed $filter): PropertyFilter {
+            if (! is_array($filter)) {
+                throw new InvalidTrendsQuery('Malformed filter');
+            }
+            self::expectKeys($filter, ['key', 'operator', 'value'], 'filter');
+            if (! is_string($filter['key']) || ! is_string($filter['operator']) || ($filter['value'] !== null && ! is_string($filter['value']))) {
+                throw new InvalidTrendsQuery('Malformed filter');
+            }
+
+            return new PropertyFilter(
+                $filter['key'],
+                FilterOperator::tryFrom($filter['operator']) ?? throw new InvalidTrendsQuery('Unknown filter operator'),
+                $filter['value'],
+            );
+        }, $filters);
     }
 
     /** sha256 of the canonical JSON (the cache key component). */
