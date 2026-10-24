@@ -19,8 +19,8 @@ use RuntimeException;
  * - `$settings` HER migration ifadesine URL argümanı olarak eklenir. Sunucuda tanımlı özel ayarlar
  *   (`SQL_project_id`, config.d/10-custom-settings.xml) bir görünümün gövdesinde `getSetting` ile
  *   kullanılacaksa CREATE sırasında da bilinmelidir (002_scoped_events_view.sql). DİKKAT: bu yüzden HER migration
- *   ifadesi `SQL_project_id=0` ile çalışır; ileride yazılacak bir `INSERT ... SELECT ... FROM project_events_v`
- *   (veya görünümü okuyan her ifade) project 0'ı görür, yani SIFIR satır okur. Veri taşıyan migration'lar
+ *   ifadesi `SQL_project_id=0` ile çalışır; ileride yazılacak bir `INSERT ... SELECT` ile kapsamlı olay
+ *   görünümünden (002_scoped_events_view.sql) okuyan her ifade project 0'ı görür, yani SIFIR satır okur. Veri taşıyan migration'lar
  *   `events` tablosunu doğrudan okumalıdır (migrator yönetici kullanıcıyla çalışır).
  */
 final class ClickHouseMigrator
