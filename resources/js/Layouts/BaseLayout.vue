@@ -16,12 +16,12 @@ const page = usePage();
         </a>
 
         <header class="border-b border-line bg-surface">
-            <div class="mx-auto flex w-full max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+            <div class="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3 sm:px-6">
                 <Link :href="HOME_URL" class="text-lg font-semibold tracking-tight">
                     {{ page.props.app.name }}
                 </Link>
 
-                <nav v-if="$slots.nav" aria-label="Primary" class="flex items-center gap-4 text-sm">
+                <nav v-if="$slots.nav" aria-label="Primary" class="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
                     <slot name="nav" />
                 </nav>
             </div>

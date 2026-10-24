@@ -1,12 +1,13 @@
 <script setup>
-import { Head, usePage } from '@inertiajs/vue3';
+import { Head, Link, usePage } from '@inertiajs/vue3';
+import { computed } from 'vue';
 
-// Projects the signed-in user can open, as { id, name }. Linking to a project comes with the project pages.
-defineProps({
-    projects: { type: Array, default: () => [] },
-});
+import { PROJECTS_CREATE_URL, PROJECTS_URL, projectUrl } from '@/routes';
 
 const page = usePage();
+
+// The shared `projects` prop: id and name of the projects the user can open (at most 50), never a key.
+const projects = computed(() => page.props.projects ?? []);
 </script>
 
 <template>
@@ -22,11 +23,21 @@ const page = usePage();
 
         <div v-if="projects.length === 0" class="max-w-prose rounded-md border border-line bg-surface px-4 py-6">
             <h2 class="font-medium">No projects yet</h2>
-            <p class="mt-1 text-sm text-muted">Projects you can open will be listed here.</p>
+            <p class="mt-1 text-sm text-muted">A project gives you an API key to send events with.</p>
+            <Link :href="PROJECTS_CREATE_URL" class="mt-3 inline-block font-medium text-accent hover:text-accent-hover">Create a project</Link>
         </div>
 
-        <ul v-else class="max-w-prose divide-y divide-line rounded-md border border-line bg-surface">
-            <li v-for="project in projects" :key="project.id" class="px-4 py-3">{{ project.name }}</li>
-        </ul>
+        <div v-else class="max-w-prose space-y-3">
+            <h2 class="font-medium">Your projects</h2>
+            <ul class="divide-y divide-line rounded-md border border-line bg-surface">
+                <li v-for="project in projects" :key="project.id">
+                    <Link :href="projectUrl(project.id)" class="block px-4 py-3 font-medium text-accent hover:text-accent-hover">{{ project.name }}</Link>
+                </li>
+            </ul>
+            <p class="flex gap-4 text-sm">
+                <Link :href="PROJECTS_URL" class="font-medium text-accent hover:text-accent-hover">All projects</Link>
+                <Link :href="PROJECTS_CREATE_URL" class="font-medium text-accent hover:text-accent-hover">New project</Link>
+            </p>
+        </div>
     </section>
 </template>

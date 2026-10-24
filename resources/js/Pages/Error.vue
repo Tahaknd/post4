@@ -1,5 +1,5 @@
 <script setup>
-import { Head, Link } from '@inertiajs/vue3';
+import { Head, Link, usePage } from '@inertiajs/vue3';
 import { computed } from 'vue';
 
 import { HOME_URL, LOGIN_URL } from '@/routes';
@@ -19,6 +19,11 @@ const titles = {
     503: 'Temporarily unavailable',
 };
 
+const page = usePage();
+
+// A signed-in user is sent back to the start page, a guest to the sign-in page (the 429 of the sign-in throttle).
+const backToSignIn = computed(() => props.status === 429 && !page.props.auth?.user);
+
 const title = computed(() => titles[props.status] ?? 'Something went wrong');
 </script>
 
@@ -30,10 +35,10 @@ const title = computed(() => titles[props.status] ?? 'Something went wrong');
         <h1 id="error-heading" class="text-2xl font-semibold tracking-tight">{{ title }}</h1>
         <p v-if="message" class="text-muted">{{ message }}</p>
         <Link
-            :href="status === 429 ? LOGIN_URL : HOME_URL"
+            :href="backToSignIn ? LOGIN_URL : HOME_URL"
             class="inline-block font-medium text-accent hover:text-accent-hover"
         >
-            {{ status === 429 ? 'Back to sign in' : 'Back to the start page' }}
+            {{ backToSignIn ? 'Back to sign in' : 'Back to the start page' }}
         </Link>
     </section>
 </template>

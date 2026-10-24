@@ -2,6 +2,7 @@
 import { Link, router, usePage } from '@inertiajs/vue3';
 import { computed, ref } from 'vue';
 
+import ProjectMenu from '@/Components/ProjectMenu.vue';
 import BaseLayout from '@/Layouts/BaseLayout.vue';
 import { HOME_URL, HORIZON_URL, LOGOUT_URL } from '@/routes';
 
@@ -31,6 +32,8 @@ function logout() {
             <Link v-for="item in navItems" :key="item.href" :href="item.href" class="text-muted hover:text-fg">
                 {{ item.label }}
             </Link>
+
+            <ProjectMenu />
 
             <!-- Horizon is a separate Laravel page, not an Inertia one: a plain link, shown to administrators only. -->
             <a v-if="user.is_admin" :href="HORIZON_URL" class="text-muted hover:text-fg">Horizon</a>
