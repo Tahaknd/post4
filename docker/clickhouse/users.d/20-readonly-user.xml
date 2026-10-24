@@ -6,9 +6,34 @@
         WHAT
         `posthog_ro` may only SELECT from `posthog.events`. The application's insight queries (the
         ProjectScopedReader / ReadOnlyClickHouseClient) connect as this user, so a bug or a hostile query
-        built there cannot write, alter, drop, read files or URLs, or look at other tables. Tenant
-        isolation (project_id) is NOT enforced here; that is the job of ProjectScopedReader. This user only
-        limits the blast radius to SELECT on one table. The user name is fixed here (posthog_ro).
+        built there cannot write, alter, drop, read files or URLs, or look at other tables, and the ROW
+        POLICY below limits every read of posthog.events to ONE project (see TENANT ISOLATION). The user
+        name is fixed here (posthog_ro).
+
+        TENANT ISOLATION (row policy, FAIL CLOSED)
+        The `<databases><posthog><events><filter>` element under the user is a ROW POLICY: every SELECT
+        that touches posthog.events gets the extra condition
+            project_id = toUInt32(getSetting('SQL_project_id'))
+        The setting SQL_project_id exists because config.d/10-custom-settings.xml declares the custom
+        settings prefix SQL_. ProjectScopedReader sends it as a URL argument on every read. A query
+        WITHOUT the setting does not return all rows: it fails (observed on 25.8: Code 115
+        UNKNOWN_SETTING, raised while the policy expression is evaluated). A value that is not a
+        UInt32 fails too (Code 6 or 72). Verified on 25.8: the policy applies inside subqueries, UNION,
+        JOINs and CTEs, and the primary key index still prunes (getSetting folds to a constant, so
+        `project_id in [N, N]` selects only that project's granules).
+        The admin user `posthog` has no row policy and is unaffected (ingestion, materialized views,
+        capture:status, migrations). The grant below stays exactly one line; the policy is not a grant.
+
+        LIMITATION (precise)
+        `readonly=2` lets this user change settings, and a `const` constraint on SQL_project_id is
+        impossible because it would also block the reader's own URL argument. So SQL that contains
+        `SETTINGS SQL_project_id = <other id>` overrides the policy for that query (the integration test
+        in tests/Feature/ClickHouseTenantIsolationTest.php pins this). The policy protects against
+        BUGS in query builders (forgotten filter, OR, UNION arm, a comment hiding a placeholder), NOT
+        against SQL injection. Injection is prevented by typed {name:Type} parameters, builder
+        identifiers from allow lists, and the ProjectScopedReader lint (no SETTINGS, semicolon, comments or
+        direct table names; caller settings starting with SQL_ are refused). Never let user text become
+        SQL text.
 
         WHY ONLY `events` (least privilege)
         The scoped reader's contract covers `events` only. `events_errors` holds the RAW payloads of any
@@ -17,6 +42,8 @@
         so the grant names the table instead of using posthog.*. Each new readable table is one more
         <query> line below (for example Milestone 4 will add `person_distinct_ids`) and needs
             docker compose up -d - -force-recreate clickhouse
+        (a new readable table also needs its own row policy `filter` under <databases>, otherwise it would
+        be readable for every project).
         `capture:status` reads `events_errors` and `system.*` with the ADMIN client, so it is unaffected.
 
         NEVER add SOURCES, CREATE TEMPORARY TABLE or INTROSPECTION grants. `readonly=2` still allows
@@ -166,6 +193,13 @@
             <grants>
                 <query>GRANT SELECT ON posthog.events</query>
             </grants>
+            <databases>
+                <posthog>
+                    <events>
+                        <filter>project_id = toUInt32(getSetting('SQL_project_id'))</filter>
+                    </events>
+                </posthog>
+            </databases>
         </posthog_ro>
     </users>
 </clickhouse>

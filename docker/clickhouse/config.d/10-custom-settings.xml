@@ -1,0 +1,44 @@
+<clickhouse>
+    <!--
+        Custom setting prefix for tenant isolation (one file per concern; mounted as a single file
+        because the image entrypoint writes generated config files into /etc/clickhouse-server/config.d/).
+
+        WHAT
+        Declares `SQL_` as a custom settings prefix, so a query may carry a setting named SQL_project_id.
+        The read-only user's ROW POLICY on posthog.events (20-readonly-user.xml, `filter` under
+        <databases>) reads it with getSetting('SQL_project_id'). Without this line the server rejects
+        the setting name as unknown and the policy cannot be defined.
+
+        WHY NOT ANOTHER PREFIX
+        ClickHouse reserves a few prefixes for itself; SQL_ is the documented one for application
+        defined settings. The name is case sensitive: SQL_project_id works, sql_project_id does not.
+
+        FAIL CLOSED
+        A query that does not carry SQL_project_id fails (the policy expression cannot be evaluated),
+        it does NOT return every project's rows. The admin user `posthog` has no row policy and is not
+        affected (ingestion, materialized views, capture:status and migrations all use it).
+
+        LIMITATION (read this before trusting it)
+        `readonly=2` lets the read-only user change settings, and a `const` constraint on SQL_project_id
+        is impossible because it would block the reader's own URL argument. So a query that contains
+        `SETTINGS SQL_project_id = <other id>` can override the policy for itself. The row policy
+        therefore protects against BUGS in the query builders (a forgotten filter, an OR, a UNION arm, a
+        comment hiding the placeholder), NOT against SQL injection. Injection is prevented elsewhere:
+        user values only travel as typed {name:Type} parameters, builder identifiers come from allow
+        lists, and ProjectScopedReader lints the builder SQL (no SETTINGS, no semicolon, no comments,
+        no direct table names) and refuses caller settings that start with SQL_.
+
+        NOTE ON COMMANDS
+        XML comments cannot contain two consecutive hyphens, so long options below are written with a
+        space after the first hyphen: read '- -force-recreate' as two hyphens followed by force-recreate.
+
+        HOW TO APPLY
+        This is a SINGLE-FILE bind mount, which follows the inode. Editing the file in place (sed -i,
+        most editors) or `git pull` / checkout (unlink + create) is NOT picked up by
+        `docker compose up -d`. Run:
+            docker compose up -d - -force-recreate clickhouse
+        An unknown element in a config file can abort server start (exit code 91, restart loop): validate
+        an edit in a throwaway container first.
+    -->
+    <custom_settings_prefixes>SQL_</custom_settings_prefixes>
+</clickhouse>

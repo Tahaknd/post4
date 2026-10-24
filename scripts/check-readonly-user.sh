@@ -15,10 +15,13 @@ usage() {
   cat <<'EOF_USAGE'
 Usage: scripts/check-readonly-user.sh [-h|--help]
 
-Checks that the ClickHouse read-only user posthog_ro can log in and SELECT from posthog.events, and
-that everything else is refused with the RIGHT error code (not merely "some error"):
+Checks that the ClickHouse read-only user posthog_ro can log in and SELECT from posthog.events (every
+read must carry the SQL_project_id setting of the row policy, which hides all other projects), and that
+everything else is refused with the RIGHT error code (not merely "some error"):
   497 ACCESS_DENIED     other tables (events_errors, schema_migrations, kafka_events), INSERT, ALTER,
                         CREATE, and the url() / file() / remote() table functions
+  115 UNKNOWN_SETTING   a read of posthog.events WITHOUT SQL_project_id (the row policy fails closed)
+  6   CANNOT_PARSE_TEXT SQL_project_id that is not a number
   164 READONLY          SET readonly = 0
   452 SETTING_CONSTRAINT_VIOLATION
                         raising or removing a limit (max_execution_time 25 and 0, max_memory_usage,
@@ -138,7 +141,19 @@ else
   echo "check-readonly-user: $PASSED passed, $FAILED failed"
   exit 1
 fi
-check_ok "SELECT count() FROM posthog.events works" 'SELECT count() FROM posthog.events'
+# Every read needs the SQL_project_id setting (row policy, see below); without it the query fails.
+check_ok "SELECT count() FROM posthog.events works (with SQL_project_id)" 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 1'
+
+# --- tenant isolation: the row policy on posthog.events (fail-closed) ---------------------------------
+# The policy filter is project_id = toUInt32(getSetting('SQL_project_id')). A query without the setting
+# must FAIL (never return every project's rows): on 25.8 that is Code 115 UNKNOWN_SETTING, raised while
+# the policy expression is evaluated. A value that is not a UInt32 fails with 6 (CANNOT_PARSE_TEXT).
+check_code "SELECT without SQL_project_id is rejected (fail-closed)" 115 'SELECT count() FROM posthog.events'
+check_code "SQL_project_id that is not a number is rejected" 6 "SELECT count() FROM posthog.events SETTINGS SQL_project_id = 'abc'"
+# These two hold on ANY data: with the setting at 1 no row of another project may be visible.
+check_out "the policy hides every other project (WHERE project_id != 1 is empty)" 'SELECT count() FROM posthog.events WHERE project_id != 1 SETTINGS SQL_project_id = 1' 0
+check_out "the policy applies inside a UNION ALL subquery too" 'SELECT count() FROM (SELECT project_id FROM posthog.events UNION ALL SELECT project_id FROM posthog.events) WHERE project_id != 1 SETTINGS SQL_project_id = 1' 0
+check_out "a project id nobody owns (0) sees no rows" 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 0' 0
 
 # --- no other table ----------------------------------------------------------------------------------
 check_code "SELECT from posthog.events_errors is denied" 497 'SELECT count() FROM posthog.events_errors'

@@ -168,6 +168,15 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Custom settings prefix SQL_ for the row policy of the read-only user (tenant isolation); same
+      # single-file mechanics, see config.d/10-custom-settings.xml. Without it the policy in
+      # 20-readonly-user.xml cannot load, so mount BOTH files together.
+      - type: bind
+        source: ./docker/clickhouse/config.d/10-custom-settings.xml
+        target: /etc/clickhouse-server/config.d/10-custom-settings.xml
+        read_only: true
+        bind:
+          create_host_path: false
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     healthcheck:
