@@ -81,15 +81,24 @@ it('removes every row of the purged project, leaves the other project alone and 
     expect(purgeCount($this->ch, CH::PURGE_B))->toBe(25);
 });
 
+/** Ids of every mutation of events that names the project id, finished or not (ClickHouse prunes old finished ones, so ids are compared, never counts). */
+function mutationIdsOf(CH $ch, int $project): array
+{
+    return array_column($ch->admin->select(
+        "SELECT mutation_id FROM system.mutations WHERE database = 'posthog' AND table = 'events' AND match(command, {pattern:String})",
+        ['pattern' => '(^|[^0-9])'.$project.'([^0-9]|$)'],
+    ), 'mutation_id');
+}
+
 it('does not stack a second mutation while the first is pending', function () {
     seedPurgeRows($this->ch, CH::PURGE_A, 30);
-    $before = (int) $this->ch->admin->select("SELECT count() AS n FROM system.mutations WHERE database = 'posthog' AND table = 'events' AND match(command, '(^|[^0-9])".CH::PURGE_A."([^0-9]|\$)')")[0]['n'];
+    $before = mutationIdsOf($this->ch, CH::PURGE_A);
 
     runPurge($this->ch, CH::PURGE_A);
 
-    $created = (int) $this->ch->admin->select("SELECT count() AS n FROM system.mutations WHERE database = 'posthog' AND table = 'events' AND match(command, '(^|[^0-9])".CH::PURGE_A."([^0-9]|\$)')")[0]['n'] - $before;
+    $created = array_diff(mutationIdsOf($this->ch, CH::PURGE_A), $before);
     expect(purgeCount($this->ch, CH::PURGE_A))->toBe(0)
-        ->and($created)->toBe(1);
+        ->and($created)->toHaveCount(1);
 });
 
 it('removes events that land after the first pass when the second pass runs', function () {
