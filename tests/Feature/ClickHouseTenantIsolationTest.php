@@ -5,8 +5,9 @@ use App\Infrastructure\ClickHouse\RoSettings;
 use Tests\Support\ClickHouseIntegration as CH;
 
 /*
- * Two-tenant isolation against a real ClickHouse (25.8) with the row policy of 20-readonly-user.xml and the
- * SQL_ custom settings prefix of config.d/10-custom-settings.xml. Mocks cannot try either. Opt-in: the whole
+ * Two-tenant isolation against a real ClickHouse (25.8) with the DEFINER view posthog.project_events_v
+ * (migration 002), the grants and row policy of 20-readonly-user.xml and the SQL_ custom settings prefix of
+ * config.d/10-custom-settings.xml. Mocks cannot try any of them. Opt-in: the whole
  * file is in the group "clickhouse", which phpunit.xml excludes from the default run. Run with
  *
  *   docker compose exec -T -e CLICKHOUSE_INTEGRATION_URL=http://clickhouse:8123 \
@@ -116,27 +117,44 @@ it('rejects the bypass attempts in the lint and never reaches ClickHouse', funct
     'block comment' => 'SELECT count() /* x */ FROM project_events',
     'settings override' => 'SELECT count() FROM project_events SETTINGS SQL_project_id = 990102',
     'semicolon' => 'SELECT count() FROM project_events; SELECT 1',
-    'placeholder' => 'SELECT count() FROM project_events WHERE project_id = {project_id:UInt32}',
+    'the view directly' => 'SELECT count() FROM project_events_v',
     'string literal' => "SELECT count() FROM project_events WHERE event = 'it_buy'",
     'mergeTreeIndex' => "SELECT project_id FROM mergeTreeIndex(currentDatabase(), concat('ev', 'ents'))",
 ]);
 
-it('S1: the primary key values of another project never reach a scoped result (mergeTreeIndex bypass)', function () {
+it('S1: the primary key values of another project never reach anyone (mergeTreeIndex is denied on the server)', function () {
     // Non vacuous: both projects really have rows, and B's uuids are known from the admin.
     $bUuids = array_column($this->ch->admin->select('SELECT toString(uuid) AS u FROM posthog.events WHERE project_id = {p:UInt32}', ['p' => CH::PROJECT_B]), 'u');
     expect($bUuids)->toHaveCount(CH::ROWS_B);
+    // ... and the table function really would leak for a user that may read the table (the admin): the
+    // denial below is the grant, not an empty table or a broken query.
+    $leak = $this->ch->admin->select("SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', 'events') ORDER BY project_id");
+    expect(array_map('intval', array_column($leak, 'project_id')))->toContain(CH::PROJECT_A, CH::PROJECT_B);
 
-    // 1) The server does NOT close this one (documented): through the raw read-only client mergeTreeIndex
-    //    skips the row policy and exposes B's primary key values although the request is scoped to A. Only
-    //    the reader lint below keeps it out. If ClickHouse ever starts applying the policy to
-    //    mergeTreeIndex, this assertion fails: then update the docblock of ProjectScopedReader.
-    $raw = $this->ch->ro->select(
-        "SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', 'events') ORDER BY project_id",
-        settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A],
-    );
-    expect(array_map('intval', array_column($raw, 'project_id')))->toContain(CH::PROJECT_B);
+    // 1) The server closes it (it used to leak): the read-only user has no grant on posthog.events, so every
+    //    way to reach the table through the RAW client (no reader lint involved) is ACCESS_DENIED.
+    foreach ([
+        "SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', 'events')",
+        "SELECT project_id, uuid FROM mergeTreeIndex(currentDatabase(), concat('ev', 'ents'))",
+        'SELECT project_id, uuid FROM mergeTreeIndex(currentDatabase(), char(101, 118, 101, 110, 116, 115))',
+        'SELECT count() FROM view(SELECT * FROM posthog.events)',
+        'SELECT count() FROM posthog.events',
+        'SELECT count() FROM events',
+        'SELECT count() FROM (SELECT project_id FROM posthog.events UNION ALL SELECT project_id FROM posthog.events)',
+    ] as $sql) {
+        expect(fn () => $this->ch->ro->select($sql, settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A]))
+            ->toThrow(RuntimeException::class, 'ACCESS_DENIED');
+    }
 
-    // 2) Every way to reach that table function through the reader is refused before anything is sent.
+    //    merge() only lists tables the user may see, so the regex matches nothing: still no read.
+    expect(fn () => $this->ch->ro->select("SELECT count() FROM merge('posthog', '^events\$')", settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A]))
+        ->toThrow(RuntimeException::class, 'CANNOT_EXTRACT_TABLE_STRUCTURE');
+
+    // 2) mergeTreeIndex on the scoped view is not possible either (a View is not a MergeTree).
+    expect(fn () => $this->ch->ro->select("SELECT * FROM mergeTreeIndex('posthog', 'project_events_v')", settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A]))
+        ->toThrow(RuntimeException::class);
+
+    // 3) The reader lint is the second line: the same shapes never even leave PHP.
     foreach ([
         "SELECT project_id, uuid FROM mergeTreeIndex(currentDatabase(), concat('ev', 'ents'))",
         'SELECT project_id, uuid FROM mergeTreeIndex(currentDatabase(), char(101, 118, 101, 110, 116, 115))',
@@ -149,7 +167,7 @@ it('S1: the primary key values of another project never reach a scoped result (m
         expect(fn () => $this->ch->reader->select(CH::PROJECT_A, $sql))->toThrow(InvalidArgumentException::class);
     }
 
-    // 3) What a scoped query for A does return contains nothing of B.
+    // 4) What a scoped query for A does return contains nothing of B.
     $a = $this->ch->reader->select(CH::PROJECT_A, 'SELECT toString(uuid) AS u, project_id FROM project_events');
     expect($a)->toHaveCount(CH::ROWS_A)
         ->and(array_intersect(array_column($a, 'u'), $bUuids))->toBe([])
@@ -164,18 +182,43 @@ it('reads the MATERIALIZED columns browser and current_url through the CTE', fun
         ->and(ints($b))->toBe([['browser' => 'Chrome', 'current_url' => 'https://b.test/', 'country_code' => '', 'n' => CH::ROWS_B]]);
 });
 
-it('keeps ProjectScopedReader::COLUMNS equal to the real columns of posthog.events (drift guard)', function () {
-    $columns = array_column($this->ch->admin->select('DESCRIBE TABLE posthog.events'), 'name');
+it('keeps ProjectScopedReader::COLUMNS equal to the real columns of posthog.events AND of the scoped view (drift guard)', function () {
+    $table = array_column($this->ch->admin->select('DESCRIBE TABLE posthog.events'), 'name');
+    $view = array_column($this->ch->admin->select('DESCRIBE TABLE posthog.'.ProjectScopedReader::VIEW), 'name');
 
-    // A new migration that adds or renames a column must update ProjectScopedReader::COLUMNS on purpose
-    // (the CTE no longer uses SELECT *, which would silently miss MATERIALIZED columns anyway).
-    expect($columns)->toEqualCanonicalizing(ProjectScopedReader::COLUMNS);
+    // A new migration that adds or renames a column of events must recreate the view (CREATE OR REPLACE
+    // VIEW: an ADD COLUMN leaves the view silently without the new column) and update
+    // ProjectScopedReader::COLUMNS on purpose (no SELECT *, which would miss MATERIALIZED columns).
+    expect($table)->toEqualCanonicalizing(ProjectScopedReader::COLUMNS)
+        ->and($view)->toEqualCanonicalizing(ProjectScopedReader::COLUMNS)
+        ->and($view)->toEqualCanonicalizing($table);
 });
 
-it('prunes the primary key through the real CTE prefix as well', function () {
+it('created the view as a DEFINER view that filters on SQL_project_id', function () {
+    $rows = $this->ch->admin->select(
+        'SELECT create_table_query AS q FROM system.tables WHERE database = {db:String} AND name = {v:String}',
+        ['db' => 'posthog', 'v' => ProjectScopedReader::VIEW],
+    );
+
+    expect($rows)->toHaveCount(1)
+        ->and($rows[0]['q'])->toContain('SQL SECURITY DEFINER')
+        ->and($rows[0]['q'])->toContain('DEFINER = ')
+        ->and($rows[0]['q'])->toContain("project_id = toUInt32(getSetting('SQL_project_id'))");
+});
+
+it('grants the read-only user the view and nothing on posthog.events', function () {
+    $grants = $this->ch->admin->select('SELECT access_type, database, table FROM system.grants WHERE user_name = {u:String}', ['u' => 'posthog_ro']);
+
+    expect($grants)->toHaveCount(1)
+        ->and($grants[0]['access_type'])->toBe('SELECT')
+        ->and($grants[0]['database'])->toBe('posthog')
+        ->and($grants[0]['table'])->toBe(ProjectScopedReader::VIEW);
+});
+
+it('prunes the primary key through the real CTE prefix and the view as well', function () {
     $plan = $this->ch->ro->select(
         'EXPLAIN indexes = 1 '.ProjectScopedReader::cte().'SELECT event, count() FROM project_events GROUP BY event',
-        ['project_id' => CH::PROJECT_A],
+        [],
         [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A],
     );
     $text = implode("\n", array_column($plan, 'explain'));
@@ -188,25 +231,25 @@ it('refuses a caller SQL_project_id setting on the scoped reader', function () {
         ->toThrow(InvalidArgumentException::class);
 });
 
-it('fails closed: a direct read-only query WITHOUT SQL_project_id is rejected by the server', function () {
-    expect(fn () => $this->ch->ro->select('SELECT count() AS n FROM posthog.events'))
+it('fails closed: a direct read of the view WITHOUT SQL_project_id is rejected by the server', function () {
+    expect(fn () => $this->ch->ro->select('SELECT count() AS n FROM posthog.project_events_v'))
         ->toThrow(RuntimeException::class, 'UNKNOWN_SETTING');
-    expect(fn () => $this->ch->ro->select('SELECT project_id, count() AS n FROM posthog.events GROUP BY project_id'))
+    expect(fn () => $this->ch->ro->select('SELECT project_id, count() AS n FROM posthog.project_events_v GROUP BY project_id'))
         ->toThrow(RuntimeException::class, 'SQL_project_id');
 });
 
-it('returns only the requested project to a direct read-only query WITH SQL_project_id', function () {
+it('returns only the requested project to a direct read-only query of the view WITH SQL_project_id', function () {
     $rows = $this->ch->ro->select(
-        'SELECT project_id, count() AS n FROM posthog.events GROUP BY project_id',
+        'SELECT project_id, count() AS n FROM posthog.project_events_v GROUP BY project_id',
         settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A],
     );
 
     expect(ints($rows))->toBe([['project_id' => CH::PROJECT_A, 'n' => CH::ROWS_A]]);
 });
 
-it('folds the policy into a primary key condition so the index can prune', function () {
+it('folds the view filter into a primary key condition so the index can prune', function () {
     $plan = $this->ch->ro->select(
-        'EXPLAIN indexes = 1 SELECT event, count() FROM posthog.events GROUP BY event',
+        'EXPLAIN indexes = 1 SELECT event, count() FROM posthog.project_events_v GROUP BY event',
         settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A],
     );
     $text = implode("\n", array_column($plan, 'explain'));
@@ -214,12 +257,12 @@ it('folds the policy into a primary key condition so the index can prune', funct
     expect($text)->toContain('project_id in ['.CH::PROJECT_A.', '.CH::PROJECT_A.']');
 });
 
-it('KNOWN LIMITATION: a query level SETTINGS SQL_project_id overrides the row policy (documented, not a guard against SQL injection)', function () {
+it('KNOWN LIMITATION: a query level SETTINGS SQL_project_id overrides the view filter (documented, not a guard against SQL injection)', function () {
     // The URL argument says project A, but the SQL itself sets B: the query-level setting wins. This is why
     // ProjectScopedReader lints SETTINGS out of builder SQL and refuses caller SQL_* settings; the row policy
     // only protects against builder bugs. See the header of docker/clickhouse/users.d/20-readonly-user.xml.
     $rows = $this->ch->ro->select(
-        'SELECT project_id, count() AS n FROM posthog.events GROUP BY project_id SETTINGS SQL_project_id = '.CH::PROJECT_B,
+        'SELECT project_id, count() AS n FROM posthog.project_events_v GROUP BY project_id SETTINGS SQL_project_id = '.CH::PROJECT_B,
         settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A],
     );
 
