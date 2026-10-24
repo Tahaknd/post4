@@ -67,6 +67,20 @@ it('answers an expired form (419) with 303 to the page it came from, for every u
         ->assertSessionHas('status', 'The page expired. Please try again.');
 })->with(['PUT', 'DELETE']);
 
+it('answers an expired Inertia form (419) with the same 303 and Vary header', function (string $method) {
+    app()->detectEnvironment(fn () => 'production');
+
+    $this->call($method, '/t-open', server: [
+        'HTTP_REFERER' => url('/login'),
+        'HTTP_X_INERTIA' => 'true',
+        'HTTP_X_INERTIA_VERSION' => 'v',
+        'HTTP_ACCEPT' => 'text/html, application/xhtml+xml',
+    ])
+        ->assertStatus(303)
+        ->assertRedirect('/login')
+        ->assertHeader('Vary', 'X-Inertia');
+})->with(['PUT', 'DELETE']);
+
 it('never follows a Referer to another host after a 419', function (string $referer) {
     app()->detectEnvironment(fn () => 'production');
 

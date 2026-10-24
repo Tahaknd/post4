@@ -170,7 +170,10 @@ return [
     */
 
     // Secure by default when APP_URL is https (the cookie then never travels over plain http); an explicit
-    // SESSION_SECURE_COOKIE wins. Behind a TLS-terminating proxy set APP_URL to the public https URL.
+    // SESSION_SECURE_COOKIE wins. Behind a TLS-terminating proxy APP_URL MUST be the public https URL (or set
+    // SESSION_SECURE_COOKIE=true), otherwise the cookie goes out without the flag. Host header caveat: the
+    // application does not pin its host name (trustHosts would break localhost, 127.0.0.1 and LAN access), so
+    // generated URLs follow the request's Host; put it behind a proxy that sets or validates Host when exposed.
     'secure' => env('SESSION_SECURE_COOKIE', str_starts_with((string) env('APP_URL'), 'https://')),
 
     /*
