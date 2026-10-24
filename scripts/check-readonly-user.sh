@@ -37,7 +37,8 @@ RIGHT error code (not merely "some error"):
                         raising or removing a limit (max_execution_time 25 and 0, max_memory_usage,
                         max_result_rows, max_concurrent_queries_for_user = 0) and changing a pinned
                         setting (join_algorithm, use_query_cache, log_queries,
-                        stream_like_engine_allow_direct_select)
+                        stream_like_engine_allow_direct_select, session_timezone,
+                        output_format_json_quote_64bit_integers, serialize_query_plan, enable_analyzer)
 and that a benign setting (max_execution_time = 5) is accepted, SET profile = 'default' and SET ROLE ALL
 change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.project_events_v TO posthog_ro`. For
 EVERY relation found in SHOW GRANTS a bare SELECT (no SQL_project_id) must fail with 115, so a relation
@@ -277,6 +278,11 @@ check_code "join_algorithm = grace_hash is pinned" 452 "SELECT 1 SETTINGS join_a
 check_code "use_query_cache = 1 is pinned" 452 'SELECT 1 SETTINGS use_query_cache = 1'
 check_code "log_queries = 0 is pinned" 452 'SELECT 1 SETTINGS log_queries = 0'
 check_code "stream_like_engine_allow_direct_select = 1 is pinned" 452 'SELECT 1 SETTINGS stream_like_engine_allow_direct_select = 1'
+check_code "session_timezone is pinned" 452 "SELECT 1 SETTINGS session_timezone = 'Europe/Istanbul'"
+check_code "output_format_json_quote_64bit_integers is pinned" 452 'SELECT 1 SETTINGS output_format_json_quote_64bit_integers = 1'
+check_code "serialize_query_plan is pinned" 452 'SELECT 1 SETTINGS serialize_query_plan = 1'
+check_code "enable_analyzer (old analyzer) is pinned" 452 'SELECT 1 SETTINGS enable_analyzer = 0'
+check_out "the pinned values are in effect" "SELECT getSetting('session_timezone'), getSetting('output_format_json_quote_64bit_integers'), getSetting('serialize_query_plan'), getSetting('enable_analyzer')" $'UTC\tfalse\tfalse\ttrue'
 check_ok "a benign setting (max_execution_time = 5) is accepted" 'SELECT 1 SETTINGS max_execution_time = 5'
 
 # --- profile and role switches do not loosen anything (outcome recorded on 25.8, not a hole) -----------

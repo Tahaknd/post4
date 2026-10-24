@@ -103,3 +103,15 @@ it('keeps ProjectScopedReader::COLUMNS equal to the column names of CREATE TABLE
 
     expect($names[1])->toEqualCanonicalizing(ProjectScopedReader::COLUMNS);
 });
+
+it('pins the result shape settings of the ro_insights profile and makes them constant', function (string $setting, string $value) {
+    $profile = readOnlyUserXml()->profiles->ro_insights;
+
+    expect((string) $profile->{$setting})->toBe($value)
+        ->and(isset($profile->constraints->{$setting}->const))->toBeTrue("{$setting} must have a <const/> constraint");
+})->with([
+    'session_timezone' => ['session_timezone', 'UTC'],
+    'json 64 bit integers are numbers' => ['output_format_json_quote_64bit_integers', '0'],
+    'query plan is not serialized' => ['serialize_query_plan', '0'],
+    'new analyzer' => ['enable_analyzer', '1'],
+]);

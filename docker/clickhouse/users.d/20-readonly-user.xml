@@ -124,6 +124,20 @@
         0, stream_like_engine_allow_direct_select 0 (a direct SELECT from the Kafka engine table would
         consume messages away from the ingest consumer).
 
+        Result shape pins (const, so neither the client nor SQL can change them; names validated on 25.8):
+        session_timezone UTC: the server clock functions (now(), toDate(now())) and DateTime parsing without
+        an explicit zone use UTC for this user, whatever the server zone is. The PROJECT zone is always passed
+        explicitly by the query builders (toStartOfInterval(..., {tz:String})), never through this setting.
+        output_format_json_quote_64bit_integers 0: UInt64/Int64 (count(), uniqExact()) come back as JSON
+        NUMBERS (25.8 default is also 0; pinned so a server upgrade cannot turn counts into strings). PHP
+        decodes them as int up to 2^63-1 and as float above, which counts never reach; do not select raw
+        UInt64 hashes (cityHash64 etc.) through this user.
+        serialize_query_plan 0: the query plan is not serialized for distributed execution (nothing here is
+        distributed; pinned to keep the plan, and EXPLAIN output, in the form the tests expect).
+        enable_analyzer 1: the new analyzer is the default on 25.8; pinning it stops a query from switching
+        to the old analyzer, whose view, alias and subquery semantics differ (the tenant isolation tests
+        were verified on the new one).
+
         WHY EVERY LIMIT CONSTRAINT HAS min 1
         For these settings 0 means UNLIMITED, and 0 is numerically below any max, so a bare max
         constraint would let a query pass `max_execution_time = 0` or `max_result_rows = 0` and switch the
@@ -186,6 +200,10 @@
             <use_query_cache>0</use_query_cache>
             <allow_introspection_functions>0</allow_introspection_functions>
             <stream_like_engine_allow_direct_select>0</stream_like_engine_allow_direct_select>
+            <session_timezone>UTC</session_timezone>
+            <output_format_json_quote_64bit_integers>0</output_format_json_quote_64bit_integers>
+            <serialize_query_plan>0</serialize_query_plan>
+            <enable_analyzer>1</enable_analyzer>
 
             <constraints>
                 <readonly><const/></readonly>
@@ -210,6 +228,10 @@
                 <use_query_cache><const/></use_query_cache>
                 <allow_introspection_functions><const/></allow_introspection_functions>
                 <stream_like_engine_allow_direct_select><const/></stream_like_engine_allow_direct_select>
+                <session_timezone><const/></session_timezone>
+                <output_format_json_quote_64bit_integers><const/></output_format_json_quote_64bit_integers>
+                <serialize_query_plan><const/></serialize_query_plan>
+                <enable_analyzer><const/></enable_analyzer>
             </constraints>
         </ro_insights>
     </profiles>
