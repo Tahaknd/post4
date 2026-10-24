@@ -2,8 +2,8 @@
 
 namespace App\Console\Commands;
 
-use App\Actions\Users\UserRules;
 use App\Console\Concerns\ReadsPassword;
+use App\Domain\Users\UserRules;
 use App\Models\User;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Validator;

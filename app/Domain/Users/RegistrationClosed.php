@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Actions\Users;
+namespace App\Domain\Users;
 
 use RuntimeException;
 

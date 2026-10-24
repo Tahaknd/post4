@@ -1,6 +1,6 @@
 <?php
 
-use App\Actions\Users\RegisterFirstUser;
+use App\Domain\Users\UserCreationLock;
 
 /*
  * Runs RegisterFirstUser against a real Postgres, because the advisory lock exists only there (the default
@@ -116,7 +116,7 @@ afterEach(function () {
 it('blocks a first registration on the advisory lock until the competing transaction commits, then refuses it', function () {
     // This session plays a registration that is in the middle of its transaction.
     $this->scratch->beginTransaction();
-    $this->scratch->prepare('select pg_advisory_xact_lock(?)')->execute([RegisterFirstUser::LOCK_KEY]);
+    $this->scratch->prepare('select pg_advisory_xact_lock(?)')->execute([UserCreationLock::KEY]);
 
     [$process, $pipes] = startRaceWorker($this->database, microtime(true), 'late');
 

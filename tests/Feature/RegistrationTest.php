@@ -2,7 +2,7 @@
 
 use App\Actions\Users\CreateUser;
 use App\Actions\Users\RegisterFirstUser;
-use App\Actions\Users\RegistrationClosed;
+use App\Domain\Users\RegistrationClosed;
 use App\Http\Middleware\EnsureRegistrationOpen;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;

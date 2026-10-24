@@ -30,6 +30,8 @@ class LoginRequest extends FormRequest
         return [
             'email' => ['required', 'string', 'max:255'],
             'password' => ['required', 'string', 'max:1024'],
+            // Not validated here: NextUrl::sanitise() decides, and anything it refuses falls back to "/".
+            'next' => ['nullable', 'string'],
         ];
     }
 }

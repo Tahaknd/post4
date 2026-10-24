@@ -12,9 +12,6 @@ use Illuminate\Console\Command;
  */
 trait ReadsPassword
 {
-    /** The option to declare in the signature: `{--password-file= : ...}`. */
-    protected const string PASSWORD_FILE_HELP = 'Read the password from the first line of this file, or "-" for standard input (never pass it as an argument)';
-
     /**
      * @return string|null the password, or null after an error message was written (use INVALID as exit code)
      */
@@ -61,6 +58,11 @@ trait ReadsPassword
     {
         if (! is_file($path) || ! is_readable($path)) {
             return null;
+        }
+
+        if ((fileperms($path) & 0077) !== 0) {
+            // A warning, not an error: the file may sit on a mount that cannot hold modes.
+            $this->components->warn("The password file {$path} is readable by group or others; run chmod 600 on it and remove it after use.");
         }
 
         $handle = fopen($path, 'r');

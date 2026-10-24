@@ -11,7 +11,7 @@
  */
 
 use App\Actions\Users\RegisterFirstUser;
-use App\Actions\Users\RegistrationClosed;
+use App\Domain\Users\RegistrationClosed;
 use Illuminate\Contracts\Console\Kernel;
 
 require __DIR__.'/../../vendor/autoload.php';

@@ -1,7 +1,10 @@
 <?php
 
+use App\Actions\Users\CreateUser;
+use App\Console\Commands\UserCreate;
 use App\Models\User;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 
 /**
@@ -167,4 +170,66 @@ it('ends the sessions of a user whose password was reset', function () {
         ->actingAs($user->fresh())
         ->get('/')
         ->assertRedirect('/login');
+});
+
+it('reads the password from standard input with --password-file=-', function () {
+    // The command reads STDIN through a seam, so a subclass supplies the stream a shell pipe would.
+    $command = new class extends UserCreate
+    {
+        protected function readStandardInput(): ?string
+        {
+            return "piped correct horse\n";
+        }
+    };
+    $this->app->make(Kernel::class)->registerCommand($command);
+
+    $this->artisan('user:create', ['email' => 'pipe@example.test', '--password-file' => '-'])->assertExitCode(0);
+
+    expect(Hash::check('piped correct horse', User::sole()->password))->toBeTrue();
+});
+
+it('fails when standard input is empty', function () {
+    $command = new class extends UserCreate
+    {
+        protected function readStandardInput(): ?string
+        {
+            return null;
+        }
+    };
+    $this->app->make(Kernel::class)->registerCommand($command);
+
+    $this->artisan('user:create', ['email' => 'pipe@example.test', '--password-file' => '-'])
+        ->expectsOutputToContain('Nothing to read on standard input.')
+        ->assertExitCode(2);
+});
+
+it('warns when the password file is readable by group or others but still uses it', function () {
+    $path = passwordFile('correct horse battery');
+    chmod($path, 0644);
+
+    $this->artisan('user:create', ['email' => 'loose@example.test', '--password-file' => $path])
+        ->expectsOutputToContain('readable by group or others')
+        ->assertExitCode(0);
+
+    expect(User::count())->toBe(1);
+});
+
+it('does not warn about a private password file', function () {
+    $path = passwordFile('correct horse battery');
+    chmod($path, 0600);
+
+    $this->artisan('user:create', ['email' => 'tight@example.test', '--password-file' => $path])
+        ->doesntExpectOutputToContain('readable by group or others')
+        ->assertExitCode(0);
+});
+
+it('creates every user inside the user-creation transaction (the lock is taken on Postgres)', function () {
+    $level = null;
+    User::creating(function () use (&$level) {
+        $level = DB::transactionLevel();
+    });
+
+    app(CreateUser::class)->handle('Ada', 'ada@example.test', 'correct horse battery');
+
+    expect($level)->toBeGreaterThan(0);
 });
