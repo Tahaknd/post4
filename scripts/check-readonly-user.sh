@@ -2,9 +2,11 @@
 # Verifies the guarantees of the ClickHouse read-only user `posthog_ro` (profile ro_insights,
 # docker/clickhouse/users.d/20-readonly-user.xml) against a running ClickHouse.
 #
-# Safe by construction: only talks to a local Docker engine, logs in as posthog_ro (never as the admin)
-# and every probe is either a SELECT, a statement that must be refused before it runs (and would be
-# harmless with zero rows if it were not), or a setting the server must reject.
+# Only talks to a local Docker engine. Every probe runs as posthog_ro and is either a SELECT, a statement
+# that must be refused before it runs (and would be harmless with zero rows if it were not), or a setting the
+# server must reject. The ONLY writes are made by the ADMIN user (credentials read inside the container) to
+# seed five throwaway rows for the two projects 990901 and 990902, so that the tenant isolation checks cannot
+# pass on an empty table; an EXIT trap deletes exactly those rows again.
 #
 # Run `scripts/check-readonly-user.sh --help` for usage, environment variables and exit codes.
 set -euo pipefail
@@ -15,21 +17,25 @@ usage() {
   cat <<'EOF_USAGE'
 Usage: scripts/check-readonly-user.sh [-h|--help]
 
-Checks that the ClickHouse read-only user posthog_ro can log in and SELECT from posthog.events (every
+Seeds five rows for the throwaway projects 990901 (3 rows) and 990902 (2 rows) as the admin user, and
+deletes them again on exit (also on failure). Then checks that the ClickHouse read-only user posthog_ro can log in and SELECT from posthog.events (every
 read must carry the SQL_project_id setting of the row policy, which hides all other projects), and that
 everything else is refused with the RIGHT error code (not merely "some error"):
   497 ACCESS_DENIED     other tables (events_errors, schema_migrations, kafka_events), INSERT, ALTER,
                         CREATE, and the url() / file() / remote() table functions
   115 UNKNOWN_SETTING   a read of posthog.events WITHOUT SQL_project_id (the row policy fails closed)
   6   CANNOT_PARSE_TEXT SQL_project_id that is not a number
-  164 READONLY          SET readonly = 0
+  511 UNKNOWN_ROLE      SET ROLE of a role that does not exist
+  164 READONLY          SET readonly = 0 and SET profile = 'readonly'
   452 SETTING_CONSTRAINT_VIOLATION
                         raising or removing a limit (max_execution_time 25 and 0, max_memory_usage,
                         max_result_rows, max_concurrent_queries_for_user = 0) and changing a pinned
                         setting (join_algorithm, use_query_cache, log_queries,
                         stream_like_engine_allow_direct_select)
-and that a benign setting (max_execution_time = 5) is accepted and the grants are EXACTLY
-`GRANT SELECT ON posthog.events TO posthog_ro`. One PASS or FAIL line per check.
+and that a benign setting (max_execution_time = 5) is accepted, SET profile = 'default' and SET ROLE ALL
+change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.events TO posthog_ro`. For EVERY
+table found in SHOW GRANTS a bare SELECT (no SQL_project_id) must fail with 115, so a table granted
+without a row policy is caught. One PASS or FAIL line per check.
 
 The password never appears on a command line: it is read inside the container from
 CLICKHOUSE_RO_PASSWORD.
@@ -99,7 +105,7 @@ rox() {
 # run <sql>: result text (stdout + stderr) in OUT, exit status in RC; never aborts the script.
 run() {
   RC=0
-  OUT="$(rox --query "$1" 2>&1)" || RC=$?
+  OUT="$(rox --multiquery --query "$1" 2>&1)" || RC=$?
 }
 
 short() { printf '%s' "$1" | tr '\n' ' ' | head -c 170; }
@@ -129,6 +135,51 @@ check_code() {
   fi
 }
 
+# clickhouse-client as the ADMIN user of the container (CLICKHOUSE_USER / CLICKHOUSE_PASSWORD are in the
+# container's own environment, so no secret is on any argv). Used only to seed and delete the throwaway rows.
+adx() {
+  if [[ -n "$CH_CONTAINER" ]]; then
+    docker exec "$CH_CONTAINER" sh -c 'exec clickhouse-client "$@"' sh "$@"
+  else
+    docker compose exec -T clickhouse sh -c 'exec clickhouse-client "$@"' sh "$@"
+  fi
+}
+
+SEED_A=990901
+SEED_B=990902
+SEEDED=0
+
+# delete_seed: deletes the seeded rows and waits (at most 30 s) until they are gone; 0 when they are gone.
+delete_seed() {
+  local tries=0 left=1
+  adx --lightweight_deletes_sync=0 --query "DELETE FROM posthog.events WHERE project_id IN ($SEED_A, $SEED_B)" >/dev/null 2>&1 || true
+  while [[ $tries -lt 30 ]]; do
+    left="$(adx --query "SELECT count() FROM posthog.events WHERE project_id IN ($SEED_A, $SEED_B)" 2>/dev/null || echo 1)"
+    [[ "$left" == "0" ]] && return 0
+    tries=$((tries + 1))
+    sleep 1
+  done
+  return 1
+}
+
+# Removes the seeded rows on exit, keeping the exit status of the script.
+cleanup_seed() {
+  local rc=$?
+  trap - EXIT
+  if [[ $SEEDED -eq 1 ]] && ! delete_seed; then
+    echo "WARN: seeded rows of projects $SEED_A/$SEED_B are still in posthog.events: delete them by hand" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup_seed EXIT
+
+# seed_rows: five rows (3 for SEED_A, 2 for SEED_B) written by the admin; starts from a clean slate.
+seed_rows() {
+  SEEDED=1
+  delete_seed || return 1
+  adx --query "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT generateUUIDv4(), if(number < 3, $SEED_A, $SEED_B), 'ro_check', 'ro_check', '{}', now64(3) FROM numbers(5)" >/dev/null 2>&1
+}
+
 echo "check-readonly-user: target=${CH_CONTAINER:-compose service clickhouse}"
 
 # --- login and the one allowed read ------------------------------------------------------------------
@@ -144,16 +195,43 @@ fi
 # Every read needs the SQL_project_id setting (row policy, see below); without it the query fails.
 check_ok "SELECT count() FROM posthog.events works (with SQL_project_id)" 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 1'
 
+# Five throwaway rows (admin) so the isolation checks below cannot pass on an empty table.
+if seed_rows; then
+  pass "seeded 3 rows for project $SEED_A and 2 rows for project $SEED_B (removed again on exit)"
+else
+  fail "could not seed the throwaway rows as the admin user (is CLICKHOUSE_USER / CLICKHOUSE_PASSWORD set in the container?)"
+fi
+
 # --- tenant isolation: the row policy on posthog.events (fail-closed) ---------------------------------
 # The policy filter is project_id = toUInt32(getSetting('SQL_project_id')). A query without the setting
 # must FAIL (never return every project's rows): on 25.8 that is Code 115 UNKNOWN_SETTING, raised while
 # the policy expression is evaluated. A value that is not a UInt32 fails with 6 (CANNOT_PARSE_TEXT).
 check_code "SELECT without SQL_project_id is rejected (fail-closed)" 115 'SELECT count() FROM posthog.events'
 check_code "SQL_project_id that is not a number is rejected" 6 "SELECT count() FROM posthog.events SETTINGS SQL_project_id = 'abc'"
-# These two hold on ANY data: with the setting at 1 no row of another project may be visible.
-check_out "the policy hides every other project (WHERE project_id != 1 is empty)" 'SELECT count() FROM posthog.events WHERE project_id != 1 SETTINGS SQL_project_id = 1' 0
-check_out "the policy applies inside a UNION ALL subquery too" 'SELECT count() FROM (SELECT project_id FROM posthog.events UNION ALL SELECT project_id FROM posthog.events) WHERE project_id != 1 SETTINGS SQL_project_id = 1' 0
-check_out "a project id nobody owns (0) sees no rows" 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 0' 0
+# Non vacuous: the seeded rows prove that the table is not empty and that each project is readable.
+check_out "project $SEED_A sees exactly its 3 rows" "SELECT count() FROM posthog.events SETTINGS SQL_project_id = $SEED_A" 3
+check_out "project $SEED_B sees exactly its 2 rows" "SELECT count() FROM posthog.events SETTINGS SQL_project_id = $SEED_B" 2
+check_out "project $SEED_B sees only its own project id" "SELECT toString(groupUniqArray(project_id)) FROM posthog.events SETTINGS SQL_project_id = $SEED_B" "[$SEED_B]"
+check_out "the policy hides every other project (WHERE project_id != $SEED_A is empty)" "SELECT count() FROM posthog.events WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
+check_out "the policy applies inside a UNION ALL subquery too" "SELECT count() FROM (SELECT project_id FROM posthog.events UNION ALL SELECT project_id FROM posthog.events) WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
+check_out "a project id nobody owns (0) sees no rows although the table has some" 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 0' 0
+
+# Every table the user may SELECT from needs a row policy: derive them from SHOW GRANTS (not from this
+# script) and require that a bare read FAILS with 115 for each. A table granted without a policy would
+# answer for every project and fail this check.
+run 'SHOW GRANTS FOR posthog_ro'
+GRANT_LINES="$OUT"
+GRANTED_TABLES=0
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  if [[ "$line" =~ ^GRANT\ SELECT\ ON\ posthog\.([A-Za-z0-9_]+)\ TO\ posthog_ro$ ]]; then
+    GRANTED_TABLES=$((GRANTED_TABLES + 1))
+    check_code "bare SELECT from granted table posthog.${BASH_REMATCH[1]} fails closed (row policy present)" 115 "SELECT count() FROM posthog.${BASH_REMATCH[1]}"
+  else
+    fail "unexpected grant line, add a row policy and extend this check: $line"
+  fi
+done <<< "$GRANT_LINES"
+if [[ $GRANTED_TABLES -eq 0 ]]; then fail "SHOW GRANTS listed no SELECT grant on posthog.<table>"; fi
 
 # --- no other table ----------------------------------------------------------------------------------
 check_code "SELECT from posthog.events_errors is denied" 497 'SELECT count() FROM posthog.events_errors'
@@ -182,6 +260,17 @@ check_code "use_query_cache = 1 is pinned" 452 'SELECT 1 SETTINGS use_query_cach
 check_code "log_queries = 0 is pinned" 452 'SELECT 1 SETTINGS log_queries = 0'
 check_code "stream_like_engine_allow_direct_select = 1 is pinned" 452 'SELECT 1 SETTINGS stream_like_engine_allow_direct_select = 1'
 check_ok "a benign setting (max_execution_time = 5) is accepted" 'SELECT 1 SETTINGS max_execution_time = 5'
+
+# --- profile and role switches do not loosen anything (outcome recorded on 25.8, not a hole) -----------
+# `SET profile = 'default'` is ACCEPTED (it is a setting) but changes nothing that matters: the profile
+# constraints still apply and the values stay as they are. The stock profile `readonly` is refused (164).
+# No role exists, so SET ROLE ALL enables nothing; an unknown role is refused (511).
+check_out "SET profile = 'default' keeps readonly and max_execution_time" "SET profile = 'default'; SELECT getSetting('readonly'), getSetting('max_execution_time')" $'2\t20'
+check_out "SET profile = 'default' keeps max_memory_usage at the cap" "SET profile = 'default'; SELECT getSetting('max_memory_usage')" 400000000
+check_code "a limit still cannot be raised after SET profile = 'default'" 452 "SET profile = 'default'; SELECT 1 SETTINGS max_execution_time = 0"
+check_code "SET profile = 'readonly' (stock profile) is refused" 164 "SET profile = 'readonly'"
+check_out "SET ROLE ALL enables no role" 'SET ROLE ALL; SELECT length(enabledRoles())' 0
+check_code "SET ROLE of an unknown role is refused" 511 'SET ROLE nosuchrole'
 
 # --- grants are exactly one line ---------------------------------------------------------------------
 check_out "grants are exactly SELECT on posthog.events" 'SHOW GRANTS FOR posthog_ro' 'GRANT SELECT ON posthog.events TO posthog_ro'
