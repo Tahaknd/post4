@@ -1,9 +1,78 @@
 @import 'tailwindcss';
 
-@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
-@source '../../storage/framework/views/*.php';
+/*
+ * Design tokens. Components use the semantic utilities generated below (bg-canvas, text-fg,
+ * border-line, ...) instead of palette colors, so light and dark are one switch of these variables.
+ * Contrast pairs: fg on canvas/surface >= 15:1, muted on canvas/surface >= 7:1, accent-fg on accent >= 4.5:1.
+ */
+:root {
+    color-scheme: light;
 
-@theme {
-    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
-        'Segoe UI Symbol', 'Noto Color Emoji';
+    --canvas: #f6f6f7;
+    --surface: #ffffff;
+    --line: #dcdce0;
+    --fg: #17171a;
+    --muted: #55555d;
+    --accent: #4338ca;
+    --accent-fg: #ffffff;
+    --focus: #4338ca;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+
+        --canvas: #0e0e11;
+        --surface: #17171b;
+        --line: #2e2e35;
+        --fg: #f2f2f4;
+        --muted: #a8a8b2;
+        --accent: #a5b4fc;
+        --accent-fg: #0e0e11;
+        --focus: #a5b4fc;
+    }
+}
+
+@theme inline {
+    /* System fonts only: no external font or CDN requests. */
+    --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+    --color-canvas: var(--canvas);
+    --color-surface: var(--surface);
+    --color-line: var(--line);
+    --color-fg: var(--fg);
+    --color-muted: var(--muted);
+    --color-accent: var(--accent);
+    --color-accent-fg: var(--accent-fg);
+    --color-focus: var(--focus);
+}
+
+@layer base {
+    html {
+        background-color: var(--canvas);
+        color: var(--fg);
+        font-family: var(--font-sans);
+        -webkit-text-size-adjust: 100%;
+    }
+
+    body {
+        min-height: 100vh;
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+        }
+    }
 }
