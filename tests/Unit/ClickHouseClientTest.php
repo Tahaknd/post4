@@ -1,7 +1,9 @@
 <?php
 
 use App\Infrastructure\ClickHouse\ClickHouseClient;
+use App\Infrastructure\ClickHouse\ClickHouseException;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
@@ -399,4 +401,86 @@ it('applies a per-call timeout override on select and keeps the default for the 
 
 it('implements the ClickHouseReads interface', function () {
     expect($this->client)->toBeInstanceOf(ClickHouseReads::class);
+});
+
+describe('select() retries', function () {
+    beforeEach(function () {
+        // 0 ms backoff keeps the tests fast; the doubling itself is not what is under test.
+        $this->retrying = new ClickHouseClient('http://ch:8123', 'posthog', 'u', 'p', selectRetries: 2, selectRetryBackoffMs: 0);
+    });
+
+    it('retries a connection failure and returns the first good answer', function () {
+        Http::fake(['*' => Http::sequence()
+            ->pushFailedConnection('cURL error 7: Failed to connect to ch port 8123')
+            ->pushFailedConnection('cURL error 7: Failed to connect to ch port 8123')
+            ->push('{"data":[{"n":1}]}')]);
+
+        expect($this->retrying->select('SELECT 1 AS n'))->toBe([['n' => 1]]);
+        Http::assertSentCount(3);
+    });
+
+    it('gives up after the bounded number of attempts and rethrows the ConnectionException', function () {
+        Http::fake(['*' => Http::sequence()
+            ->pushFailedConnection('cURL error 7: refused')
+            ->pushFailedConnection('cURL error 7: refused')
+            ->pushFailedConnection('cURL error 7: refused')
+            ->push('{"data":[]}')]);
+
+        expect(fn () => $this->retrying->select('SELECT 1'))->toThrow(ConnectionException::class, 'refused');
+        Http::assertSentCount(3);
+    });
+
+    it('does not retry a server error or a 200 exception', function (string $body, int $status) {
+        Http::fake(['*' => Http::sequence()->push($body, $status)->push('{"data":[]}')]);
+
+        expect(fn () => $this->retrying->select('SELECT 1'))->toThrow(ClickHouseException::class);
+        Http::assertSentCount(1);
+    })->with([
+        'busy 5xx' => ['Code: 202. DB::Exception: Too many simultaneous queries. (TOO_MANY_SIMULTANEOUS_QUERIES)', 500],
+        'timeout 200 exception' => ['{"meta":[],"data":[],"rows":0,"exception":"Code: 159. DB::Exception: Timeout exceeded. (TIMEOUT_EXCEEDED)"}', 200],
+    ]);
+
+    it('does not retry a client side timeout (cURL 28): the server may still be running the query', function () {
+        Http::fake(['*' => Http::sequence()
+            ->pushFailedConnection('cURL error 28: Operation timed out after 25001 milliseconds')
+            ->push('{"data":[]}')]);
+
+        expect(fn () => $this->retrying->select('SELECT 1'))->toThrow(ConnectionException::class, 'cURL error 28');
+        Http::assertSentCount(1);
+    });
+
+    it('never retries execute()', function () {
+        Http::fake(['*' => Http::sequence()->pushFailedConnection('cURL error 7: refused')->push('')]);
+
+        expect(fn () => $this->retrying->execute('INSERT INTO t VALUES (1)'))->toThrow(ConnectionException::class);
+        Http::assertSentCount(1);
+    });
+
+    it('does not retry by default', function () {
+        Http::fake(['*' => Http::sequence()->pushFailedConnection('cURL error 7: refused')->push('{"data":[]}')]);
+
+        expect(fn () => $this->client->select('SELECT 1'))->toThrow(ConnectionException::class);
+        Http::assertSentCount(1);
+    });
+
+    it('sends the same query, params and settings on every attempt', function () {
+        Http::fake(['*' => Http::sequence()->pushFailedConnection('cURL error 7: refused')->push('{"data":[]}')]);
+
+        $this->retrying->select('SELECT {x:String}', ['x' => 'v'], ['max_threads' => 2]);
+
+        $sent = array_map(fn (array $pair) => [$pair[0]->url(), $pair[0]->body()], Http::recorded()->all());
+        expect($sent)->toHaveCount(2)->and($sent[0])->toBe($sent[1]);
+    });
+
+    it('doubles the pause between attempts', function () {
+        Http::fake(['*' => Http::sequence()->pushFailedConnection('cURL error 7: refused')->pushFailedConnection('cURL error 7: refused')->push('{"data":[]}')]);
+        $client = new ClickHouseClient('http://ch:8123', 'posthog', 'u', 'p', selectRetries: 2, selectRetryBackoffMs: 30);
+
+        $start = hrtime(true);
+        $client->select('SELECT 1');
+        $elapsedMs = (hrtime(true) - $start) / 1e6;
+
+        // 30 ms + 60 ms of sleeping; generous upper bound for a loaded CI box
+        expect($elapsedMs)->toBeGreaterThanOrEqual(85)->toBeLessThan(2000);
+    });
 });

@@ -13,6 +13,10 @@ return [
         'user' => 'posthog_ro',
         'password' => env('CLICKHOUSE_RO_PASSWORD', 'posthog_ro'),
         'timeout' => (int) env('CLICKHOUSE_RO_TIMEOUT', 25),
+        // Extra attempts of a read after a CONNECTION failure only (never after a server error or a client
+        // timeout, never for writes) and the pause before the first one (doubled each time).
+        'select_retries' => (int) env('CLICKHOUSE_RO_SELECT_RETRIES', 2),
+        'select_retry_backoff_ms' => (int) env('CLICKHOUSE_RO_SELECT_RETRY_BACKOFF_MS', 100),
     ],
     'timeout' => env('CLICKHOUSE_TIMEOUT', 30),
     'connect_timeout' => env('CLICKHOUSE_CONNECT_TIMEOUT', 10),

@@ -31,12 +31,14 @@ final class ReadOnlyClickHouseClient implements ClickHouseReads
         string $password,
         int $timeout = 25,
         int $connectTimeout = 10,
+        int $selectRetries = 2,
+        int $selectRetryBackoffMs = 100,
     ) {
         if ($password === '') {
             throw new RuntimeException('The read-only ClickHouse password is empty: set CLICKHOUSE_RO_PASSWORD (default posthog_ro, as in docker-compose.yml and docker/clickhouse/users.d/20-readonly-user.xml).');
         }
 
-        $this->client = new ClickHouseClient($url, $database, $user, $password, $timeout, $connectTimeout);
+        $this->client = new ClickHouseClient($url, $database, $user, $password, $timeout, $connectTimeout, $selectRetries, $selectRetryBackoffMs);
     }
 
     public function select(string $sql, array $params = [], array $settings = [], ?int $timeout = null): array

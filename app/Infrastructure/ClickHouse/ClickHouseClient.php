@@ -5,15 +5,13 @@ namespace App\Infrastructure\ClickHouse;
 use DateTimeImmutable;
 use DateTimeInterface;
 use DateTimeZone;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use InvalidArgumentException;
 use JsonException;
-use RuntimeException;
 
 class ClickHouseClient implements ClickHouseReads
 {
-    private const ERROR_BODY_LIMIT = 1000;
-
     /** URL arguments the client sets itself; a per-query setting must never override them. */
     private const RESERVED_ARGUMENTS = ['database', 'default_format', 'wait_end_of_query', 'query'];
 
@@ -24,6 +22,10 @@ class ClickHouseClient implements ClickHouseReads
         private readonly string $password,
         private readonly int $timeout = 30,
         private readonly int $connectTimeout = 10,
+        /** Extra attempts of select() after a connection failure; execute() never retries. 0 = no retry. */
+        private readonly int $selectRetries = 0,
+        /** Pause before the first retry in milliseconds, doubled for each further one. */
+        private readonly int $selectRetryBackoffMs = 100,
     ) {}
 
     /**
@@ -49,26 +51,45 @@ class ClickHouseClient implements ClickHouseReads
      * `wait_end_of_query`, `query`, `param_*`) çakışan adlar `InvalidArgumentException` ile reddedilir.
      * Sunucu tarafı sınırlar kullanıcının profilindeki constraint'lerle ayrıca korunur.
      * `$timeout` çağrı başına HTTP zaman aşımıdır (saniye), null ise yapıcıdaki varsayılan.
+     * Yeniden deneme: yalnızca `select()`, yalnızca `ConnectionException` (bağlanılamadı, DNS, bağlantı
+     * sıfırlandı), en fazla `$selectRetries` kez, küçük üstel bekleyişle. cURL 28 (zaman aşımı) YENİDEN
+     * DENENMEZ: sunucu sorguyu hâlâ çalıştırıyor olabilir ve ağır bir sorguyu üç kez koşturmak yükü katlar.
+     * Sunucunun verdiği hatalar (HTTP 4xx/5xx, `exception`) asla yeniden denenmez. Hata {@see ClickHouseException}.
      *
      * @param  array<string, bool|int|float|string>  $settings
      * @return array<int, array<string, mixed>>
      */
     public function select(string $sql, array $params = [], array $settings = [], ?int $timeout = null): array
     {
-        $body = $this->send($sql, $params, ['default_format' => 'JSON', 'wait_end_of_query' => 1], $timeout, $settings);
+        $body = $this->sendWithRetry($sql, $params, ['default_format' => 'JSON', 'wait_end_of_query' => 1], $timeout, $settings);
 
         try {
             $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException) {
-            throw new RuntimeException('ClickHouse error: unparseable response');
+            throw ClickHouseException::unknown('unparseable response');
         }
 
         // Akış ortası hata bazı yapılandırmalarda hâlâ 200 + `exception` anahtarı olarak gelir.
         if (! is_array($decoded) || array_key_exists('exception', $decoded) || ! array_key_exists('data', $decoded)) {
-            throw new RuntimeException('ClickHouse error: '.$this->truncate($body));
+            throw ClickHouseException::fromResponse($body);
         }
 
         return $decoded['data'];
+    }
+
+    /** @see self::select() for what is retried */
+    private function sendWithRetry(string $sql, array $params, array $arguments, ?int $timeout, array $settings): string
+    {
+        for ($attempt = 0; ; $attempt++) {
+            try {
+                return $this->send($sql, $params, $arguments, $timeout, $settings);
+            } catch (ConnectionException $e) {
+                if ($attempt >= $this->selectRetries || str_contains($e->getMessage(), 'cURL error 28')) {
+                    throw $e;
+                }
+                usleep($this->selectRetryBackoffMs * 1000 * (2 ** $attempt));
+            }
+        }
     }
 
     /**
@@ -89,7 +110,7 @@ class ClickHouseClient implements ClickHouseReads
             ->post($this->url.'?'.http_build_query($query));
 
         if ($response->failed()) {
-            throw new RuntimeException('ClickHouse error: '.$this->truncate($response->body()));
+            throw ClickHouseException::fromResponse($response->body(), $response->status(), $response->header('X-ClickHouse-Exception-Code') ?: null);
         }
 
         return $response->body();
@@ -172,10 +193,5 @@ class ClickHouseClient implements ClickHouseReads
         return DateTimeImmutable::createFromInterface($date)
             ->setTimezone(new DateTimeZone('UTC'))
             ->format('Y-m-d H:i:s.v');
-    }
-
-    private function truncate(string $body): string
-    {
-        return mb_substr($body, 0, self::ERROR_BODY_LIMIT);
     }
 }

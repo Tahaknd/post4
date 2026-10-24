@@ -44,6 +44,8 @@ class AppServiceProvider extends ServiceProvider
             (string) config('clickhouse.readonly.password'),
             (int) config('clickhouse.readonly.timeout'),
             (int) config('clickhouse.connect_timeout'),
+            (int) config('clickhouse.readonly.select_retries'),
+            (int) config('clickhouse.readonly.select_retry_backoff_ms'),
         ));
         $this->app->when(ProjectScopedReader::class)->needs(ClickHouseReads::class)->give(ReadOnlyClickHouseClient::class);
 
