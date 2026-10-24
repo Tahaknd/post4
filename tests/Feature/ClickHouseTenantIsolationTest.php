@@ -1,5 +1,6 @@
 <?php
 
+use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\RoSettings;
 use Tests\Support\ClickHouseIntegration as CH;
 
@@ -13,8 +14,9 @@ use Tests\Support\ClickHouseIntegration as CH;
  *     app php artisan test --group=clickhouse
  *
  * (a command line --group replaces the excluded group from phpunit.xml). Without the variables the tests fail
- * with a message instead of skipping. Rows of projects 990101 / 990102 are seeded before every test and
- * deleted after it (also when the test fails), see Tests\Support\ClickHouseIntegration.
+ * with a message instead of skipping (or run `composer test:clickhouse` inside the app container, which sets
+ * them with those defaults; CLICKHOUSE_INTEGRATION_* variables you export win). Rows of projects 990101 / 990102
+ * are seeded once and deleted after the last test (also when a test fails), see Tests\Support\ClickHouseIntegration.
  */
 
 pest()->group('clickhouse');
@@ -31,15 +33,15 @@ function ints(array $rows): array
     return array_map(fn (array $row) => array_map(fn ($v) => is_string($v) && ctype_digit($v) ? (int) $v : $v, $row), $rows);
 }
 
+// The tests only READ, so the rows are seeded once per run and deleted after the last test (also when a test
+// failed): Tests\Support\ClickHouseIntegration::cleanupAfterAll().
 beforeEach(function () {
     $this->ch = CH::connect();
-    $this->ch->seed();
+    $this->ch->seedOnce();
 });
 
-afterEach(function () {
-    if (isset($this->ch)) {
-        $this->ch->cleanup();
-    }
+afterAll(function () {
+    CH::cleanupAfterAll();
 });
 
 it('shows each project only its own rows through the scoped reader', function () {
@@ -115,7 +117,71 @@ it('rejects the bypass attempts in the lint and never reaches ClickHouse', funct
     'settings override' => 'SELECT count() FROM project_events SETTINGS SQL_project_id = 990102',
     'semicolon' => 'SELECT count() FROM project_events; SELECT 1',
     'placeholder' => 'SELECT count() FROM project_events WHERE project_id = {project_id:UInt32}',
+    'string literal' => "SELECT count() FROM project_events WHERE event = 'it_buy'",
+    'mergeTreeIndex' => "SELECT project_id FROM mergeTreeIndex(currentDatabase(), concat('ev', 'ents'))",
 ]);
+
+it('S1: the primary key values of another project never reach a scoped result (mergeTreeIndex bypass)', function () {
+    // Non vacuous: both projects really have rows, and B's uuids are known from the admin.
+    $bUuids = array_column($this->ch->admin->select('SELECT toString(uuid) AS u FROM posthog.events WHERE project_id = {p:UInt32}', ['p' => CH::PROJECT_B]), 'u');
+    expect($bUuids)->toHaveCount(CH::ROWS_B);
+
+    // 1) The server does NOT close this one (documented): through the raw read-only client mergeTreeIndex
+    //    skips the row policy and exposes B's primary key values although the request is scoped to A. Only
+    //    the reader lint below keeps it out. If ClickHouse ever starts applying the policy to
+    //    mergeTreeIndex, this assertion fails: then update the docblock of ProjectScopedReader.
+    $raw = $this->ch->ro->select(
+        "SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', 'events') ORDER BY project_id",
+        settings: [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A],
+    );
+    expect(array_map('intval', array_column($raw, 'project_id')))->toContain(CH::PROJECT_B);
+
+    // 2) Every way to reach that table function through the reader is refused before anything is sent.
+    foreach ([
+        "SELECT project_id, uuid FROM mergeTreeIndex(currentDatabase(), concat('ev', 'ents'))",
+        'SELECT project_id, uuid FROM mergeTreeIndex(currentDatabase(), char(101, 118, 101, 110, 116, 115))',
+        'SELECT project_id FROM MergeTreeIndex(a, b)',
+        'SELECT project_id FROM merge(a, b)',
+        'SELECT project_id FROM project_events UNION ALL SELECT project_id FROM mergeTreeIndex(a, b)',
+        'SELECT project_id FROM view(SELECT project_id FROM project_events)',
+        'SELECT project_id FROM remote(a, b)',
+    ] as $sql) {
+        expect(fn () => $this->ch->reader->select(CH::PROJECT_A, $sql))->toThrow(InvalidArgumentException::class);
+    }
+
+    // 3) What a scoped query for A does return contains nothing of B.
+    $a = $this->ch->reader->select(CH::PROJECT_A, 'SELECT toString(uuid) AS u, project_id FROM project_events');
+    expect($a)->toHaveCount(CH::ROWS_A)
+        ->and(array_intersect(array_column($a, 'u'), $bUuids))->toBe([])
+        ->and(array_unique(array_map('intval', array_column($a, 'project_id'))))->toBe([CH::PROJECT_A]);
+});
+
+it('reads the MATERIALIZED columns browser and current_url through the CTE', function () {
+    $a = $this->ch->reader->select(CH::PROJECT_A, 'SELECT browser, current_url, count() AS n FROM project_events GROUP BY browser, current_url');
+    $b = $this->ch->reader->select(CH::PROJECT_B, 'SELECT browser, current_url, country_code, count() AS n FROM project_events GROUP BY browser, current_url, country_code');
+
+    expect(ints($a))->toBe([['browser' => 'Firefox', 'current_url' => 'https://a.test/p', 'n' => CH::ROWS_A]])
+        ->and(ints($b))->toBe([['browser' => 'Chrome', 'current_url' => 'https://b.test/', 'country_code' => '', 'n' => CH::ROWS_B]]);
+});
+
+it('keeps ProjectScopedReader::COLUMNS equal to the real columns of posthog.events (drift guard)', function () {
+    $columns = array_column($this->ch->admin->select('DESCRIBE TABLE posthog.events'), 'name');
+
+    // A new migration that adds or renames a column must update ProjectScopedReader::COLUMNS on purpose
+    // (the CTE no longer uses SELECT *, which would silently miss MATERIALIZED columns anyway).
+    expect($columns)->toEqualCanonicalizing(ProjectScopedReader::COLUMNS);
+});
+
+it('prunes the primary key through the real CTE prefix as well', function () {
+    $plan = $this->ch->ro->select(
+        'EXPLAIN indexes = 1 '.ProjectScopedReader::cte().'SELECT event, count() FROM project_events GROUP BY event',
+        ['project_id' => CH::PROJECT_A],
+        [RoSettings::SQL_PROJECT_ID => CH::PROJECT_A],
+    );
+    $text = implode("\n", array_column($plan, 'explain'));
+
+    expect($text)->toContain('project_id in ['.CH::PROJECT_A.', '.CH::PROJECT_A.']');
+});
 
 it('refuses a caller SQL_project_id setting on the scoped reader', function () {
     expect(fn () => $this->ch->reader->select(CH::PROJECT_A, 'SELECT count() FROM project_events', [], [RoSettings::SQL_PROJECT_ID => CH::PROJECT_B]))

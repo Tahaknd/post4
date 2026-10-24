@@ -6,7 +6,7 @@ use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
-const SCOPED_PREFIX = 'WITH project_events AS (SELECT * FROM posthog.events WHERE project_id = {project_id:UInt32}) ';
+const SCOPED_PREFIX = 'WITH project_events AS (SELECT uuid, project_id, event, distinct_id, properties, timestamp, created_at, current_url, browser, country_code FROM posthog.events WHERE project_id = {project_id:UInt32}) ';
 
 beforeEach(function () {
     $this->reader = new ProjectScopedReader(
@@ -112,14 +112,54 @@ it('rejects bypass attempts in builder sql and sends nothing', function (string 
     'project_id placeholder with other type' => ['SELECT {project_id:UInt64}', '{project_id'],
     'backtick identifier' => ['SELECT 1 FROM `project_events`', 'backtick'],
     'quoted identifier' => ['SELECT 1 FROM "project_events"', 'double quote'],
+    // string literals: names could be assembled with concat, values belong in {name:Type} params
+    'single quoted literal' => ["SELECT 'x' FROM project_events", 'string literal'],
+    'concat assembled table name' => ["SELECT 1 FROM project_events WHERE event = concat('ev', 'ents')", 'string literal'],
+    'heredoc literal' => ['SELECT $$abc$$ FROM project_events', '$'],
+    // table functions that reach other tables or skip the row policy
+    'mergeTreeIndex' => ["SELECT project_id FROM mergeTreeIndex(currentDatabase(), concat('ev', 'ents'))", 'mergeTreeIndex'],
+    'mergeTreeIndex without literals' => ['SELECT project_id FROM mergeTreeIndex(currentDatabase(), char(101,118,101,110,116,115))', 'mergeTreeIndex'],
+    'mergeTreeIndex upper case' => ['SELECT project_id FROM MERGETREEINDEX(a, b)', 'mergeTreeIndex'],
+    'mergeTreeProjection' => ['SELECT 1 FROM mergeTreeProjection(a, b, c)', 'mergeTreeProjection'],
+    'merge' => ['SELECT 1 FROM merge(a, b)', 'merge'],
+    'remote' => ['SELECT 1 FROM remote(a, b)', 'remote'],
+    'remoteSecure' => ['SELECT 1 FROM remoteSecure(a, b)', 'remoteSecure'],
+    'cluster' => ['SELECT 1 FROM cluster(a, b)', 'cluster'],
+    'clusterAllReplicas' => ['SELECT 1 FROM clusterAllReplicas(a, b)', 'clusterAllReplicas'],
+    'url' => ['SELECT 1 FROM url(a, b)', 'url'],
+    'file' => ['SELECT 1 FROM file(a, b)', 'file'],
+    's3' => ['SELECT 1 FROM s3(a, b)', 's3'],
+    'input' => ['SELECT 1 FROM input(a)', 'input'],
+    'executable' => ['SELECT 1 FROM executable(a, b, c)', 'executable'],
+    'dictionary' => ['SELECT 1 FROM dictionary(a)', 'dictionary'],
+    'dictGet' => ['SELECT dictGet(a, b, c) FROM project_events', 'dictGet'],
+    'view' => ['SELECT 1 FROM view(SELECT 1)', 'view'],
+    'loop' => ['SELECT 1 FROM loop(project_events)', 'loop'],
+    'information_schema' => ['SELECT 1 FROM information_schema.tables', 'information_schema'],
 ]);
+
+it('rejects every table function name of the deny list in any case', function (string $name) {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    foreach ([$name, strtoupper($name), strtolower($name)] as $variant) {
+        expect(fn () => $this->reader->select(1, "SELECT 1 FROM {$variant}(a)"))
+            ->toThrow(InvalidArgumentException::class);
+    }
+    Http::assertNothingSent();
+})->with(ProjectScopedReader::FORBIDDEN_FUNCTIONS);
 
 it('does not reject words that merely contain a forbidden word', function () {
     Http::fake(['*' => Http::response('{"data":[]}')]);
 
-    $this->reader->select(1, 'SELECT count() AS settings_total, formatDateTime(timestamp, {f:String}) AS f_into FROM project_events', ['f' => '%Y']);
+    $this->reader->select(1, 'SELECT count() AS settings_total, formatDateTime(timestamp, {f:String}) AS f_into, merged, urls, filename FROM project_events', ['f' => '%Y']);
 
     Http::assertSentCount(1);
+});
+
+it('has an explicit column list that matches the CTE and excludes nothing the builders need', function () {
+    expect(ProjectScopedReader::COLUMNS)->toBe([
+        'uuid', 'project_id', 'event', 'distinct_id', 'properties', 'timestamp', 'created_at', 'current_url', 'browser', 'country_code',
+    ])->and(ProjectScopedReader::cte())->not->toContain('*');
 });
 
 it('rejects a caller param named project_id', function () {

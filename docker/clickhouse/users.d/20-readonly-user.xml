@@ -24,16 +24,37 @@
         The admin user `posthog` has no row policy and is unaffected (ingestion, materialized views,
         capture:status, migrations). The grant below stays exactly one line; the policy is not a grant.
 
-        LIMITATION (precise)
-        `readonly=2` lets this user change settings, and a `const` constraint on SQL_project_id is
-        impossible because it would also block the reader's own URL argument. So SQL that contains
-        `SETTINGS SQL_project_id = <other id>` overrides the policy for that query (the integration test
-        in tests/Feature/ClickHouseTenantIsolationTest.php pins this). The policy protects against
-        BUGS in query builders (forgotten filter, OR, UNION arm, a comment hiding a placeholder), NOT
-        against SQL injection. Injection is prevented by typed {name:Type} parameters, builder
-        identifiers from allow lists, and the ProjectScopedReader lint (no SETTINGS, semicolon, comments or
-        direct table names; caller settings starting with SQL_ are refused). Never let user text become
-        SQL text.
+        WHAT IS CLOSED ON THE SERVER AND WHAT ONLY BY THE READER LINT (honest list)
+        Closed on the server (verified on 25.8): direct reads of posthog.events, subqueries, UNION, JOIN,
+        CTEs, merge() and view() all get the row policy; a read without SQL_project_id fails; the table
+        functions remote, cluster, url, file, s3 ... fail without the SOURCES/REMOTE grant, and input,
+        executable, dictionary, loop fail without CREATE TEMPORARY TABLE; every other table has no grant.
+        NOT closed on the server, closed ONLY by the ProjectScopedReader lint:
+        1. mergeTreeIndex('posthog', 'events') (and mergeTreeProjection once a projection exists) SKIPS
+           the row policy and returns the primary key values of EVERY project (project_id, event, uuid,
+           date, one row per granule). The name can even be assembled with concat. readonly=2 does not stop
+           it (readonly=1 does not either), a column level grant does not (it needs only the key columns
+           the app needs anyway), and there is no profile setting for it. Reproduced live with posthog_ro.
+           The lint bans these table function names and every string literal, see
+           ProjectScopedReader::FORBIDDEN_FUNCTIONS. A query that does not go through the reader (a raw
+           ReadOnlyClickHouseClient::select) is NOT protected against it.
+        2. `readonly=2` lets this user change settings, and a `const` constraint on SQL_project_id is
+           impossible because it would also block the reader's own URL argument. So SQL that contains
+           `SETTINGS SQL_project_id = <other id>` overrides the policy for that query (the integration
+           test in tests/Feature/ClickHouseTenantIsolationTest.php pins this).
+        The policy therefore protects against BUGS in query builders (forgotten filter, OR, UNION arm, a
+        comment hiding a placeholder), NOT against SQL injection. Injection is prevented by typed
+        {name:Type} parameters (no string literals in builder SQL), builder identifiers from allow lists,
+        and the ProjectScopedReader lint (no SETTINGS, semicolon, comments, quotes, deny listed table
+        functions or direct table names; caller settings starting with SQL_ are refused). Never let user
+        text become SQL text.
+        FULL SERVER SIDE CLOSURE (verified in a scratch container, not applied): grant the user only a
+        view created by the admin with DEFINER = posthog SQL SECURITY DEFINER whose WHERE is
+        project_id = toUInt32(getSetting('SQL_project_id')) (create it after SET SQL_project_id = 0 in the
+        same session), and nothing on posthog.events. Then mergeTreeIndex, merge and view on events fail
+        with ACCESS_DENIED, mergeTreeIndex on the view fails (it is not a MergeTree), the index still
+        prunes, and a missing setting still fails with Code 115. It needs a migration, a changed grant and
+        a changed reader table name, so it is a Milestone 3.2 decision.
 
         WHY ONLY `events` (least privilege)
         The scoped reader's contract covers `events` only. `events_errors` holds the RAW payloads of any

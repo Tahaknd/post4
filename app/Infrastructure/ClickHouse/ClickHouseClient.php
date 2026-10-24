@@ -103,7 +103,7 @@ class ClickHouseClient implements ClickHouseReads
     {
         $encoded = [];
         foreach ($settings as $name => $value) {
-            if (! is_string($name) || preg_match('/^(?:SQL_)?[a-z][a-z0-9_]*$/', $name) !== 1) {
+            if (! is_string($name) || preg_match('/^(?:SQL_)?[a-z][a-z0-9_]*$/D', $name) !== 1) {
                 throw new InvalidArgumentException('Invalid ClickHouse setting name: '.var_export($name, true));
             }
             if (in_array($name, self::RESERVED_ARGUMENTS, true) || str_starts_with($name, 'param_')) {

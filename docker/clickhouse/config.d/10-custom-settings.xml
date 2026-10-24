@@ -26,7 +26,9 @@
         comment hiding the placeholder), NOT against SQL injection. Injection is prevented elsewhere:
         user values only travel as typed {name:Type} parameters, builder identifiers come from allow
         lists, and ProjectScopedReader lints the builder SQL (no SETTINGS, no semicolon, no comments,
-        no direct table names) and refuses caller settings that start with SQL_.
+        no direct table names) and refuses caller settings that start with SQL_. A second hole is closed
+        only by that lint as well: mergeTreeIndex() skips the row policy and leaks primary key values of
+        every project (see the header of users.d/20-readonly-user.xml for the full honest list).
 
         NOTE ON COMMANDS
         XML comments cannot contain two consecutive hyphens, so long options below are written with a

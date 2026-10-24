@@ -5,6 +5,8 @@ namespace Tests\Support;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
+use Illuminate\Http\Client\Factory;
+use Illuminate\Support\Facades\Facade;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Assert;
 
@@ -35,6 +37,40 @@ final class ClickHouseIntegration
         public readonly ReadOnlyClickHouseClient $ro,
         public readonly ProjectScopedReader $reader,
     ) {}
+
+    private static bool $seeded = false;
+
+    /**
+     * Seeds once per process (the tests of the file only read) and remembers it, so afterAll() knows whether
+     * there is anything to delete.
+     */
+    public function seedOnce(): void
+    {
+        if (! self::$seeded) {
+            self::$seeded = true;
+            $this->seed();
+        }
+    }
+
+    /**
+     * For Pest's afterAll(): no Laravel app exists any more, so the Http facade gets a bare factory first.
+     * Does nothing when the variables are missing (that test run already failed with a message) or when
+     * nothing was seeded.
+     */
+    public static function cleanupAfterAll(): void
+    {
+        if (! self::$seeded) {
+            return;
+        }
+        self::$seeded = false;
+
+        Http::swap(new Factory);
+        try {
+            self::connect()->cleanup();
+        } finally {
+            Facade::clearResolvedInstances();
+        }
+    }
 
     /** Fails (never skips) when a CLICKHOUSE_INTEGRATION_* variable is missing. */
     public static function connect(): self
@@ -71,7 +107,8 @@ final class ClickHouseIntegration
 
     /**
      * Seeds both projects with the admin client: A has 30 rows (20 `it_view`, 10 `it_click`, distinct ids
-     * a1..a3), B has 50 rows (all `it_buy`, distinct ids b1..b5). Timestamps are within the last hours.
+     * a1..a3, current_url https://a.test/p, browser Firefox, timestamps within the last hour), B has 50 rows (all
+     * `it_buy`, distinct ids b1..b5, https://b.test/, Chrome, timestamps about 40 days ago).
      * Starts from a clean slate (rows left behind by an aborted run are removed first).
      */
     public function seed(): void
@@ -82,11 +119,19 @@ final class ClickHouseIntegration
 
         $a = self::PROJECT_A;
         $b = self::PROJECT_B;
+        // Separate INSERTs, and project B a month or more in the past: its rows sit in their OWN part and
+        // partition (toYYYYMM) that a background merge can never combine with A's, so mergeTreeIndex shows
+        // B's primary key values as the first row of a granule of B's part (the S1 leak tests rely on it).
+        // The JSON properties fill the MATERIALIZED columns current_url and browser.
         $this->admin->execute(
             'INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '
-            ."SELECT generateUUIDv4(), {$a}, if(number < 20, 'it_view', 'it_click'), concat('a', toString(number % 3 + 1)), '{}', now64(3) - toIntervalMinute(number) FROM numbers(".self::ROWS_A.') '
-            .'UNION ALL '
-            ."SELECT generateUUIDv4(), {$b}, 'it_buy', concat('b', toString(number % 5 + 1)), '{}', now64(3) - toIntervalMinute(number) FROM numbers(".self::ROWS_B.')',
+            ."SELECT generateUUIDv4(), {$a}, if(number < 20, 'it_view', 'it_click'), concat('a', toString(number % 3 + 1)), "
+            .'\'{"$current_url":"https://a.test/p","$browser":"Firefox"}\', now64(3) - toIntervalMinute(number) FROM numbers('.self::ROWS_A.')',
+        );
+        $this->admin->execute(
+            'INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '
+            ."SELECT generateUUIDv4(), {$b}, 'it_buy', concat('b', toString(number % 5 + 1)), "
+            .'\'{"$current_url":"https://b.test/","$browser":"Chrome"}\', now64(3) - toIntervalDay(40) - toIntervalMinute(number) FROM numbers('.self::ROWS_B.')',
         );
 
         Assert::assertSame(self::ROWS_A + self::ROWS_B, $this->rowCount(), 'seeding did not produce the expected rows');

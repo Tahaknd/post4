@@ -320,6 +320,7 @@ it('rejects invalid setting names', function (mixed $name) {
     'equals' => 'a=b',
     'brackets' => 'a[]',
     'empty' => '',
+    'trailing newline' => "max_threads\n",
     'int key (list)' => 0,
 ]);
 
@@ -346,6 +347,7 @@ it('rejects custom setting names that do not match SQL_ plus a lower case name',
     'ampersand' => 'SQL_a&b',
     'space' => 'SQL_a b',
     'upper case prefix only partly' => 'Sql_a',
+    'custom name with trailing newline' => "SQL_a\n",
 ]);
 
 it('rejects non scalar setting values', function (mixed $value) {
