@@ -2,6 +2,9 @@
     "$schema": "https://www.schemastore.org/package.json",
     "private": true,
     "type": "module",
+    "engines": {
+        "node": ">=22.12"
+    },
     "scripts": {
         "build": "vite build",
         "dev": "vite"
@@ -18,6 +21,6 @@
         "vite": "8.3.5"
     },
     "optionalDependencies": {
-        "@laravel/multiplex": "^0.4.1"
+        "@laravel/multiplex": "0.4.5"
     }
 }

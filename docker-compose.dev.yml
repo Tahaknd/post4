@@ -18,23 +18,38 @@ services:
   # Vite dev server with HMR. Opt-in profile, so a plain `docker compose up` never starts it:
   #   docker compose --profile dev up -d vite
   #
-  # The bind mount above hides the public/build baked into the image, so there are two ways to see
-  # the UI in this stack:
+  # This file bind-mounts the source over /app, which HIDES the public/build baked into the image.
+  # Without a host-side build or a running dev server `/` fails with a 500 (Vite manifest not found;
+  # checked). There are two ways to see the UI in this stack:
   #   * HMR: start this service. It writes public/hot (gitignored; the app reads it through the bind
-  #     mount) and the browser loads assets from http://localhost:5173 (set VITE_HMR_HOST when the
-  #     browser reaches this machine by another name). Stop the service and public/hot goes away.
+  #     mount) and the browser loads assets from http://localhost:5173.
   #   * Built assets, no dev server:
   #       docker compose run --rm --no-deps vite sh -c 'npm ci --ignore-scripts && npm run build'
   #     writes public/build on the host, then `docker compose exec app php artisan octane:reload`
   #     (Octane workers keep the Vite manifest in memory).
+  # No anonymous volume on /app/public/build on purpose: it would be seeded once from the image and
+  # then silently serve stale assets, or hide a fresh host build.
+  #
+  # Traps:
+  #   * After pulling changes that add composer packages run `docker compose up -d --build -V`: the
+  #     anonymous /app/vendor volumes above are created once and otherwise keep the old vendor tree.
+  #     (-V recreates them; vendor comes from the rebuilt image. Do not do this casually: the running
+  #     containers restart.)
+  #   * An unclean stop of this service (docker kill, daemon crash) can leave public/hot behind and
+  #     the app then points at a dead dev server: `rm -f public/hot`. A normal `stop`/`down` removes it.
+  #   * LAN or remote browser access: set VITE_HMR_HOST to the name the browser uses for this machine
+  #     (default localhost) and APP_URL to the app's public URL; laravel-vite-plugin allows only
+  #     localhost and APP_URL as CORS origins for the dev server. Port 5173 is bound to 127.0.0.1,
+  #     change the mapping below too.
   # node_modules lives in a named volume (container-native binaries); the host never needs Node.
   vite:
     profiles: ["dev"]
-    image: node:22-alpine
+    image: node:22.23.4-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914
     init: true
     working_dir: /app
     environment:
       VITE_HMR_HOST: ${VITE_HMR_HOST:-localhost}
+      APP_URL: ${APP_URL:-http://localhost:8000}
     volumes:
       - .:/app
       - vite-node-modules:/app/node_modules

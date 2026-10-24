@@ -1,15 +1,20 @@
 # Frontend build: Vite output (public/build) only. node_modules never reaches the runtime image.
-FROM node:22-alpine AS assets
+# Node 22.23.4, pinned by digest (the tag is informational). Bump the tag and digest together; the
+# `vite` service in docker-compose.dev.yml uses the same image.
+FROM node:22.23.4-alpine@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS assets
 
 WORKDIR /app
 
-# Dependencies first so the layer is reused until package.json or the lockfile changes.
+# Dependencies first so the layer is reused until package.json or the lockfile changes. Optional
+# dependencies stay: Vite (rolldown) and Tailwind ship their native binaries as optional packages.
 COPY package.json package-lock.json .npmrc ./
-RUN npm ci --ignore-scripts
+RUN npm ci --ignore-scripts --no-audit --no-fund
 
-# Only what the build reads. Tailwind scans the Vue files in resources/ for class names.
+# Only what the build reads: app.css lists exactly resources/js and resources/views as Tailwind sources.
 COPY vite.config.js ./
-COPY resources ./resources
+COPY resources/css ./resources/css
+COPY resources/js ./resources/js
+COPY resources/views ./resources/views
 RUN npm run build
 
 
