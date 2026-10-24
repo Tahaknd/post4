@@ -15,9 +15,11 @@ use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use App\Infrastructure\ClickHouse\RoSettings;
 use App\Infrastructure\Kafka\KafkaEventProducer;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
+use App\Models\Project;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -95,6 +97,18 @@ class AppServiceProvider extends ServiceProvider
         DB::prohibitDestructiveCommands($this->app->isProduction());
 
         $this->configureTrustedProxies();
+
+        // `{project}` resolves only among the projects the signed-in user may open, so one they cannot open is a
+        // 404 (not a 403) and ids do not leak. SubstituteBindings runs after Authenticate, so the user is known;
+        // a missing user (a route outside `auth`) finds nothing.
+        Route::bind('project', fn (string $value) => Project::query()
+            ->when(
+                request()->user() !== null,
+                fn ($query) => $query->visibleTo(request()->user()),
+                fn ($query) => $query->whereRaw('1 = 0'),
+            )
+            ->whereKey($value)
+            ->firstOrFail());
     }
 
     /**

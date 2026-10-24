@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Models\Project;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -34,8 +35,9 @@ class HandleInertiaRequests extends Middleware
 
     /**
      * Props shared with every page. Values safe for anyone who can load the page, as plain data (never an
-     * Eloquent model); secrets (project keys, ClickHouse settings) never belong here. `auth` and `flash` are
-     * closures, so they are only evaluated when the page is rendered (a redirect or a 409 never reads them).
+     * Eloquent model); secrets (project keys, ClickHouse settings) never belong here. `auth`, `flash` and
+     * `projects` are closures, so they are only evaluated when a page is rendered (a redirect never reads
+     * them, and a partial reload skips them).
      *
      * @return array<string, mixed>
      */
@@ -49,11 +51,37 @@ class HandleInertiaRequests extends Middleware
             'auth' => fn () => [
                 'user' => $this->user($request),
             ],
+            // The project selector of the navigation: id and name only, at most PROJECT_LIMIT, never a key.
+            'projects' => fn () => $this->projects($request),
             'flash' => fn () => [
                 // Not every request that renders a page has a session (404 pages of unmatched routes).
                 'status' => $request->hasSession() ? $request->session()->get('status') : null,
             ],
         ];
+    }
+
+    /** The navigation lists at most this many projects; the project list page shows them all. */
+    public const int PROJECT_LIMIT = 50;
+
+    /**
+     * @return list<array{id: int, name: string}>
+     */
+    private function projects(Request $request): array
+    {
+        $user = $request->user();
+
+        if ($user === null) {
+            return [];
+        }
+
+        return Project::query()
+            ->visibleTo($user)
+            ->orderBy('name')
+            ->orderBy('id')
+            ->limit(self::PROJECT_LIMIT)
+            ->get(['id', 'name'])
+            ->map(fn (Project $project) => ['id' => $project->id, 'name' => $project->name])
+            ->all();
     }
 
     /**

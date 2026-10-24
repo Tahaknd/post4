@@ -39,6 +39,8 @@ it('lists the URL constants the UI uses', function () {
         'LOGIN_URL' => '/login',
         'REGISTER_URL' => '/register',
         'LOGOUT_URL' => '/logout',
+        'PROJECTS_URL' => '/projects',
+        'PROJECTS_CREATE_URL' => '/projects/create',
         'HORIZON_URL' => '/horizon',
     ]);
 });
@@ -66,4 +68,14 @@ it('keeps capture and SDK paths out of routes.js', function (string $name, strin
 it('detects a constant that matches no route', function () {
     expect(routeExists('GET', '/definitely-not-a-route'))->toBeFalse()
         ->and(routeExists('POST', '/login-typo'))->toBeFalse();
+});
+
+it('keeps the projectUrl() helper of routes.js on the project page route', function () {
+    $source = file_get_contents(dirname(__DIR__, 2).'/resources/js/routes.js');
+    $urls = frontendUrlConstants();
+
+    expect($source)->toContain('export const projectUrl = (id) => `${PROJECTS_URL}/${id}`;')
+        ->and(routeExists('GET', $urls['PROJECTS_URL'].'/1'))->toBeTrue()
+        ->and(routeExists('GET', $urls['PROJECTS_CREATE_URL']))->toBeTrue()
+        ->and(routeExists('POST', $urls['PROJECTS_URL']))->toBeTrue();
 });

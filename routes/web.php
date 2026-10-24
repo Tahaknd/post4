@@ -3,6 +3,7 @@
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\RegisterController;
 use App\Http\Controllers\HomeController;
+use App\Http\Controllers\ProjectController;
 use App\Http\Middleware\EnsureRegistrationOpen;
 use Illuminate\Support\Facades\Route;
 use Inertia\Middleware\EncryptHistory;
@@ -27,6 +28,18 @@ Route::middleware('guest')->group(function (): void {
 Route::middleware(['auth', 'auth.session', EncryptHistory::class])->group(function (): void {
     Route::get('/', HomeController::class)->name('home');
     Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
+
+    // Everything project-related lives under /projects (never a bare /{project}: capture and SDK paths own those
+    // first segments). `{project}` is 1 to 18 digits (a bigint cannot take more) and is bound through
+    // Project::visibleTo(user): a project the user cannot open is a 404.
+    Route::prefix('projects')->group(function (): void {
+        Route::get('/', [ProjectController::class, 'index'])->name('projects.index');
+        Route::get('/create', [ProjectController::class, 'create'])->name('projects.create');
+        Route::post('/', [ProjectController::class, 'store'])->name('projects.store');
+        Route::get('/{project}', [ProjectController::class, 'show'])->name('projects.show')->where('project', '[0-9]{1,18}');
+        Route::put('/{project}/api-key', [ProjectController::class, 'rotateKey'])->name('projects.rotate-key')->where('project', '[0-9]{1,18}');
+        Route::delete('/{project}', [ProjectController::class, 'destroy'])->name('projects.destroy')->where('project', '[0-9]{1,18}');
+    });
 });
 
 // Unknown paths answer 404 inside the web group, so a signed-in user's error page knows who they are.
