@@ -30,7 +30,16 @@ class UserFactory extends Factory
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),
             'remember_token' => Str::random(10),
+            'is_admin' => false,
         ];
+    }
+
+    /**
+     * An administrator (is_admin is not mass-assignable on the model, the factory bypasses that on purpose).
+     */
+    public function admin(): static
+    {
+        return $this->state(fn (array $attributes) => ['is_admin' => true]);
     }
 
     /**
