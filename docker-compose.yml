@@ -21,10 +21,15 @@ x-app: &app
     CACHE_STORE: redis
     QUEUE_CONNECTION: redis
     SESSION_DRIVER: redis
+    # Dedicated bounded Redis connection (config/database.php, database REDIS_SESSION_DB, default 2).
+    SESSION_CONNECTION: session
     TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
     CAPTURE_PROJECT_EVENTS_PER_MINUTE: ${CAPTURE_PROJECT_EVENTS_PER_MINUTE:-60000}
     CAPTURE_AUTH_FAIL_LIMIT: ${CAPTURE_AUTH_FAIL_LIMIT:-120}
     CAPTURE_AUTH_FAIL_WINDOW_SECONDS: ${CAPTURE_AUTH_FAIL_WINDOW_SECONDS:-60}
+    LOGIN_THROTTLE_EMAIL_IP_LIMIT: ${LOGIN_THROTTLE_EMAIL_IP_LIMIT:-5}
+    LOGIN_THROTTLE_IP_LIMIT: ${LOGIN_THROTTLE_IP_LIMIT:-20}
+    LOGIN_THROTTLE_WINDOW_SECONDS: ${LOGIN_THROTTLE_WINDOW_SECONDS:-900}
     OCTANE_WORKERS: ${OCTANE_WORKERS:-4}
     OCTANE_MAX_REQUESTS: ${OCTANE_MAX_REQUESTS:-500}
     KAFKA_BROKERS: kafka:9092
@@ -87,9 +92,32 @@ services:
       timeout: 3s
       retries: 20
 
+  # One Redis instance, three databases: 0 = queues and Horizon, 1 = cache and limiters, 2 = sessions.
+  # maxmemory is per INSTANCE, not per database, so the policy has to suit all three:
+  #   volatile-ttl evicts only keys that have an expiry, soonest-expiring first, and never touches the
+  #   rest. Verified against the live keyspace: queue payloads (`queues:*` lists and the reserved/delayed
+  #   zsets) and Horizon's own sets (`laravel_horizon:supervisors`, `:masters`, snapshots) carry no TTL,
+  #   so a job that is queued, delayed or running is never evicted. What can go under memory pressure:
+  #     - sessions (a user is signed out),
+  #     - the cache and ALL limiter counters (capture failure and per-project caps, the sign-in
+  #       throttle, project key lookups, insight results, `capture:status` snapshots and drop counters):
+  #       a limiter whose key is evicted starts counting from zero, i.e. it briefly lets more through;
+  #     - Horizon job metadata hashes (`laravel_horizon:<job id>`, recent/failed job details); the jobs
+  #       themselves are not affected.
+  #   If memory is full and nothing is evictable, writes fail with OOM (queue pushes then error instead
+  #   of silently dropping data); the cache connection fails open and capture keeps working.
+  #   allkeys-lru would be unsafe here (it could evict queue payloads); noeviction would turn a full
+  #   Redis into hard errors for sessions and limiters.
+  # REDIS_MAXMEMORY=0 removes the limit (the pre-3.4 behaviour); REDIS_MAXMEMORY_POLICY overrides the policy.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - ${REDIS_MAXMEMORY_POLICY:-volatile-ttl}
     volumes:
       - redis-data:/data
     healthcheck:

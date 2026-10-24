@@ -169,7 +169,9 @@ return [
     |
     */
 
-    'secure' => env('SESSION_SECURE_COOKIE'),
+    // Secure by default when APP_URL is https (the cookie then never travels over plain http); an explicit
+    // SESSION_SECURE_COOKIE wins. Behind a TLS-terminating proxy set APP_URL to the public https URL.
+    'secure' => env('SESSION_SECURE_COOKIE', str_starts_with((string) env('APP_URL'), 'https://')),
 
     /*
     |--------------------------------------------------------------------------

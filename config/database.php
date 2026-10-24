@@ -183,6 +183,25 @@ return [
             'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
         ],
 
+        // Sessions (SESSION_CONNECTION=session): their own Redis database so they never share a keyspace with
+        // Horizon and the queues (0) or the cache and limiters (1). Bounded like `cache`: phpredis waits
+        // forever by default and a frozen Redis would otherwise hang every UI worker that touches a
+        // session. A session read that times out is a 500 for that page view; capture never starts a session.
+        'session' => [
+            'url' => env('REDIS_URL'),
+            'host' => env('REDIS_HOST', '127.0.0.1'),
+            'username' => env('REDIS_USERNAME'),
+            'password' => env('REDIS_PASSWORD'),
+            'port' => env('REDIS_PORT', '6379'),
+            'database' => env('REDIS_SESSION_DB', '2'),
+            'timeout' => (float) env('REDIS_SESSION_TIMEOUT', 0.5),
+            'read_timeout' => (float) env('REDIS_SESSION_READ_TIMEOUT', 1.0),
+            'max_retries' => env('REDIS_MAX_RETRIES', 3),
+            'backoff_algorithm' => env('REDIS_BACKOFF_ALGORITHM', 'decorrelated_jitter'),
+            'backoff_base' => env('REDIS_BACKOFF_BASE', 100),
+            'backoff_cap' => env('REDIS_BACKOFF_CAP', 1000),
+        ],
+
     ],
 
 ];
