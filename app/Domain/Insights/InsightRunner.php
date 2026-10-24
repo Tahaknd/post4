@@ -1,0 +1,147 @@
+<?php
+
+namespace App\Domain\Insights;
+
+use App\Domain\Insights\Trends\TrendsQuery;
+use App\Domain\Insights\Trends\TrendsResult;
+use App\Domain\Insights\Trends\TrendsSqlBuilder;
+use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
+use App\Infrastructure\ClickHouse\ClickHouseException;
+use App\Infrastructure\ClickHouse\ProjectScopedReader;
+use App\Infrastructure\ClickHouse\RoSettings;
+use Illuminate\Contracts\Cache\Repository as Cache;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Throwable;
+
+/**
+ * Runs an insight definition for ONE project and caches the answer.
+ *
+ * Reads go through {@see ProjectScopedReader} only (the read-only user, the scoped view, the project id as
+ * the SQL_project_id setting), never through a ClickHouse client. A ClickHouse failure becomes
+ * {@see InsightFailed} with a safe message and a retry/busy flag; the raw server text only goes to the log.
+ *
+ * Cache: key = project id + sha256 of the canonical definition (TrendsQuery::hash(), versioned), TTL from
+ * config('insights.cache_ttl_seconds') (0 = no cache), only SUCCESSFUL results are stored, errors never. The default cache
+ * store is Redis on the `cache` connection (bounded connect/read timeouts, config/database.php), so a frozen
+ * Redis fails quickly; any cache failure FAILS OPEN: the query runs live and a throttled warning is logged
+ * (the convention of LimiterOutage). Entries are never flushed (`Cache::flush()` would wipe the shared Redis
+ * database); they expire. No stampede protection: concurrent identical misses each run the query, which the
+ * profile's max_concurrent_queries_for_user (3) bounds and maps to a "busy" error.
+ */
+final class InsightRunner
+{
+    private const KEY_PREFIX = 'insights:trends';
+
+    /** Unix time of the last "cache unavailable" warning (per process). */
+    private static int $lastCacheWarningAt = 0;
+
+    public function __construct(
+        private readonly ProjectScopedReader $reader,
+        private readonly TrendsSqlBuilder $builder,
+        private readonly Cache $cache,
+    ) {}
+
+    /** @throws InsightFailed */
+    public function trends(int $projectId, TrendsQuery $query): TrendsResult
+    {
+        // INSIGHTS_CACHE_TTL=0 switches the cache off (every call runs live).
+        if ((int) config('insights.cache_ttl_seconds') <= 0) {
+            return $this->run($projectId, $query);
+        }
+
+        $key = self::cacheKey($projectId, $query);
+
+        $cached = $this->cacheGet($key);
+        if ($cached !== null) {
+            return $cached;
+        }
+
+        $result = $this->run($projectId, $query);
+        $this->cachePut($key, $result);
+
+        return $result;
+    }
+
+    public static function cacheKey(int $projectId, TrendsQuery $query): string
+    {
+        return self::KEY_PREFIX.':'.$projectId.':'.$query->hash();
+    }
+
+    /** @internal Test seam: forgets the last warning so the next failure logs again. */
+    public static function resetWarningThrottle(): void
+    {
+        self::$lastCacheWarningAt = 0;
+    }
+
+    private function run(int $projectId, TrendsQuery $query): TrendsResult
+    {
+        $built = $this->builder->build($query);
+
+        try {
+            $rows = $this->reader->select(
+                $projectId,
+                $built->sql,
+                $built->params,
+                [RoSettings::LOG_COMMENT => 'project:'.$projectId.' insight:trends:'.substr($query->hash(), 0, 12)],
+            );
+        } catch (ClickHouseException $e) {
+            $this->logFailure($projectId, $query, $e->kind, $e);
+
+            throw new InsightFailed($e->kind, $e);
+        } catch (ConnectionException $e) {
+            $this->logFailure($projectId, $query, ClickHouseErrorKind::Unavailable, $e);
+
+            throw new InsightFailed(ClickHouseErrorKind::Unavailable, $e);
+        }
+
+        return TrendsResult::fromRows($query, $rows);
+    }
+
+    private function logFailure(int $projectId, TrendsQuery $query, ClickHouseErrorKind $kind, Throwable $e): void
+    {
+        // The raw text may echo query fragments and parameter values: logs only, truncated, never the UI.
+        Log::log($kind->isBusy() ? 'info' : 'warning', 'insight query failed', [
+            'project_id' => $projectId,
+            'definition' => substr($query->hash(), 0, 12),
+            'kind' => $kind->value,
+            'code' => $e instanceof ClickHouseException ? $e->errorCode : null,
+            'message' => mb_substr($e->getMessage(), 0, 300),
+        ]);
+    }
+
+    private function cacheGet(string $key): ?TrendsResult
+    {
+        try {
+            return TrendsResult::fromArray($this->cache->get($key));
+        } catch (Throwable $e) {
+            $this->warnCache($e);
+
+            return null;
+        }
+    }
+
+    private function cachePut(string $key, TrendsResult $result): void
+    {
+        try {
+            $this->cache->put($key, $result->toArray(), (int) config('insights.cache_ttl_seconds'));
+        } catch (Throwable $e) {
+            $this->warnCache($e);
+        }
+    }
+
+    private function warnCache(Throwable $e): void
+    {
+        $now = time();
+        if ($now - self::$lastCacheWarningAt < (int) config('insights.cache_warning_interval_seconds')) {
+            return;
+        }
+        self::$lastCacheWarningAt = $now;
+
+        Log::warning('insight cache unavailable, running the query live', [
+            'exception' => $e::class,
+            'message' => Str::limit($e->getMessage(), 200),
+        ]);
+    }
+}
