@@ -3,7 +3,6 @@
 use App\Http\Controllers\CaptureController;
 use App\Http\Middleware\HandleInertiaRequests;
 use App\Http\ReservedPaths;
-use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Routing\Route as RoutingRoute;
 use Illuminate\Session\Middleware\StartSession;
@@ -55,6 +54,29 @@ function webRoutesCollidingWithReservedPaths(): array
     }
 
     return $collisions;
+}
+
+/**
+ * URIs of web-group routes that take a name the application or a package already owns. The owning
+ * package's own routes are allowed: Horizon (`horizon.*`) and Inertia DevTools (`inertia.*`).
+ *
+ * @return list<string>
+ */
+function webRoutesTakingAppOwnedNames(): array
+{
+    $taken = [];
+
+    foreach (webGroupRoutes() as $route) {
+        if (preg_match('/^(horizon|inertia)\./', (string) $route->getName())) {
+            continue;
+        }
+
+        if (ReservedPaths::takesAppOwnedName($route->uri())) {
+            $taken[] = $route->uri();
+        }
+    }
+
+    return $taken;
 }
 
 it('keeps every web route out of the reserved capture and SDK prefixes', function () {
@@ -124,5 +146,22 @@ it('registers HandleInertiaRequests on the web group only', function () {
         }
     }
 
-    expect(app(Kernel::class)->getGlobalMiddleware())->not->toContain(HandleInertiaRequests::class);
+    expect(app(HttpKernel::class)->getGlobalMiddleware())->not->toContain(HandleInertiaRequests::class);
+});
+
+it('keeps every UI route off the names the application and its packages own', function () {
+    expect(webRoutesTakingAppOwnedNames())->toBe([]);
+});
+
+it('detects a web route that takes an app-owned name', function (string $uri) {
+    Route::middleware('web')->get($uri, fn () => 'ui');
+
+    expect(webRoutesTakingAppOwnedNames())->toContain(ltrim($uri, '/'));
+})->with(['/up', '/build/page', '/storage', '/horizon/custom', '/_inertia/x', '/api/insights']);
+
+it('keeps the capture segments and the app-owned names disjoint', function () {
+    expect(array_intersect(ReservedPaths::SEGMENTS, ReservedPaths::APP_OWNED))->toBe([])
+        ->and(ReservedPaths::SEGMENTS)->toContain('s', 'static', 'engage')
+        ->and(ReservedPaths::takesAppOwnedName('/Build/x'))->toBeTrue()
+        ->and(ReservedPaths::takesAppOwnedName('/builder'))->toBeFalse();
 });

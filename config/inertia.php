@@ -81,11 +81,6 @@ return [
 
         'extensions' => [
 
-            'js',
-            'jsx',
-            'svelte',
-            'ts',
-            'tsx',
             'vue',
 
         ],
@@ -169,7 +164,7 @@ return [
 
     'devtools' => [
 
-        'enabled' => env('INERTIA_DEVTOOLS_ENABLED'),
+        'enabled' => (bool) env('INERTIA_DEVTOOLS_ENABLED', false),
 
         'except' => ['telescope*', 'horizon*', '_inertia/devtools*'],
 
