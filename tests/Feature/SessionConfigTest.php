@@ -32,8 +32,8 @@ function configFileWith(string $file, array $env): array
 }
 
 it('gives sessions their own bounded Redis connection on database 2', function () {
-    $session = require config_path('database.php');
-    $redis = $session['redis'];
+    // Evaluated without the container's environment: Compose sets REDIS_SESSION_DB=0 for the dedicated instance.
+    $redis = configFileWith('database.php', [])['redis'];
 
     expect($redis)->toHaveKey('session')
         ->and($redis['session']['database'])->toBe('2')
