@@ -25,6 +25,13 @@ final class RoSettings
 
     public const LOG_COMMENT = 'log_comment';
 
+    /**
+     * Custom setting read by the row policy on posthog.events (tenant isolation, server side). Only
+     * ProjectScopedReader sets it; the value must be an integer 1..4294967295 (checked in
+     * ReadOnlyClickHouseClient). A query without it FAILS on the server (fail-closed).
+     */
+    public const SQL_PROJECT_ID = 'SQL_project_id';
+
     /** @var list<string> */
     public const ALLOWED = [
         self::MAX_EXECUTION_TIME,
@@ -34,6 +41,7 @@ final class RoSettings
         self::MAX_MEMORY_USAGE,
         self::MAX_THREADS,
         self::LOG_COMMENT,
+        self::SQL_PROJECT_ID,
     ];
 
     private function __construct() {}

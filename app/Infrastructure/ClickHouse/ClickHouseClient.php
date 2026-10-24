@@ -42,6 +42,8 @@ class ClickHouseClient implements ClickHouseReads
      *
      * `$settings` sorgu başına ClickHouse ayarlarıdır (`max_execution_time` vb.) ve `params` gibi URL
      * argümanı olarak gider. Anahtarlar `/^[a-z][a-z0-9_]*$/` olmalı, değerler skaler (bool 1/0 olur).
+     * Tek istisna özel ayar öneki `SQL_`: tam olarak `/^SQL_[a-z][a-z0-9_]*$/` kabul edilir
+     * (`SQL_project_id`; sunucu tarafı: docker/clickhouse/config.d/10-custom-settings.xml).
      * Ayarlar ASLA kullanıcı girdisinden gelmez: çağıranlar sabit değer geçer (kullanıcı girdisi
      * yalnızca `$params` ile bağlanır). İstemcinin kendi argümanlarıyla (`database`, `default_format`,
      * `wait_end_of_query`, `query`, `param_*`) çakışan adlar `InvalidArgumentException` ile reddedilir.
@@ -101,7 +103,7 @@ class ClickHouseClient implements ClickHouseReads
     {
         $encoded = [];
         foreach ($settings as $name => $value) {
-            if (! is_string($name) || preg_match('/^[a-z][a-z0-9_]*$/', $name) !== 1) {
+            if (! is_string($name) || preg_match('/^(?:SQL_)?[a-z][a-z0-9_]*$/', $name) !== 1) {
                 throw new InvalidArgumentException('Invalid ClickHouse setting name: '.var_export($name, true));
             }
             if (in_array($name, self::RESERVED_ARGUMENTS, true) || str_starts_with($name, 'param_')) {

@@ -105,6 +105,7 @@ it('sends allow-listed settings through select', function () {
         RoSettings::MAX_MEMORY_USAGE => 1000,
         RoSettings::MAX_THREADS => 2,
         RoSettings::LOG_COMMENT => 'project:1',
+        RoSettings::SQL_PROJECT_ID => 5,
     ]);
 
     Http::assertSent(function (Request $r) {
@@ -113,14 +114,14 @@ it('sends allow-listed settings through select', function () {
         return $q['max_execution_time'] === '5' && $q['max_result_rows'] === '100'
             && $q['max_result_bytes'] === '1000' && $q['max_rows_to_read'] === '1000'
             && $q['max_memory_usage'] === '1000' && $q['max_threads'] === '2'
-            && $q['log_comment'] === 'project:1';
+            && $q['log_comment'] === 'project:1' && $q['SQL_project_id'] === '5';
     });
 });
 
 it('lists exactly the allow-listed settings', function () {
     expect(RoSettings::ALLOWED)->toBe([
         'max_execution_time', 'max_result_rows', 'max_result_bytes', 'max_rows_to_read',
-        'max_memory_usage', 'max_threads', 'log_comment',
+        'max_memory_usage', 'max_threads', 'log_comment', 'SQL_project_id',
     ]);
 });
 
@@ -135,8 +136,35 @@ it('rejects every setting outside the allow-list and sends nothing', function (s
     'database', 'default_format', 'wait_end_of_query', 'query', 'param_project_id',
     'session_id', 'quota_key', 'role', 'user', 'password', 'query_id', 'compress', 'decompress',
     // real settings that are pinned or outside the contract
+    'sql_project_id', 'SQL_other',
     'readonly', 'max_bytes_to_read', 'join_algorithm', 'use_query_cache', 'log_queries',
     'max_concurrent_queries_for_user', 'timeout_overflow_mode', 'result_overflow_mode',
+]);
+
+it('accepts only an integer SQL_project_id from 1 to 4294967295', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    foreach ([1, 4294967295] as $id) {
+        app(ReadOnlyClickHouseClient::class)->select('SELECT 1', [], [RoSettings::SQL_PROJECT_ID => $id]);
+    }
+    Http::assertSentCount(2);
+});
+
+it('rejects an SQL_project_id outside 1..4294967295 or of another type and sends nothing', function (mixed $value) {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    expect(fn () => app(ReadOnlyClickHouseClient::class)->select('SELECT 1', [], [RoSettings::SQL_PROJECT_ID => $value]))
+        ->toThrow(InvalidArgumentException::class, 'SQL_project_id');
+    Http::assertNothingSent();
+})->with([
+    'zero' => [0],
+    'negative' => [-1],
+    'too big' => [4294967296],
+    'numeric string' => ['1'],
+    'float' => [1.0],
+    'true' => [true],
+    'null' => [null],
+    'array' => [[1]],
 ]);
 
 it('rejects an allowed setting passed together with a forbidden one before sending', function () {

@@ -323,6 +323,31 @@ it('rejects invalid setting names', function (mixed $name) {
     'int key (list)' => 0,
 ]);
 
+it('accepts custom settings with the SQL_ prefix and sends them as url arguments', function () {
+    $query = sentQuery($this->client, ['SQL_project_id' => 42, 'SQL_other_1' => 'x']);
+
+    expect($query['SQL_project_id'])->toBe('42')
+        ->and($query['SQL_other_1'])->toBe('x')
+        ->and($query['database'])->toBe('posthog');
+});
+
+it('rejects custom setting names that do not match SQL_ plus a lower case name', function (string $name) {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    expect(fn () => $this->client->select('SELECT 1', [], [$name => 1]))
+        ->toThrow(InvalidArgumentException::class);
+    Http::assertNothingSent();
+})->with([
+    'prefix only' => 'SQL_',
+    'upper case name' => 'SQL_Project_id',
+    'leading digit' => 'SQL_1a',
+    'other prefix' => 'XSQL_a',
+    'double prefix with dash' => 'SQL_a-b',
+    'ampersand' => 'SQL_a&b',
+    'space' => 'SQL_a b',
+    'upper case prefix only partly' => 'Sql_a',
+]);
+
 it('rejects non scalar setting values', function (mixed $value) {
     Http::fake(['*' => Http::response('{"data":[]}')]);
 
