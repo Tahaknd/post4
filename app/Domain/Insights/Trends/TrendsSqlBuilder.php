@@ -16,7 +16,7 @@ use App\Domain\Insights\Sql\ParamType;
  *
  * Output columns: `series` (event), `bucket` (UTC epoch seconds of the bucket start in the project zone),
  * `breakdown` (only with a breakdown) and `value`. It always aggregates, always has a UTC range predicate on
- * `timestamp` and always ends in LIMIT {@see TrendsQuery::MAX_ROWS}.
+ * `timestamp` and always ends in LIMIT {@see TrendsQuery::MAX_ROWS} + 1.
  *
  * Week and month buckets are DATES in ClickHouse (toStartOfInterval returns Date), so the bucket is routed
  * through toDateTime(..., zone) to get the local midnight instant instead of UTC midnight of that date.
@@ -40,7 +40,9 @@ final class TrendsSqlBuilder
         $agg = $query->metric->aggregateSql();
         $interval = $query->interval->intervalSql();
         $bucket = "toUnixTimestamp(toDateTime(toStartOfInterval(timestamp, {$interval}, {$tz}), {$tz}))";
-        $limit = TrendsQuery::MAX_ROWS;
+        // One more than the cap, so a result that would be cut off is detectable (TrendsResult throws above MAX_ROWS).
+        // Stays far below the profile's max_result_rows (20000), so the overflow mode never fires first.
+        $limit = TrendsQuery::MAX_ROWS + 1;
 
         if ($query->breakdown === null) {
             $sql = "SELECT event AS series, {$bucket} AS bucket, {$agg} AS value "

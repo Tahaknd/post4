@@ -65,7 +65,7 @@ describe('SQL snapshots', function () {
         expect($built->sql)->toBe(
             'SELECT event AS series, toUnixTimestamp(toDateTime(toStartOfInterval(timestamp, INTERVAL 1 DAY, {tz:String}), {tz:String})) AS bucket, uniqExact(uuid) AS value '
             .'FROM project_events WHERE event IN {names:Array(String)} AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)} '
-            .'GROUP BY series, bucket ORDER BY bucket ASC, series ASC LIMIT 10000'
+            .'GROUP BY series, bucket ORDER BY bucket ASC, series ASC LIMIT 10001'
         )->and(plain($built->params))->toBe([
             'names' => ['a', 'b'],
             'from' => '2026-03-01 00:00:00.000',
@@ -87,7 +87,7 @@ describe('SQL snapshots', function () {
 
         expect($built->sql)->toContain('if(bd IN (SELECT bd FROM (SELECT if(empty(toString(browser)), {none:String}, toString(browser)) AS bd, uniqExact(uuid) AS c FROM project_events WHERE ')
             ->and($built->sql)->toContain('GROUP BY bd ORDER BY c DESC, bd ASC LIMIT {top_n:UInt8})), bd, {other:String}) AS breakdown')
-            ->and($built->sql)->toContain('GROUP BY series, bucket, breakdown ORDER BY bucket ASC, series ASC, breakdown ASC LIMIT 10000')
+            ->and($built->sql)->toContain('GROUP BY series, bucket, breakdown ORDER BY bucket ASC, series ASC, breakdown ASC LIMIT 10001')
             ->and(plain($built->params))->toMatchArray(['top_n' => 3, 'other' => Breakdown::OTHER_LABEL, 'none' => Breakdown::NONE_LABEL])
             ->and($built->params)->not->toHaveKey('bd_key');
     });
@@ -118,12 +118,19 @@ describe('SQL snapshots', function () {
         $sql = (new TrendsSqlBuilder)->build($q)->sql;
 
         expect($sql)->toContain('timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}')
-            ->and($sql)->toContain('GROUP BY')->and($sql)->toContain('uniqExact(')->and($sql)->toEndWith('LIMIT '.TrendsQuery::MAX_ROWS);
+            ->and($sql)->toContain('GROUP BY')->and($sql)->toContain('uniqExact(')->and($sql)->toEndWith('LIMIT '.(TrendsQuery::MAX_ROWS + 1));
     })->with([
         'plain' => fn () => sample(),
         'breakdown' => fn () => sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Event)]),
         'filtered unique' => fn () => sample(['metric' => Metric::UniqueUsers, 'filters' => [new PropertyFilter('a', FilterOperator::IsSet)]]),
     ]);
+});
+
+it('asks for one row more than the cap and stays under the profile result limit', function () {
+    $sql = (new TrendsSqlBuilder)->build(sample())->sql;
+
+    expect(TrendsQuery::MAX_ROWS + 1)->toBe(10001)->and($sql)->toEndWith('LIMIT 10001')
+        ->and(TrendsQuery::MAX_ROWS + 1)->toBeLessThan(20000);
 });
 
 describe('what reaches the reader', function () {

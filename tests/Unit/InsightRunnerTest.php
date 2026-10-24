@@ -284,3 +284,47 @@ it('keeps a breakdown result ordered: top series by size, other last', function 
     expect(array_column($result->series, 'breakdown'))->toBe(['Firefox', 'Chrome', Breakdown::OTHER_LABEL])
         ->and(array_column($result->series, 'is_other'))->toBe([false, false, true]);
 });
+
+describe('row cap', function () {
+    /** @return list<array<string, mixed>> */
+    function cells(int $count): array
+    {
+        $day = strtotime('2026-03-01 UTC');
+        $rows = [];
+        for ($i = 0; $i < $count; $i++) {
+            $rows[] = ['series' => 'signup', 'bucket' => $day + 86400 * ($i % 3), 'breakdown' => 'v'.intdiv($i, 3), 'value' => 1];
+        }
+
+        return $rows;
+    }
+
+    it('accepts exactly MAX_ROWS populated cells and returns every one', function () {
+        $q = def('signup', Breakdown::byColumn(BreakdownColumn::Browser, 25));
+
+        $result = TrendsResult::fromRows($q, cells(TrendsQuery::MAX_ROWS));
+
+        // 10000 cells over 3 buckets: 3334 breakdown values, the last one with a single cell
+        expect(count($result->series))->toBe(3334)
+            ->and(array_sum(array_map('array_sum', array_column($result->series, 'data'))))->toBe(TrendsQuery::MAX_ROWS);
+    });
+
+    it('refuses MAX_ROWS + 1 rows with a domain exception instead of showing a cut off chart', function () {
+        $q = def('signup', Breakdown::byColumn(BreakdownColumn::Browser, 25));
+
+        try {
+            TrendsResult::fromRows($q, cells(TrendsQuery::MAX_ROWS + 1));
+            $this->fail('expected InsightFailed');
+        } catch (InsightFailed $e) {
+            expect($e->kind)->toBe(ClickHouseErrorKind::TooManyRows)->and($e->getMessage())->toBe(ClickHouseErrorKind::TooManyRows->userMessage())
+                ->and($e->getPrevious()->getMessage())->toContain((string) TrendsQuery::MAX_ROWS);
+        }
+    });
+
+    it('surfaces the cap through the runner as InsightFailed and does not cache it', function () {
+        $store = new ArrayStore;
+        $q = def('signup', Breakdown::byColumn(BreakdownColumn::Browser, 25));
+
+        expect(fn () => runnerOn(scriptedClient([cells(TrendsQuery::MAX_ROWS + 1)]), new Repository($store))->trends(1, $q))->toThrow(InsightFailed::class)
+            ->and($store->get(InsightRunner::cacheKey(1, $q)))->toBeNull();
+    });
+});

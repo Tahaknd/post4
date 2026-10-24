@@ -2,6 +2,8 @@
 
 namespace App\Domain\Insights\Trends;
 
+use App\Domain\Insights\InsightFailed;
+use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use DateTimeImmutable;
 use DateTimeZone;
 use RuntimeException;
@@ -31,9 +33,13 @@ final readonly class TrendsResult
     /** @param  array<int, array<string, mixed>>  $rows  rows of the SQL of {@see TrendsSqlBuilder} */
     public static function fromRows(TrendsQuery $query, array $rows): self
     {
-        if (count($rows) >= TrendsQuery::MAX_ROWS) {
-            // Validation keeps the expected rows below the cap, so reaching it means a bug or a changed cap.
-            throw new RuntimeException('Trends result reached the row limit and may be truncated');
+        if (count($rows) > TrendsQuery::MAX_ROWS) {
+            // The SQL asks for MAX_ROWS + 1 rows and validation keeps the expected rows at or below MAX_ROWS,
+            // so an extra row means the answer was cut off: a bug or a changed cap, never a partial chart.
+            throw new InsightFailed(
+                ClickHouseErrorKind::TooManyRows,
+                new RuntimeException('Trends result has more than '.TrendsQuery::MAX_ROWS.' rows and would be truncated'),
+            );
         }
 
         $cells = [];
