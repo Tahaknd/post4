@@ -16,6 +16,9 @@ use RuntimeException;
  * - Uygulanmış dosyalar asla düzenlenmemeli: dosyanın sha256 özeti `schema_migrations.checksum`
  *   içinde saklanır ve değişirse migrate() hata verir.
  * - Eşzamanlı çalıştırıcılar `clickhouse:migrate` kilidinde BEKLER (atlamaz).
+ * - `$settings` HER migration ifadesine URL argümanı olarak eklenir. Sunucuda tanımlı özel ayarlar
+ *   (`SQL_project_id`, config.d/10-custom-settings.xml) bir görünümün gövdesinde `getSetting` ile
+ *   kullanılacaksa CREATE sırasında da bilinmelidir (002_scoped_events_view.sql).
  */
 final class ClickHouseMigrator
 {
@@ -27,6 +30,8 @@ final class ClickHouseMigrator
         private readonly ClickHouseClient $clickhouse,
         private readonly string $path,
         private readonly int $lockWaitSeconds = 120,
+        /** @var array<string, bool|int|float|string> */
+        private readonly array $settings = [],
     ) {}
 
     /** @return list<string> Uygulanan migration dosya adları */
@@ -81,7 +86,7 @@ final class ClickHouseMigrator
         $ran = [];
         foreach ($pending as $name => [$contents, $checksum]) {
             foreach (self::statements($contents) as $statement) {
-                $this->clickhouse->execute($statement);
+                $this->clickhouse->execute($statement, settings: $this->settings);
             }
 
             $this->clickhouse->execute(

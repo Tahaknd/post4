@@ -288,3 +288,29 @@ it('releases the lock after a failed run', function () {
     expect($lock->get())->toBeTrue();
     $lock->release();
 });
+
+it('sends the configured settings with every migration statement (custom settings must be known at CREATE VIEW)', function () {
+    fakeApplied([]);
+    $dir = migrationDir(['001_a.sql' => 'CREATE TABLE a (x UInt8) ENGINE = Memory; CREATE TABLE b (x UInt8) ENGINE = Memory;']);
+
+    (new ClickHouseMigrator(new ClickHouseClient('http://ch:8123', 'db', 'u', 'p'), $dir, 120, ['SQL_project_id' => 0]))->migrate();
+
+    $withSetting = [];
+    foreach (Http::recorded()->all() as [$request]) {
+        parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+        if (preg_match('/^CREATE TABLE [ab] /', $request->body()) === 1) {
+            $withSetting[] = $query['SQL_project_id'] ?? null;
+        }
+    }
+
+    expect($withSetting)->toBe(['0', '0']);
+});
+
+it('sends no extra setting by default', function () {
+    fakeApplied([]);
+    $dir = migrationDir(['001_a.sql' => 'CREATE TABLE a (x UInt8) ENGINE = Memory;']);
+
+    migratorFor($dir)->migrate();
+
+    Http::assertNotSent(fn (Request $r) => str_contains($r->url(), 'SQL_project_id'));
+});

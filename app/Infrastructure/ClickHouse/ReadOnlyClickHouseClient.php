@@ -10,11 +10,12 @@ use RuntimeException;
  * Yönetici `ClickHouseClient`'ı GENİŞLETMEZ, onu içinde (özel alan) salt-okunur kimlik bilgileriyle
  * kurar ve yalnızca `select()` sunar: `execute()` hiç yoktur, DDL ve INSERT yönetici istemciye aittir
  * (migrator, altyapı) ve tip sistemi bunu garanti eder. Sorgu ayarları `RoSettings::ALLOWED`
- * listesiyle sınırlıdır. Sunucu da yazmayı reddeder (GRANT yalnızca SELECT ON posthog.events).
+ * listesiyle sınırlıdır. Sunucu da yazmayı reddeder (GRANT yalnızca SELECT ON posthog.project_events_v).
  *
- * Her okuma `SQL_project_id` ayarını taşımalıdır: `posthog.events` üzerindeki satır politikası ayar yoksa
- * sorguyu reddeder, varsa yalnızca o projenin satırlarını gösterir (bkz. `ProjectScopedReader`, kesin sınır
- * orada anlatılır). Bu ayarın değeri 1..4294967295 aralığında bir tamsayı olmalıdır.
+ * Her okuma `SQL_project_id` ayarını taşımalıdır: `posthog.project_events_v` görünümü (ve üzerindeki satır
+ * politikası) ayar yoksa sorguyu reddeder, varsa yalnızca o projenin satırlarını gösterir; kullanıcının
+ * `posthog.events` üzerinde yetkisi yoktur, bu yüzden ham `select()` bile mergeTreeIndex ile başka projeyi
+ * okuyamaz (bkz. `ProjectScopedReader`, kesin sınır orada anlatılır). Bu ayarın değeri 1..4294967295 aralığında bir tamsayı olmalıdır.
  */
 final class ReadOnlyClickHouseClient implements ClickHouseReads
 {

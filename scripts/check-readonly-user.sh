@@ -18,12 +18,18 @@ usage() {
 Usage: scripts/check-readonly-user.sh [-h|--help]
 
 Seeds five rows for the throwaway projects 990901 (3 rows) and 990902 (2 rows) as the admin user, and
-deletes them again on exit (also on failure). Then checks that the ClickHouse read-only user posthog_ro can log in and SELECT from posthog.events (every
-read must carry the SQL_project_id setting of the row policy, which hides all other projects), and that
-everything else is refused with the RIGHT error code (not merely "some error"):
-  497 ACCESS_DENIED     other tables (events_errors, schema_migrations, kafka_events), INSERT, ALTER,
-                        CREATE, and the url() / file() / remote() table functions
-  115 UNKNOWN_SETTING   a read of posthog.events WITHOUT SQL_project_id (the row policy fails closed)
+deletes them again on exit (also on failure). Then checks that the ClickHouse read-only user posthog_ro can
+log in and SELECT from the DEFINER view posthog.project_events_v (every read must carry the SQL_project_id
+setting of the view filter, which hides all other projects), and that everything else is refused with the
+RIGHT error code (not merely "some error"):
+  497 ACCESS_DENIED     posthog.events itself (direct, and through mergeTreeIndex / view(), which skip row
+                        policies but need a grant), other tables (events_errors,
+                        schema_migrations, kafka_events), INSERT, ALTER, CREATE, and the url() / file() /
+                        remote() table functions
+  636 CANNOT_EXTRACT_TABLE_STRUCTURE
+                        merge() over events (it only lists tables the user may see: nothing matches)
+  36  BAD_ARGUMENTS     mergeTreeIndex on the view (a view is not a MergeTree)
+  115 UNKNOWN_SETTING   a read of the view WITHOUT SQL_project_id (fails closed)
   6   CANNOT_PARSE_TEXT SQL_project_id that is not a number
   511 UNKNOWN_ROLE      SET ROLE of a role that does not exist
   164 READONLY          SET readonly = 0 and SET profile = 'readonly'
@@ -33,9 +39,9 @@ everything else is refused with the RIGHT error code (not merely "some error"):
                         setting (join_algorithm, use_query_cache, log_queries,
                         stream_like_engine_allow_direct_select)
 and that a benign setting (max_execution_time = 5) is accepted, SET profile = 'default' and SET ROLE ALL
-change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.events TO posthog_ro`. For EVERY
-table found in SHOW GRANTS a bare SELECT (no SQL_project_id) must fail with 115, so a table granted
-without a row policy is caught. One PASS or FAIL line per check.
+change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.project_events_v TO posthog_ro`. For
+EVERY relation found in SHOW GRANTS a bare SELECT (no SQL_project_id) must fail with 115, so a relation
+granted without a filter is caught. One PASS or FAIL line per check.
 
 The password never appears on a command line: it is read inside the container from
 CLICKHOUSE_RO_PASSWORD.
@@ -193,7 +199,7 @@ else
   exit 1
 fi
 # Every read needs the SQL_project_id setting (row policy, see below); without it the query fails.
-check_ok "SELECT count() FROM posthog.events works (with SQL_project_id)" 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 1'
+check_ok "SELECT count() FROM posthog.project_events_v works (with SQL_project_id)" 'SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = 1'
 
 # Five throwaway rows (admin) so the isolation checks below cannot pass on an empty table.
 if seed_rows; then
@@ -202,22 +208,22 @@ else
   fail "could not seed the throwaway rows as the admin user (is CLICKHOUSE_USER / CLICKHOUSE_PASSWORD set in the container?)"
 fi
 
-# --- tenant isolation: the row policy on posthog.events (fail-closed) ---------------------------------
-# The policy filter is project_id = toUInt32(getSetting('SQL_project_id')). A query without the setting
+# --- tenant isolation: the DEFINER view posthog.project_events_v (fail-closed) ---------------------------------
+# The view filter is project_id = toUInt32(getSetting('SQL_project_id')). A query without the setting
 # must FAIL (never return every project's rows): on 25.8 that is Code 115 UNKNOWN_SETTING, raised while
-# the policy expression is evaluated. A value that is not a UInt32 fails with 6 (CANNOT_PARSE_TEXT).
-check_code "SELECT without SQL_project_id is rejected (fail-closed)" 115 'SELECT count() FROM posthog.events'
-check_code "SQL_project_id that is not a number is rejected" 6 "SELECT count() FROM posthog.events SETTINGS SQL_project_id = 'abc'"
+# the filter expression is evaluated. A value that is not a UInt32 fails with 6 (CANNOT_PARSE_TEXT).
+check_code "SELECT without SQL_project_id is rejected (fail-closed)" 115 'SELECT count() FROM posthog.project_events_v'
+check_code "SQL_project_id that is not a number is rejected" 6 "SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = 'abc'"
 # Non vacuous: the seeded rows prove that the table is not empty and that each project is readable.
-check_out "project $SEED_A sees exactly its 3 rows" "SELECT count() FROM posthog.events SETTINGS SQL_project_id = $SEED_A" 3
-check_out "project $SEED_B sees exactly its 2 rows" "SELECT count() FROM posthog.events SETTINGS SQL_project_id = $SEED_B" 2
-check_out "project $SEED_B sees only its own project id" "SELECT toString(groupUniqArray(project_id)) FROM posthog.events SETTINGS SQL_project_id = $SEED_B" "[$SEED_B]"
-check_out "the policy hides every other project (WHERE project_id != $SEED_A is empty)" "SELECT count() FROM posthog.events WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
-check_out "the policy applies inside a UNION ALL subquery too" "SELECT count() FROM (SELECT project_id FROM posthog.events UNION ALL SELECT project_id FROM posthog.events) WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
-check_out "a project id nobody owns (0) sees no rows although the table has some" 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 0' 0
+check_out "project $SEED_A sees exactly its 3 rows" "SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = $SEED_A" 3
+check_out "project $SEED_B sees exactly its 2 rows" "SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = $SEED_B" 2
+check_out "project $SEED_B sees only its own project id" "SELECT toString(groupUniqArray(project_id)) FROM posthog.project_events_v SETTINGS SQL_project_id = $SEED_B" "[$SEED_B]"
+check_out "the view hides every other project (WHERE project_id != $SEED_A is empty)" "SELECT count() FROM posthog.project_events_v WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
+check_out "the filter applies inside a UNION ALL subquery too" "SELECT count() FROM (SELECT project_id FROM posthog.project_events_v UNION ALL SELECT project_id FROM posthog.project_events_v) WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
+check_out "a project id nobody owns (0) sees no rows although the table has some" 'SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = 0' 0
 
-# Every table the user may SELECT from needs a row policy: derive them from SHOW GRANTS (not from this
-# script) and require that a bare read FAILS with 115 for each. A table granted without a policy would
+# Every relation the user may SELECT from needs a filter: derive them from SHOW GRANTS (not from this
+# script) and require that a bare read FAILS with 115 for each. A relation granted without a filter would
 # answer for every project and fail this check.
 run 'SHOW GRANTS FOR posthog_ro'
 GRANT_LINES="$OUT"
@@ -226,12 +232,24 @@ while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   if [[ "$line" =~ ^GRANT\ SELECT\ ON\ posthog\.([A-Za-z0-9_]+)\ TO\ posthog_ro$ ]]; then
     GRANTED_TABLES=$((GRANTED_TABLES + 1))
-    check_code "bare SELECT from granted table posthog.${BASH_REMATCH[1]} fails closed (row policy present)" 115 "SELECT count() FROM posthog.${BASH_REMATCH[1]}"
+    check_code "bare SELECT from granted relation posthog.${BASH_REMATCH[1]} fails closed (filter present)" 115 "SELECT count() FROM posthog.${BASH_REMATCH[1]}"
   else
     fail "unexpected grant line, add a row policy and extend this check: $line"
   fi
 done <<< "$GRANT_LINES"
 if [[ $GRANTED_TABLES -eq 0 ]]; then fail "SHOW GRANTS listed no SELECT grant on posthog.<table>"; fi
+
+# --- posthog.events itself and its table functions: no grant, so no read at all ----------------------------
+# mergeTreeIndex / merge / view() skip row policies; they are closed by the ABSENCE of any grant on
+# posthog.events (the view reads it with the definer's rights). SQL_project_id is passed to prove that the
+# denial is the grant and not the missing setting.
+check_code "direct SELECT from posthog.events is denied" 497 'SELECT count() FROM posthog.events SETTINGS SQL_project_id = 1'
+check_code "mergeTreeIndex on posthog.events is denied" 497 "SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', 'events') SETTINGS SQL_project_id = 1"
+check_code "mergeTreeIndex with an assembled table name is denied" 497 "SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', concat('ev', 'ents')) SETTINGS SQL_project_id = 1"
+# merge() only lists tables the user may see, so the regex matches nothing (636) instead of 497: still no read.
+check_code "merge() over posthog.events finds no readable table" 636 "SELECT count() FROM merge('posthog', '^events\$') SETTINGS SQL_project_id = 1"
+check_code "view() over posthog.events is denied" 497 'SELECT count() FROM view(SELECT * FROM posthog.events) SETTINGS SQL_project_id = 1'
+check_code "mergeTreeIndex on the view itself fails (a view is not a MergeTree)" 36 "SELECT * FROM mergeTreeIndex('posthog', 'project_events_v') SETTINGS SQL_project_id = 1"
 
 # --- no other table ----------------------------------------------------------------------------------
 check_code "SELECT from posthog.events_errors is denied" 497 'SELECT count() FROM posthog.events_errors'
@@ -272,8 +290,8 @@ check_code "SET profile = 'readonly' (stock profile) is refused" 164 "SET profil
 check_out "SET ROLE ALL enables no role" 'SET ROLE ALL; SELECT length(enabledRoles())' 0
 check_code "SET ROLE of an unknown role is refused" 511 'SET ROLE nosuchrole'
 
-# --- grants are exactly one line ---------------------------------------------------------------------
-check_out "grants are exactly SELECT on posthog.events" 'SHOW GRANTS FOR posthog_ro' 'GRANT SELECT ON posthog.events TO posthog_ro'
+# --- grants are exactly one line (the view, never posthog.events) ---------------------------------------------------------------------
+check_out "grants are exactly SELECT on posthog.project_events_v" 'SHOW GRANTS FOR posthog_ro' 'GRANT SELECT ON posthog.project_events_v TO posthog_ro'
 
 echo "----"
 echo "check-readonly-user: $PASSED passed, $FAILED failed"

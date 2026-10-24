@@ -10,6 +10,7 @@ use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
+use App\Infrastructure\ClickHouse\RoSettings;
 use App\Infrastructure\Kafka\KafkaEventProducer;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
 use Illuminate\Http\Middleware\TrustProxies;
@@ -49,6 +50,8 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
             $app->make(ClickHouseClient::class),
             database_path('clickhouse/migrations'),
+            // Views in the migrations read the custom setting with getSetting(), so it must be known at CREATE.
+            settings: [RoSettings::SQL_PROJECT_ID => 0],
         ));
 
         $this->app->singleton(EventProducer::class, fn () => new KafkaEventProducer(

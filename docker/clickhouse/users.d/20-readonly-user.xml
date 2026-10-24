@@ -4,67 +4,71 @@
         image entrypoint writes generated user files into /etc/clickhouse-server/users.d/).
 
         WHAT
-        `posthog_ro` may only SELECT from `posthog.events`. The application's insight queries (the
-        ProjectScopedReader / ReadOnlyClickHouseClient) connect as this user, so a bug or a hostile query
-        built there cannot write, alter, drop, read files or URLs, or look at other tables, and the ROW
-        POLICY below limits every read of posthog.events to ONE project (see TENANT ISOLATION). The user
-        name is fixed here (posthog_ro).
+        `posthog_ro` may only SELECT from the VIEW `posthog.project_events_v` and has NO privilege on
+        `posthog.events` itself. The application's insight queries (ProjectScopedReader /
+        ReadOnlyClickHouseClient) connect as this user, so a bug or a hostile query built there cannot
+        write, alter, drop, read files or URLs, or look at other tables, and every read is limited to ONE
+        project (see TENANT ISOLATION). The user name is fixed here (posthog_ro).
 
-        TENANT ISOLATION (row policy, FAIL CLOSED)
-        The `<databases><posthog><events><filter>` element under the user is a ROW POLICY: every SELECT
-        that touches posthog.events gets the extra condition
+        TENANT ISOLATION (DEFINER view + row policy, FAIL CLOSED)
+        The view is created by the migration database/clickhouse/migrations/002_scoped_events_view.sql with
+        `DEFINER = CURRENT_USER SQL SECURITY DEFINER` (the admin) and the filter
             project_id = toUInt32(getSetting('SQL_project_id'))
         The setting SQL_project_id exists because config.d/10-custom-settings.xml declares the custom
         settings prefix SQL_. ProjectScopedReader sends it as a URL argument on every read. A query
         WITHOUT the setting does not return all rows: it fails (observed on 25.8: Code 115
-        UNKNOWN_SETTING, raised while the policy expression is evaluated). A value that is not a
-        UInt32 fails too (Code 6 or 72). Verified on 25.8: the policy applies inside subqueries, UNION,
-        JOINs and CTEs, and the primary key index still prunes (getSetting folds to a constant, so
-        `project_id in [N, N]` selects only that project's granules).
+        UNKNOWN_SETTING). A value that is not a UInt32 fails too (Code 6 or 72). The view reads
+        posthog.events with the DEFINER's rights, which is why posthog_ro needs none. The primary key index
+        still prunes through the view (getSetting folds to a constant: EXPLAIN indexes = 1 shows
+        `project_id in [N, N]`).
+        The `<databases><posthog><project_events_v><filter>` element below is the SAME condition as a row
+        policy on the view, a second layer: it keeps the view fail closed even if a later migration
+        recreates the view and forgets its WHERE (verified on 25.8: with the WHERE removed from the view the
+        policy still rejects a read without the setting and still limits a read with it).
         The admin user `posthog` has no row policy and is unaffected (ingestion, materialized views,
-        capture:status, migrations). The grant below stays exactly one line; the policy is not a grant.
+        capture:status, migrations).
 
         WHAT IS CLOSED ON THE SERVER AND WHAT ONLY BY THE READER LINT (honest list)
-        Closed on the server (verified on 25.8): direct reads of posthog.events, subqueries, UNION, JOIN,
-        CTEs, merge() and view() all get the row policy; a read without SQL_project_id fails; the table
-        functions remote, cluster, url, file, s3 ... fail without the SOURCES/REMOTE grant, and input,
-        executable, dictionary, loop fail without CREATE TEMPORARY TABLE; every other table has no grant.
-        NOT closed on the server, closed ONLY by the ProjectScopedReader lint:
-        1. mergeTreeIndex('posthog', 'events') (and mergeTreeProjection once a projection exists) SKIPS
-           the row policy and returns the primary key values of EVERY project (project_id, event, uuid,
-           date, one row per granule). The name can even be assembled with concat. readonly=2 does not stop
-           it (readonly=1 does not either), a column level grant does not (it needs only the key columns
-           the app needs anyway), and there is no profile setting for it. Reproduced live with posthog_ro.
-           The lint bans these table function names and every string literal, see
-           ProjectScopedReader::FORBIDDEN_FUNCTIONS. A query that does not go through the reader (a raw
-           ReadOnlyClickHouseClient::select) is NOT protected against it.
-        2. `readonly=2` lets this user change settings, and a `const` constraint on SQL_project_id is
-           impossible because it would also block the reader's own URL argument. So SQL that contains
-           `SETTINGS SQL_project_id = <other id>` overrides the policy for that query (the integration
-           test in tests/Feature/ClickHouseTenantIsolationTest.php pins this).
-        The policy therefore protects against BUGS in query builders (forgotten filter, OR, UNION arm, a
-        comment hiding a placeholder), NOT against SQL injection. Injection is prevented by typed
-        {name:Type} parameters (no string literals in builder SQL), builder identifiers from allow lists,
-        and the ProjectScopedReader lint (no SETTINGS, semicolon, comments, quotes, deny listed table
-        functions or direct table names; caller settings starting with SQL_ are refused). Never let user
-        text become SQL text.
-        FULL SERVER SIDE CLOSURE (verified in a scratch container, not applied): grant the user only a
-        view created by the admin with DEFINER = posthog SQL SECURITY DEFINER whose WHERE is
-        project_id = toUInt32(getSetting('SQL_project_id')) (create it after SET SQL_project_id = 0 in the
-        same session), and nothing on posthog.events. Then mergeTreeIndex, merge and view on events fail
-        with ACCESS_DENIED, mergeTreeIndex on the view fails (it is not a MergeTree), the index still
-        prunes, and a missing setting still fails with Code 115. It needs a migration, a changed grant and
-        a changed reader table name, so it is a Milestone 3.2 decision.
+        Closed on the server (verified on 25.8, also after a server restart): direct reads of
+        posthog.events, mergeTreeIndex('posthog','events') (and mergeTreeProjection), merge() and view()
+        over posthog.events all fail with ACCESS_DENIED (there is no grant); mergeTreeIndex on the view
+        fails (it is not a MergeTree); a read without SQL_project_id fails; the old analyzer
+        (enable_analyzer = 0) changes none of this; the table functions remote, cluster, url, file, s3 ...
+        fail without the SOURCES/REMOTE grant, and input, executable, dictionary, loop fail without CREATE
+        TEMPORARY TABLE; every other table has no grant. Needs no lint to be safe.
+        NOT closed on the server (only the ProjectScopedReader lint and a typed-parameter discipline):
+        `readonly=2` lets this user change settings, and a `const` constraint on SQL_project_id is
+        impossible because it would also block the reader's own URL argument. So SQL that contains
+        `SETTINGS SQL_project_id = <other id>` overrides the filter for that query (the integration test in
+        tests/Feature/ClickHouseTenantIsolationTest.php pins this). The filter therefore protects against
+        BUGS in query builders (forgotten filter, OR, UNION arm, a comment hiding a placeholder), NOT
+        against SQL injection. Injection is prevented by typed {name:Type} parameters (no string literals
+        in builder SQL), builder identifiers from allow lists, and the ProjectScopedReader lint (no
+        SETTINGS, semicolon, comments, quotes, deny listed table functions or direct table names; caller
+        settings starting with SQL_ are refused). Never let user text become SQL text.
+        A way to close even that was seen in a scratch container but is NOT applied: a view filtering on
+        getClientHTTPHeader('X-Project-Id') with `allow_get_client_http_header` pinned in this profile
+        (SQL cannot change an HTTP header; it also prunes and fails closed without the header). It needs
+        header support in the client, so it is a possible follow-up, not part of this design.
 
-        WHY ONLY `events` (least privilege)
-        The scoped reader's contract covers `events` only. `events_errors` holds the RAW payloads of any
-        project and has no project_id column; `kafka_events` is direct-select blocked anyway;
-        `schema_migrations` is needless. A table created later must NOT become readable automatically,
-        so the grant names the table instead of using posthog.*. Each new readable table is one more
-        <query> line below (for example Milestone 4 will add `person_distinct_ids`) and needs
+        DRIFT
+        The view lists the columns of `events` explicitly (SELECT * would skip the MATERIALIZED ones). ALTER
+        of events: ADD COLUMN leaves the view silently WITHOUT the new column, DROP/RENAME of a viewed column
+        makes the view fail when read, a changed type stays stale in the view metadata. A migration that
+        alters `events` must recreate the view (`CREATE OR REPLACE VIEW`, keeping DEFINER and the WHERE) and
+        update ProjectScopedReader::COLUMNS; the opt-in test 'keeps ProjectScopedReader::COLUMNS equal to
+        the real columns of posthog.events AND of the scoped view' fails loudly otherwise.
+
+        WHY ONLY THE VIEW (least privilege)
+        The scoped reader's contract covers events only, through the view. `events_errors` holds the RAW
+        payloads of any project and has no project_id column; `kafka_events` is direct-select blocked
+        anyway; `schema_migrations` is needless. A table created later must NOT become readable
+        automatically, so the grant names the view instead of using posthog.*. Each new readable relation
+        is one more <query> line below (for example Milestone 4 will add one for `person_distinct_ids`) and
+        needs
             docker compose up -d - -force-recreate clickhouse
-        (a new readable table also needs its own row policy `filter` under <databases>, otherwise it would
-        be readable for every project).
+        (a new readable relation also needs its own DEFINER view or its own row policy `filter` under
+        <databases>, otherwise it would be readable for every project).
         `capture:status` reads `events_errors` and `system.*` with the ADMIN client, so it is unaffected.
 
         NEVER add SOURCES, CREATE TEMPORARY TABLE or INTROSPECTION grants. `readonly=2` still allows
@@ -145,6 +149,13 @@
         XML comments cannot contain two consecutive hyphens, so long options below are written with a
         space after the first hyphen: read '- -force-recreate' as two hyphens followed by force-recreate.
 
+        ROLLOUT ORDER (existing volume)
+        1. docker compose up -d - -force-recreate clickhouse   (new grant: the view)
+        2. the app container runs `clickhouse:migrate` at every start (docker/start-app.sh), which applies
+           002_scoped_events_view.sql; or run `docker compose exec -T app php artisan clickhouse:migrate`.
+        Until step 2 the read-only user cannot read events (the view does not exist yet); capture is
+        unaffected. A fresh volume gets both automatically.
+
         HOW TO APPLY
         This is a SINGLE-FILE bind mount, which follows the inode. Editing the file in place (sed -i,
         most editors) or `git pull` / checkout (unlink + create) is NOT picked up by
@@ -212,13 +223,13 @@
                 <ip>::/0</ip>
             </networks>
             <grants>
-                <query>GRANT SELECT ON posthog.events</query>
+                <query>GRANT SELECT ON posthog.project_events_v</query>
             </grants>
             <databases>
                 <posthog>
-                    <events>
+                    <project_events_v>
                         <filter>project_id = toUInt32(getSetting('SQL_project_id'))</filter>
-                    </events>
+                    </project_events_v>
                 </posthog>
             </databases>
         </posthog_ro>

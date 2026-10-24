@@ -1,10 +1,14 @@
 <?php
 
+use App\Infrastructure\ClickHouse\ClickHouseMigrator;
+use App\Infrastructure\ClickHouse\ProjectScopedReader;
+
 /*
- * Offline guard for docker/clickhouse/users.d/20-readonly-user.xml: every table the read-only user may
- * SELECT from needs its own row policy that filters on SQL_project_id. A grant added without a policy would
- * make that table readable for EVERY project (the server only fails closed for tables that HAVE a policy).
- * scripts/check-readonly-user.sh checks the same thing against a running server.
+ * Offline guard for docker/clickhouse/users.d/20-readonly-user.xml: the read-only user may SELECT only from
+ * the DEFINER view posthog.project_events_v and from NOTHING ELSE (above all not from posthog.events, whose
+ * table functions such as mergeTreeIndex skip row policies), and every relation it may select from needs its
+ * own row policy that filters on SQL_project_id. scripts/check-readonly-user.sh checks the same thing
+ * against a running server; the opt-in clickhouse group checks the view against the real table.
  */
 
 function readOnlyUserXml(): SimpleXMLElement
@@ -16,7 +20,7 @@ function readOnlyUserXml(): SimpleXMLElement
     return $xml;
 }
 
-/** @return list<string> table names of every `GRANT SELECT ON posthog.<table>` of posthog_ro */
+/** @return list<string> relation names of every `GRANT SELECT ON posthog.<name>` of posthog_ro */
 function grantedTables(SimpleXMLElement $xml): array
 {
     $tables = [];
@@ -32,6 +36,13 @@ function grantedTables(SimpleXMLElement $xml): array
 
     return $tables;
 }
+
+it('grants posthog_ro exactly the scoped view and nothing on posthog.events', function () {
+    $tables = grantedTables(readOnlyUserXml());
+
+    expect($tables)->toBe([ProjectScopedReader::VIEW])
+        ->and($tables)->not->toContain('events');
+});
 
 it('has a SQL_project_id row policy for every table posthog_ro may select from', function () {
     $xml = readOnlyUserXml();
@@ -65,4 +76,30 @@ it('mounts the config.d file next to the users.d file in docker-compose.yml', fu
 
     expect($compose)->toContain('source: ./docker/clickhouse/config.d/10-custom-settings.xml')
         ->and($compose)->toContain('target: /etc/clickhouse-server/config.d/10-custom-settings.xml');
+});
+
+it('defines the scoped view in migration 002 as a DEFINER view over events with the SQL_project_id filter', function () {
+    $sql = (string) file_get_contents(base_path('database/clickhouse/migrations/002_scoped_events_view.sql'));
+    // comments dropped the way the migrator does
+    [$statement] = ClickHouseMigrator::statements($sql);
+    $flat = preg_replace('/\s+/', ' ', $statement);
+
+    expect(ClickHouseMigrator::statements($sql))->toHaveCount(1)
+        ->and($flat)->toContain('CREATE VIEW IF NOT EXISTS '.ProjectScopedReader::VIEW)
+        ->and($flat)->toContain('DEFINER = CURRENT_USER SQL SECURITY DEFINER')
+        ->and($flat)->toContain("WHERE project_id = toUInt32(getSetting('SQL_project_id'))")
+        ->and($flat)->toContain('FROM events');
+
+    // the view lists exactly ProjectScopedReader::COLUMNS (no SELECT *: it would skip MATERIALIZED columns)
+    preg_match('/AS SELECT (.+?) FROM events/', $flat, $m);
+    $columns = array_map('trim', explode(',', $m[1] ?? ''));
+    expect($columns)->toBe(ProjectScopedReader::COLUMNS);
+});
+
+it('keeps ProjectScopedReader::COLUMNS equal to the column names of CREATE TABLE events in migration 001', function () {
+    $sql = (string) file_get_contents(base_path('database/clickhouse/migrations/001_events.sql'));
+    preg_match('/CREATE TABLE IF NOT EXISTS events \((.*?)\) ENGINE = ReplacingMergeTree/s', $sql, $m);
+    preg_match_all('/^\s{4}(\w+) /m', $m[1] ?? '', $names);
+
+    expect($names[1])->toEqualCanonicalizing(ProjectScopedReader::COLUMNS);
 });

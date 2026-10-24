@@ -6,7 +6,7 @@ use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
-const SCOPED_PREFIX = 'WITH project_events AS (SELECT uuid, project_id, event, distinct_id, properties, timestamp, created_at, current_url, browser, country_code FROM posthog.events WHERE project_id = {project_id:UInt32}) ';
+const SCOPED_PREFIX = 'WITH project_events AS (SELECT uuid, project_id, event, distinct_id, properties, timestamp, created_at, current_url, browser, country_code FROM posthog.project_events_v) ';
 
 beforeEach(function () {
     $this->reader = new ProjectScopedReader(
@@ -31,7 +31,7 @@ it('prepends the project_events CTE itself and sends the builder sql after it', 
     Http::assertSent(fn (Request $r) => $r->body() === SCOPED_PREFIX.'SELECT count() AS n FROM project_events');
 });
 
-it('injects project_id as a bound param and as the SQL_project_id setting', function () {
+it('injects the project id only as the SQL_project_id setting (the view filters, no bound param)', function () {
     Http::fake(['*' => Http::response('{"data":[]}')]);
 
     $this->reader->select(42, 'SELECT count() FROM project_events');
@@ -39,7 +39,7 @@ it('injects project_id as a bound param and as the SQL_project_id setting', func
     Http::assertSent(function (Request $r) {
         $q = scopedQuery($r);
 
-        return $q['param_project_id'] === '42' && $q['SQL_project_id'] === '42';
+        return $q['SQL_project_id'] === '42' && ! array_key_exists('param_project_id', $q);
     });
 });
 
@@ -66,7 +66,7 @@ it('lets a builder use subqueries, UNION ALL, GROUP BY and typed params over pro
         $q = scopedQuery($r);
 
         return $r->body() === SCOPED_PREFIX.$sql
-            && $q['param_project_id'] === '7' && $q['param_a'] === 'x' && $q['param_b'] === 'y'
+            && $q['param_a'] === 'x' && $q['param_b'] === 'y'
             && $q['max_execution_time'] === '5' && $q['SQL_project_id'] === '7';
     });
 });
@@ -108,8 +108,8 @@ it('rejects bypass attempts in builder sql and sends nothing', function (string 
     'bare events upper case' => ['SELECT * FROM EVENTS', 'events'],
     'events in a join' => ['SELECT 1 FROM project_events a JOIN events b ON a.uuid = b.uuid', 'events'],
     'events in a subquery' => ['SELECT 1 FROM project_events WHERE uuid IN (SELECT uuid FROM events)', 'events'],
-    'project_id placeholder' => ['SELECT 1 FROM project_events WHERE project_id = {project_id:UInt32}', '{project_id'],
-    'project_id placeholder with other type' => ['SELECT {project_id:UInt64}', '{project_id'],
+    'the scoped view directly' => ['SELECT 1 FROM project_events_v', 'project_events_v'],
+    'the scoped view upper case' => ['SELECT 1 FROM PROJECT_EVENTS_V', 'project_events_v'],
     'backtick identifier' => ['SELECT 1 FROM `project_events`', 'backtick'],
     'quoted identifier' => ['SELECT 1 FROM "project_events"', 'double quote'],
     // string literals: names could be assembled with concat, values belong in {name:Type} params
@@ -156,18 +156,11 @@ it('does not reject words that merely contain a forbidden word', function () {
     Http::assertSentCount(1);
 });
 
-it('has an explicit column list that matches the CTE and excludes nothing the builders need', function () {
+it('has an explicit column list that matches the CTE (over the scoped view) and excludes nothing the builders need', function () {
     expect(ProjectScopedReader::COLUMNS)->toBe([
         'uuid', 'project_id', 'event', 'distinct_id', 'properties', 'timestamp', 'created_at', 'current_url', 'browser', 'country_code',
-    ])->and(ProjectScopedReader::cte())->not->toContain('*');
-});
-
-it('rejects a caller param named project_id', function () {
-    Http::fake(['*' => Http::response('{"data":[]}')]);
-
-    expect(fn () => $this->reader->select(1, 'SELECT 1 FROM project_events', ['project_id' => 2]))
-        ->toThrow(InvalidArgumentException::class, 'project_id');
-    Http::assertNothingSent();
+    ])->and(ProjectScopedReader::cte())->not->toContain('*')
+        ->and(ProjectScopedReader::cte())->toContain('FROM posthog.project_events_v)');
 });
 
 it('rejects caller settings that start with SQL_ in any case', function (string $name) {
@@ -236,7 +229,7 @@ it('type-hints the ClickHouseReads interface and works with any implementation',
     expect($rows)->toBe([['n' => 9]])
         ->and($fake->calls)->toBe([[
             SCOPED_PREFIX.'SELECT 1 FROM project_events',
-            ['project_id' => 5, 'a' => 1],
+            ['a' => 1],
             ['max_threads' => 2, 'log_comment' => 'project:5', 'SQL_project_id' => 5],
             9,
         ]])

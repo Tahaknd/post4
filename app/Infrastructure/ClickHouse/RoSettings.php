@@ -26,7 +26,7 @@ final class RoSettings
     public const LOG_COMMENT = 'log_comment';
 
     /**
-     * Custom setting read by the row policy on posthog.events (tenant isolation, server side). Only
+     * Custom setting read by the DEFINER view posthog.project_events_v and its row policy (tenant isolation, server side). Only
      * ProjectScopedReader sets it; the value must be an integer 1..4294967295 (checked in
      * ReadOnlyClickHouseClient). A query without it FAILS on the server (fail-closed).
      */

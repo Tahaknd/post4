@@ -5,9 +5,10 @@
 
         WHAT
         Declares `SQL_` as a custom settings prefix, so a query may carry a setting named SQL_project_id.
-        The read-only user's ROW POLICY on posthog.events (20-readonly-user.xml, `filter` under
-        <databases>) reads it with getSetting('SQL_project_id'). Without this line the server rejects
-        the setting name as unknown and the policy cannot be defined.
+        The DEFINER view posthog.project_events_v (database/clickhouse/migrations/002_scoped_events_view.sql)
+        and the row policy on it (20-readonly-user.xml, `filter` under <databases>) read it with
+        getSetting('SQL_project_id'). Without this line the server rejects the setting name as unknown and
+        neither can be defined (the migrator also sends SQL_project_id=0 while creating the view).
 
         WHY NOT ANOTHER PREFIX
         ClickHouse reserves a few prefixes for itself; SQL_ is the documented one for application
@@ -21,14 +22,14 @@
         LIMITATION (read this before trusting it)
         `readonly=2` lets the read-only user change settings, and a `const` constraint on SQL_project_id
         is impossible because it would block the reader's own URL argument. So a query that contains
-        `SETTINGS SQL_project_id = <other id>` can override the policy for itself. The row policy
-        therefore protects against BUGS in the query builders (a forgotten filter, an OR, a UNION arm, a
-        comment hiding the placeholder), NOT against SQL injection. Injection is prevented elsewhere:
-        user values only travel as typed {name:Type} parameters, builder identifiers come from allow
-        lists, and ProjectScopedReader lints the builder SQL (no SETTINGS, no semicolon, no comments,
-        no direct table names) and refuses caller settings that start with SQL_. A second hole is closed
-        only by that lint as well: mergeTreeIndex() skips the row policy and leaks primary key values of
-        every project (see the header of users.d/20-readonly-user.xml for the full honest list).
+        `SETTINGS SQL_project_id = <other id>` can override the filter for itself. The filter therefore
+        protects against BUGS in the query builders (a forgotten filter, an OR, a UNION arm, a comment
+        hiding the placeholder), NOT against SQL injection. Injection is prevented elsewhere: user values
+        only travel as typed {name:Type} parameters, builder identifiers come from allow lists, and
+        ProjectScopedReader lints the builder SQL (no SETTINGS, no semicolon, no comments, no direct table
+        names) and refuses caller settings that start with SQL_. The mergeTreeIndex() hole is closed on
+        the server (the user has no grant on posthog.events, only on the view); see the header of
+        users.d/20-readonly-user.xml for the full honest list.
 
         NOTE ON COMMANDS
         XML comments cannot contain two consecutive hyphens, so long options below are written with a
