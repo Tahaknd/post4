@@ -25,6 +25,12 @@ final class InsightFailed extends RuntimeException
         return $this->kind->isRetryable();
     }
 
+    /** For a Retry-After header: 3 seconds when busy, null otherwise. */
+    public function retryAfterSeconds(): ?int
+    {
+        return $this->kind->retryAfterSeconds();
+    }
+
     public function isBusy(): bool
     {
         return $this->kind->isBusy();

@@ -16,7 +16,9 @@ use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
+use Illuminate\Contracts\Cache\Store;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Tests\Support\FailingCacheStore;
 
@@ -267,7 +269,9 @@ it('resolves from the container on the read-only client', function () {
     $runner = app(InsightRunner::class);
     $reader = (new ReflectionProperty(InsightRunner::class, 'reader'))->getValue($runner);
 
-    expect($reader)->toBeInstanceOf(ProjectScopedReader::class);
+    expect($reader)->toBeInstanceOf(ProjectScopedReader::class)
+        // no store injected: the runner resolves config('insights.cache_store') itself, not the default store
+        ->and((new ReflectionProperty(InsightRunner::class, 'cache'))->getValue($runner))->toBeNull();
 });
 
 it('keeps a breakdown result ordered: top series by size, other last', function () {
@@ -326,5 +330,101 @@ describe('row cap', function () {
 
         expect(fn () => runnerOn(scriptedClient([cells(TrendsQuery::MAX_ROWS + 1)]), new Repository($store))->trends(1, $q))->toThrow(InsightFailed::class)
             ->and($store->get(InsightRunner::cacheKey(1, $q)))->toBeNull();
+    });
+});
+
+describe('cache store and outage cost', function () {
+    it('skips the cache write when the read already failed (one timeout per outage, not two)', function () {
+        $store = new class implements Store
+        {
+            public array $calls = [];
+
+            public function get($key)
+            {
+                $this->calls[] = 'get';
+                throw new RuntimeException('timeout');
+            }
+
+            public function put($key, $value, $seconds)
+            {
+                $this->calls[] = 'put';
+                throw new RuntimeException('timeout');
+            }
+
+            public function many(array $keys) {}
+
+            public function putMany(array $values, $seconds) {}
+
+            public function increment($key, $value = 1) {}
+
+            public function decrement($key, $value = 1) {}
+
+            public function forever($key, $value) {}
+
+            public function forget($key) {}
+
+            public function flush() {}
+
+            public function touch($key, $seconds) {}
+
+            public function getPrefix()
+            {
+                return '';
+            }
+        };
+
+        $result = runnerOn(scriptedClient([dayRows()]), new Repository($store))->trends(1, def());
+
+        expect($result->series[0]['data'])->toBe([4, 0, 9])->and($store->calls)->toBe(['get']);
+    });
+
+    it('still writes when only the write can fail later (read worked)', function () {
+        $store = new ArrayStore;
+
+        runnerOn(scriptedClient([dayRows()]), new Repository($store))->trends(1, def());
+
+        expect($store->get(InsightRunner::cacheKey(1, def())))->toBeArray();
+    });
+
+    it('resolves the store from config insights.cache_store when none is injected', function () {
+        config(['insights.cache_store' => 'array']);
+        $client = scriptedClient([dayRows(), dayRows('x')]);
+        $runner = new InsightRunner(new ProjectScopedReader($client), new TrendsSqlBuilder);
+
+        $runner->trends(77, def());
+        $runner->trends(77, def());
+
+        expect($client->calls)->toHaveCount(1);
+        Cache::store('array')->flush();
+    });
+
+    it('defaults to the redis store and reads the TTL from INSIGHTS_CACHE_TTL_SECONDS', function () {
+        $config = require base_path('config/insights.php');
+
+        expect(file_get_contents(base_path('config/insights.php')))->toContain("env('INSIGHTS_CACHE_STORE', 'redis')")->toContain("env('INSIGHTS_CACHE_TTL_SECONDS', 60)")
+            ->and($config['cache_store'])->toBe('redis')
+            ->and(file_get_contents(base_path('.env.example')))->toContain('INSIGHTS_CACHE_STORE')->toContain('INSIGHTS_CACHE_TTL_SECONDS');
+    });
+});
+
+describe('failure levels and retry-after', function () {
+    it('logs misconfiguration kinds at error, busy at info, the rest at warning', function (int $code, string $level) {
+        Log::spy();
+        $client = scriptedClient([ClickHouseException::fromResponse("Code: {$code}. DB::Exception: x", 500)]);
+
+        try {
+            runnerOn($client)->trends(1, def());
+        } catch (InsightFailed) {
+        }
+
+        Log::shouldHaveReceived('log')->withArgs(fn ($l, $m) => $l === $level && $m === 'insight query failed')->once();
+    })->with([
+        'constraint' => [452, 'error'], 'auth' => [516, 'error'], 'busy' => [202, 'info'], 'timeout' => [159, 'warning'], 'memory' => [241, 'warning'], 'unknown' => [60, 'warning'],
+    ]);
+
+    it('offers a retry-after of 3 seconds for busy and none for the rest', function () {
+        foreach (ClickHouseErrorKind::cases() as $kind) {
+            expect((new InsightFailed($kind))->retryAfterSeconds())->toBe($kind === ClickHouseErrorKind::Busy ? 3 : null);
+        }
     });
 });

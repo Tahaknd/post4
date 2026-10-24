@@ -72,6 +72,12 @@ enum ClickHouseErrorKind: string
         return $this === self::Busy || $this === self::Unavailable;
     }
 
+    /** Seconds a client should wait before trying again (Retry-After), null when waiting does not help. */
+    public function retryAfterSeconds(): ?int
+    {
+        return $this === self::Busy ? 3 : null;
+    }
+
     /** True for the concurrency limit (202): an HTTP layer should answer 429/503 with Retry-After. */
     public function isBusy(): bool
     {

@@ -11,6 +11,7 @@ use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\RoSettings;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Cache as CacheFacade;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
@@ -22,13 +23,14 @@ use Throwable;
  * the SQL_project_id setting), never through a ClickHouse client. A ClickHouse failure becomes
  * {@see InsightFailed} with a safe message and a retry/busy flag; the raw server text only goes to the log.
  *
- * Cache: key = project id + sha256 of the canonical definition (TrendsQuery::hash(), versioned), TTL from
- * config('insights.cache_ttl_seconds') (0 = no cache), only SUCCESSFUL results are stored, errors never. The default cache
- * store is Redis on the `cache` connection (bounded connect/read timeouts, config/database.php), so a frozen
- * Redis fails quickly; any cache failure FAILS OPEN: the query runs live and a throttled warning is logged
- * (the convention of LimiterOutage). Entries are never flushed (`Cache::flush()` would wipe the shared Redis
- * database); they expire. No stampede protection: concurrent identical misses each run the query, which the
- * profile's max_concurrent_queries_for_user (3) bounds and maps to a "busy" error.
+ * Cache: store `config('insights.cache_store')` (default `redis`, independent of CACHE_STORE), key = project id +
+ * sha256 of the canonical definition (TrendsQuery::hash(), versioned), TTL `config('insights.cache_ttl_seconds')`
+ * (0 = no cache), only SUCCESSFUL results are stored, errors never. The Redis `cache` connection has bounded
+ * connect/read timeouts (config/database.php), so a frozen Redis fails quickly; any cache failure FAILS OPEN:
+ * the query runs live, the write is skipped (one outage costs one timeout, not two) and a throttled warning is
+ * logged (the convention of LimiterOutage). Entries are never flushed (`Cache::flush()` would wipe the shared
+ * Redis database); they expire. No stampede protection: concurrent identical misses each run the query, which
+ * the profile's max_concurrent_queries_for_user (3) bounds and maps to a "busy" error.
  */
 final class InsightRunner
 {
@@ -40,7 +42,8 @@ final class InsightRunner
     public function __construct(
         private readonly ProjectScopedReader $reader,
         private readonly TrendsSqlBuilder $builder,
-        private readonly Cache $cache,
+        /** Tests inject a store; null resolves config('insights.cache_store') on first use. */
+        private readonly ?Cache $cache = null,
     ) {}
 
     /** @throws InsightFailed */
@@ -53,13 +56,16 @@ final class InsightRunner
 
         $key = self::cacheKey($projectId, $query);
 
-        $cached = $this->cacheGet($key);
+        $cached = $this->cacheGet($key, $cacheDown);
         if ($cached !== null) {
             return $cached;
         }
 
         $result = $this->run($projectId, $query);
-        $this->cachePut($key, $result);
+        // One outage costs one timeout: when the read already failed, do not wait for a second failing write.
+        if (! $cacheDown) {
+            $this->cachePut($key, $result);
+        }
 
         return $result;
     }
@@ -102,7 +108,14 @@ final class InsightRunner
     private function logFailure(int $projectId, TrendsQuery $query, ClickHouseErrorKind $kind, Throwable $e): void
     {
         // The raw text may echo query fragments and parameter values: logs only, truncated, never the UI.
-        Log::log($kind->isBusy() ? 'info' : 'warning', 'insight query failed', [
+        // Busy is routine back pressure (info). A constraint violation or a failed authentication is OUR
+        // misconfiguration (error): the user cannot fix it and somebody has to look.
+        $level = match ($kind) {
+            ClickHouseErrorKind::Busy => 'info',
+            ClickHouseErrorKind::ConstraintViolation, ClickHouseErrorKind::AuthenticationFailed => 'error',
+            default => 'warning',
+        };
+        Log::log($level, 'insight query failed', [
             'project_id' => $projectId,
             'definition' => substr($query->hash(), 0, 12),
             'kind' => $kind->value,
@@ -111,11 +124,19 @@ final class InsightRunner
         ]);
     }
 
-    private function cacheGet(string $key): ?TrendsResult
+    private function store(): Cache
     {
+        return $this->cache ?? CacheFacade::store((string) config('insights.cache_store'));
+    }
+
+    private function cacheGet(string $key, ?bool &$down): ?TrendsResult
+    {
+        $down = false;
+
         try {
-            return TrendsResult::fromArray($this->cache->get($key));
+            return TrendsResult::fromArray($this->store()->get($key));
         } catch (Throwable $e) {
+            $down = true;
             $this->warnCache($e);
 
             return null;
@@ -125,7 +146,7 @@ final class InsightRunner
     private function cachePut(string $key, TrendsResult $result): void
     {
         try {
-            $this->cache->put($key, $result->toArray(), (int) config('insights.cache_ttl_seconds'));
+            $this->store()->put($key, $result->toArray(), (int) config('insights.cache_ttl_seconds'));
         } catch (Throwable $e) {
             $this->warnCache($e);
         }

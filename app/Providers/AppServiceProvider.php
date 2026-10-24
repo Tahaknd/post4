@@ -5,6 +5,8 @@ namespace App\Providers;
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\PayloadDecoder;
+use App\Domain\Insights\InsightRunner;
+use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
@@ -48,6 +50,13 @@ class AppServiceProvider extends ServiceProvider
             (int) config('clickhouse.readonly.select_retry_backoff_ms'),
         ));
         $this->app->when(ProjectScopedReader::class)->needs(ClickHouseReads::class)->give(ReadOnlyClickHouseClient::class);
+
+        // Explicit: autowiring would inject the DEFAULT cache store into the nullable cache argument, while the
+        // runner must use config('insights.cache_store').
+        $this->app->singleton(InsightRunner::class, fn ($app) => new InsightRunner(
+            $app->make(ProjectScopedReader::class),
+            $app->make(TrendsSqlBuilder::class),
+        ));
 
         $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
             $app->make(ClickHouseClient::class),
