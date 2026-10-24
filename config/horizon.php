@@ -100,6 +100,8 @@ return [
 
     'waits' => [
         'redis:default' => 60,
+        // A purge waits on a ClickHouse mutation and releases itself every 30 s, so a few minutes is normal.
+        'redis:maintenance' => 600,
     ],
 
     /*
@@ -213,6 +215,22 @@ return [
             'timeout' => 60,
             'nice' => 0,
         ],
+        // Maintenance jobs (App\Jobs\PurgeProjectEvents) run on their own queue and supervisor, one process, so a
+        // long purge never holds up (or is held up by) the default queue. Keep the job timeout below the Redis
+        // queue's retry_after (90 s).
+        'supervisor-maintenance' => [
+            'connection' => 'redis',
+            'queue' => ['maintenance'],
+            'balance' => 'simple',
+            'maxProcesses' => 1,
+            'minProcesses' => 1,
+            'maxTime' => 3600,
+            'maxJobs' => 1000,
+            'memory' => 128,
+            'tries' => 1,
+            'timeout' => 60,
+            'nice' => 0,
+        ],
     ],
 
     'environments' => [
@@ -222,11 +240,17 @@ return [
                 'balanceMaxShift' => 1,
                 'balanceCooldown' => 3,
             ],
+            'supervisor-maintenance' => [
+                'maxProcesses' => 1,
+            ],
         ],
 
         'local' => [
             'supervisor-1' => [
                 'maxProcesses' => 3,
+            ],
+            'supervisor-maintenance' => [
+                'maxProcesses' => 1,
             ],
         ],
 
@@ -235,6 +259,9 @@ return [
                 'maxProcesses' => (int) env('HORIZON_MAX_PROCESSES', 2),
                 'balanceMaxShift' => 1,
                 'balanceCooldown' => 3,
+            ],
+            'supervisor-maintenance' => [
+                'maxProcesses' => 1,
             ],
         ],
     ],

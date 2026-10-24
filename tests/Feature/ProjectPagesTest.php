@@ -1,6 +1,6 @@
 <?php
 
-use App\Actions\Projects\DeleteProject;
+use App\Actions\Projects\QueueEventsPurge;
 use App\Domain\Capture\ProjectResolver;
 use App\Http\Middleware\HandleInertiaRequests;
 use App\Jobs\PurgeProjectEvents;
@@ -304,7 +304,7 @@ describe('delete', function () {
         expect(Project::whereKey($project->id)->exists())->toBeFalse()
             ->and(Project::whereKey($other->id)->exists())->toBeTrue();
         Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 1);
-        Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 2 && $job->delay === DeleteProject::SECOND_PASS_DELAY_SECONDS);
+        Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 2 && $job->delay === QueueEventsPurge::SECOND_PASS_DELAY_SECONDS);
     });
 
     it('refuses a missing or wrong confirmation on the server and deletes nothing', function (?string $typed) {

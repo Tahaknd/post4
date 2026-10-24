@@ -5,6 +5,7 @@ use App\Models\Project;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Tests\Support\ProjectCache;
+use Tests\Support\SplitOutput;
 
 it('rotates the key so the old one stops resolving even when cached', function () {
     $project = Project::factory()->create();
@@ -38,43 +39,35 @@ it('mentions the new key in the normal output', function () {
     expect(Artisan::output())->toContain($project->fresh()->api_key);
 });
 
-it('fails for an unknown project id', function () {
-    $this->artisan('project:rotate-key', ['id' => 999999])->assertFailed();
+it('exits 3 for an unknown project id', function () {
+    $this->artisan('project:rotate-key', ['id' => 999999])->assertExitCode(3);
 });
 
 it('rejects a non-numeric project id without touching the database', function (string $id) {
     DB::enableQueryLog();
 
-    expect(Artisan::call('project:rotate-key', ['id' => $id]))->toBe(1);
+    expect(Artisan::call('project:rotate-key', ['id' => $id]))->toBe(2);
 
     expect(Artisan::output())->toContain('Invalid project id.')
         ->and(DB::getQueryLog())->toBeEmpty();
 })->with(['letters' => 'abc', 'negative' => '-1', 'decimal' => '1.5', 'mixed' => '12a', 'whitespace' => ' 1']);
 
 it('rejects an id too long for a bigint', function () {
-    expect(Artisan::call('project:rotate-key', ['id' => '99999999999999999999']))->toBe(1);
+    expect(Artisan::call('project:rotate-key', ['id' => '99999999999999999999']))->toBe(2);
 
     expect(Artisan::output())->toContain('Invalid project id.');
 });
 
-it('still prints the new key when the cache cannot be cleared', function () {
+it('still prints the new key on stdout and the cache warning on stderr when the cache cannot be cleared', function () {
     $project = Project::factory()->create();
     $old = $project->api_key;
     ProjectCache::breakStore();
+    $out = new SplitOutput;
 
-    expect(Artisan::call('project:rotate-key', ['id' => $project->id]))->toBe(0);
+    expect(Artisan::call('project:rotate-key', ['id' => $project->id, '--key-only' => true], $out))->toBe(0);
 
     $new = $project->fresh()->api_key;
     expect($new)->not->toBe($old)
-        ->and(Artisan::output())->toContain($new);
-});
-
-it('derives the cache warning duration from the resolver TTL', function () {
-    $project = Project::factory()->create();
-    ProjectCache::breakStore();
-
-    expect(Artisan::call('project:rotate-key', ['id' => $project->id]))->toBe(0);
-
-    // The console wraps long lines: compare without line breaks.
-    expect(preg_replace('/\s+/', ' ', Artisan::output()))->toContain('up to '.ProjectResolver::POSITIVE_TTL_SECONDS.' seconds');
+        ->and($out->stdout())->toBe($new."\n")
+        ->and(preg_replace('/\s+/', ' ', $out->stderr()))->toContain('up to '.ProjectResolver::POSITIVE_TTL_SECONDS.' seconds');
 });

@@ -53,7 +53,7 @@ it('rejects --json together with --key-only without creating anything', function
         ->and(Project::count())->toBe(0);
 });
 
-it('keeps the default and --key-only outputs unchanged', function () {
+it('prints the English default line and, with --key-only, just the key (the output language changed from Turkish on purpose)', function () {
     expect(Artisan::call('project:create', ['name' => 'A']))->toBe(0);
     $project = Project::firstOrFail();
     expect(Artisan::output())->toBe("Project #{$project->id} created. API key: {$project->api_key}\n");

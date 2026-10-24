@@ -3,6 +3,7 @@
 use App\Actions\Projects\AddProjectMember;
 use App\Actions\Projects\CreateProject;
 use App\Actions\Projects\DeleteProject;
+use App\Actions\Projects\QueueEventsPurge;
 use App\Actions\Projects\RemoveProjectMember;
 use App\Actions\Projects\RotateProjectKey;
 use App\Domain\Capture\ProjectResolver;
@@ -164,26 +165,29 @@ describe('DeleteProject', function () {
         $project->users()->attach(User::factory()->create());
         app(ProjectResolver::class)->resolve($project->api_key);
 
-        app(DeleteProject::class)->handle($project);
+        $result = app(DeleteProject::class)->handle($project);
 
-        expect(Project::whereKey($project->id)->exists())->toBeFalse()
+        expect($result->deleted)->toBeTrue()->and($result->purgeRequested)->toBeTrue()->and($result->purgeQueued)->toBeTrue()
+            ->and($result->purgeFailedToQueue())->toBeFalse()
+            ->and(Project::whereKey($project->id)->exists())->toBeFalse()
             ->and(Project::whereKey($other->id)->exists())->toBeTrue()
             ->and(DB::table('project_user')->count())->toBe(0)
             ->and(ProjectCache::hasPositive($project->api_key))->toBeFalse();
 
         Queue::assertPushed(PurgeProjectEvents::class, 2);
         Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 1 && $job->delay === null);
-        Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 2 && $job->delay === DeleteProject::SECOND_PASS_DELAY_SECONDS);
+        Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 2 && $job->delay === QueueEventsPurge::SECOND_PASS_DELAY_SECONDS);
     });
 
     it('queues nothing when the events are to be kept', function () {
         Queue::fake();
         $project = Project::factory()->create();
 
-        app(DeleteProject::class)->handle($project, purgeEvents: false);
+        $result = app(DeleteProject::class)->handle($project, purgeEvents: false);
 
         Queue::assertNothingPushed();
-        expect(Project::count())->toBe(0);
+        expect(Project::count())->toBe(0)
+            ->and($result->deleted)->toBeTrue()->and($result->purgeRequested)->toBeFalse()->and($result->purgeFailedToQueue())->toBeFalse();
     });
 
     it('queues the purge only after the outermost commit and never on a rollback', function () {
@@ -215,21 +219,28 @@ describe('DeleteProject', function () {
         $project = Project::factory()->create();
         $project->delete();
 
-        app(DeleteProject::class)->handle($project);
+        $result = app(DeleteProject::class)->handle($project);
 
         Queue::assertNothingPushed();
+        expect($result->deleted)->toBeFalse()->and($result->purgeFailedToQueue())->toBeFalse();
     });
 
-    it('still deletes the project when the queue connection is unreachable', function () {
+    it('still deletes the project and reports that the purge was not queued when the queue is unreachable, logging once', function () {
         config(['queue.default' => 'broken', 'queue.connections.broken' => ['driver' => 'redis', 'connection' => 'unreachable']]);
         config(['database.redis.unreachable' => ['host' => '127.0.0.1', 'port' => 1, 'timeout' => 0.2]]);
+        app()->forgetInstance('queue');
+        Queue::swap(app('queue'));
         $project = Project::factory()->create();
         Exceptions::fake();
+        Log::spy();
 
-        app(DeleteProject::class)->handle($project);
+        $result = app(DeleteProject::class)->handle($project);
 
-        expect(Project::whereKey($project->id)->exists())->toBeFalse();
-        Exceptions::assertReportedCount(1);
+        expect(Project::whereKey($project->id)->exists())->toBeFalse()
+            ->and($result->deleted)->toBeTrue()->and($result->purgeQueued)->toBeFalse()->and($result->purgeFailedToQueue())->toBeTrue();
+        // One log line (no report() on top of it), carrying the id and the exception class only.
+        Exceptions::assertNothingReported();
+        Log::shouldHaveReceived('error')->once()->withArgs(fn (string $message, array $context) => array_keys($context) === ['project_id', 'exception'] && $context['project_id'] === $project->id);
     });
 });
 

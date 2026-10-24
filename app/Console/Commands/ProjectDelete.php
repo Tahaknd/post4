@@ -3,37 +3,42 @@
 namespace App\Console\Commands;
 
 use App\Actions\Projects\DeleteProject;
+use App\Actions\Projects\QueueEventsPurge;
+use App\Console\Concerns\ResolvesProjects;
 use App\Domain\Capture\ProjectResolver;
 use App\Models\Project;
 use Illuminate\Console\Command;
 
 class ProjectDelete extends Command
 {
-    /** Exit code for a well-formed API key that matches no project (scripts treat it as "already gone"). */
-    public const NOT_FOUND = 3;
+    use ResolvesProjects;
 
     protected $signature = 'project:delete
         {api_key : API key of the project to delete}
-        {--purge-events : Also delete the project\'s events from ClickHouse (queued; they are kept without this option)}
+        {--keep-events : Keep the project\'s events in ClickHouse (they are deleted too by default)}
         {--force : Skip the confirmation prompt (non-interactive runs never prompt)}';
 
-    protected $description = 'Deletes a project by API key; --purge-events also removes its ClickHouse events. Exit codes: 0 deleted, 1 failure or aborted, 2 invalid key format, 3 unknown key';
+    protected $description = 'Deletes a project by API key and, by default, its ClickHouse events. Exit codes: 0 deleted, 1 failure or aborted, 2 invalid key format, 3 unknown key, 4 deleted but the events purge could not be queued';
 
     protected $help = <<<'HELP'
-Deletes the project with the given API key.
+Deletes the project with the given API key AND, by default, queues the removal of its events from ClickHouse
+(a queue job on the `maintenance` queue, repeated once ten minutes later for events that were still in
+flight; the Horizon worker must be running). This deliberately differs from the original plan, which made
+the purge opt-in: the web UI always purges, and an orphaned event set is unreadable and never wanted.
 
-Without --purge-events the project's events STAY in ClickHouse, orphaned (nothing can read them any more).
-With --purge-events a queue job deletes them (and runs once more ten minutes later for events that were still
-in flight); the Horizon worker must be running for that.
+--keep-events skips the purge. The events then stay in ClickHouse, orphaned, until `project:purge-events {id}`
+or the daily `events:sweep-orphans` removes them.
 
 An interactive run asks for confirmation unless --force is given; a non-interactive run
 (-n/--no-interaction, docker compose exec -T, a pipe) never prompts.
 
 Exit codes (a stable contract for scripts):
-  0  the project was deleted
+  0  the project was deleted (and its events purge was queued, unless --keep-events)
   1  any other failure, or the confirmation was declined
   2  the API key has an invalid format (nothing was looked up)
   3  no project has this API key
+  4  the project WAS deleted but the events purge could not be queued (Redis down): the daily sweeper
+     removes the events, or run project:purge-events
 Errors and warnings go to stderr; stdout carries only the result.
 HELP;
 
@@ -49,7 +54,7 @@ HELP;
             return $this->failWith('Project not found.', self::NOT_FOUND);
         }
 
-        $purge = (bool) $this->option('purge-events');
+        $purge = ! $this->option('keep-events');
 
         if (! $this->option('force')
             && $this->input->isInteractive()
@@ -57,14 +62,19 @@ HELP;
             return $this->failWith('Aborted.', self::FAILURE);
         }
 
-        $deleteProject->handle($project, purgeEvents: $purge);
+        $result = $deleteProject->handle($project, purgeEvents: $purge);
 
         $this->info("Project #{$project->id} deleted.");
 
-        if ($purge) {
-            $this->line('Events purge queued (a second pass follows in '.intdiv(DeleteProject::SECOND_PASS_DELAY_SECONDS, 60).' minutes). The Horizon worker must be running.');
+        $exitCode = self::SUCCESS;
+
+        if (! $purge) {
+            $this->warnOnStderr("Events of project #{$project->id} were KEPT in ClickHouse and are now orphaned. Remove them with: php artisan project:purge-events {$project->id}");
+        } elseif ($result->purgeFailedToQueue()) {
+            $this->getOutput()->getErrorStyle()->error("The project is deleted but the purge of its events could not be queued. Run: php artisan project:purge-events {$project->id} (the daily events:sweep-orphans removes them too).");
+            $exitCode = self::PURGE_NOT_QUEUED;
         } else {
-            $this->getOutput()->getErrorStyle()->warning("Events of project #{$project->id} were KEPT in ClickHouse and are now orphaned. Run project:delete with --purge-events next time to remove them.");
+            $this->line('Events purge queued (a second pass follows in '.intdiv(QueueEventsPurge::SECOND_PASS_DELAY_SECONDS, 60).' minutes). The Horizon worker must be running.');
         }
 
         // The observer already forgot the key but only reports a cache failure; tell the operator,
@@ -73,24 +83,16 @@ HELP;
             $resolver->forget($apiKey);
         } catch (\Throwable $e) {
             // stderr keeps stdout clean for scripts.
-            $this->getOutput()->getErrorStyle()->warning('Could not clear the cached key; it may still be accepted for up to '.ProjectResolver::POSITIVE_TTL_SECONDS.' seconds: '.$e->getMessage());
+            $this->warnOnStderr('Could not clear the cached key; it may still be accepted for up to '.ProjectResolver::POSITIVE_TTL_SECONDS.' seconds: '.$e->getMessage());
         }
 
-        return self::SUCCESS;
+        return $exitCode;
     }
 
-    public function prompt(Project $project, bool $purge): string
+    private function prompt(Project $project, bool $purge): string
     {
         return "Delete project #{$project->id} \"{$project->name}\"? ".($purge
             ? 'Its events will be deleted from ClickHouse too.'
             : 'Its events remain in ClickHouse.');
-    }
-
-    /** Errors go to stderr so stdout stays reserved for results. */
-    private function failWith(string $message, int $exitCode): int
-    {
-        $this->getOutput()->getErrorStyle()->error($message);
-
-        return $exitCode;
     }
 }

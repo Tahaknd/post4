@@ -16,7 +16,7 @@ use PHPUnit\Framework\Assert;
  * The phpunit environment pins CLICKHOUSE_URL to a dead address on purpose, so these helpers never go
  * through the app's clickhouse config: they build their OWN admin and read-only clients from
  * CLICKHOUSE_INTEGRATION_URL and explicit passwords (users `posthog` / `posthog_ro`, database `posthog`).
- * They only ever touch rows of the fixed project ids below (990101-3 tenant tests, 990201-4 trends tests) and delete
+ * They only ever touch rows of the fixed project ids below (990101-3 tenant tests, 990201-4 trends tests, 990501-2 purge tests) and delete
  * exactly those rows afterwards. The ids are FIXED, not random, because the hand-computed expectations name them and
  * the seed starts from a clean slate: run the clickhouse group sequentially (one run at a time against one ClickHouse).
  */
@@ -201,6 +201,26 @@ final class ClickHouseIntegration
         $rows = $this->admin->select('SELECT count() AS n FROM posthog.events WHERE project_id IN ('.self::TREND_A.', '.self::TREND_B.', '.self::TREND_C.', '.self::TREND_D.')');
 
         return (int) $rows[0]['n'];
+    }
+
+    /**
+     * Deletes the rows of the given projects the way the tests everywhere do (an asynchronous lightweight delete,
+     * then polling until the rows are gone), so no test depends on a global mutation state.
+     *
+     * @param  list<int>  $projectIds
+     */
+    public function deleteRowsOf(array $projectIds): void
+    {
+        $ids = implode(', ', array_map('intval', $projectIds));
+        $this->admin->execute("DELETE FROM posthog.events WHERE project_id IN ({$ids})", settings: ['lightweight_deletes_sync' => 0]);
+
+        $deadline = microtime(true) + 30;
+        while ((int) $this->admin->select("SELECT count() AS n FROM posthog.events WHERE project_id IN ({$ids})")[0]['n'] !== 0) {
+            if (microtime(true) > $deadline) {
+                Assert::fail("Rows of projects {$ids} were not deleted within 30 s: remove them by hand");
+            }
+            usleep(200_000);
+        }
     }
 
     /** Fails (never skips) when a CLICKHOUSE_INTEGRATION_* variable is missing. */

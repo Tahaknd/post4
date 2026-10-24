@@ -4,9 +4,10 @@ use App\Jobs\PurgeProjectEvents;
 use Tests\Support\ClickHouseIntegration as CH;
 
 /*
- * The purge job against a real ClickHouse 25.8: the lightweight DELETE, its mutation and the isolation between
- * two projects cannot be tried with a fake. Opt-in (group "clickhouse", see ClickHouseTenantIsolationTest for how
- * to run it). Uses its own fixed project ids and removes whatever it left behind.
+ * The purge job against a real ClickHouse 25.8: the asynchronous lightweight DELETE, its mutation and the isolation
+ * between two projects cannot be tried with a fake. Opt-in (group "clickhouse", see ClickHouseTenantIsolationTest
+ * for how to run it). Uses its own fixed project ids and checks only the mutations that name them, never the
+ * global mutation state of the server.
  */
 
 pest()->group('clickhouse');
@@ -24,16 +25,35 @@ function purgeCount(CH $ch, int $project): int
     return (int) $ch->admin->select("SELECT count() AS n FROM posthog.events WHERE project_id = {$project}")[0]['n'];
 }
 
+/** Unfinished mutations of events that name the project id (the same match the job uses). */
+function pendingMutationsOf(CH $ch, int $project): int
+{
+    return (int) $ch->admin->select(
+        "SELECT count() AS n FROM system.mutations WHERE database = 'posthog' AND table = 'events' AND is_done = 0 AND match(command, {pattern:String})",
+        ['pattern' => '(^|[^0-9])'.$project.'([^0-9]|$)'],
+    )[0]['n'];
+}
+
+/** Runs the job like the worker does: a run may release itself, so run again until it is done (bounded). */
+function runPurge(CH $ch, int $project, int $pass = 1): int
+{
+    $runs = 0;
+    do {
+        $job = (new PurgeProjectEvents($project, $pass))->withFakeQueueInteractions();
+        $job->handle($ch->admin);
+        $runs++;
+    } while (purgeCount($ch, $project) > 0 && $runs < 5);
+
+    return $runs;
+}
+
 beforeEach(function () {
     $this->ch = CH::connect();
-    $this->cleanup = function () {
-        $this->ch->admin->execute('DELETE FROM posthog.events WHERE project_id IN ('.CH::PURGE_A.', '.CH::PURGE_B.')', settings: ['lightweight_deletes_sync' => 2]);
-    };
-    ($this->cleanup)();
+    $this->ch->deleteRowsOf([CH::PURGE_A, CH::PURGE_B]);
 });
 
 afterEach(function () {
-    ($this->cleanup)();
+    $this->ch->deleteRowsOf([CH::PURGE_A, CH::PURGE_B]);
 });
 
 it('removes every row of the purged project, leaves the other project alone and is repeatable', function () {
@@ -43,28 +63,43 @@ it('removes every row of the purged project, leaves the other project alone and 
     expect(purgeCount($this->ch, CH::PURGE_A))->toBe(55)
         ->and(purgeCount($this->ch, CH::PURGE_B))->toBe(25);
 
-    (new PurgeProjectEvents(CH::PURGE_A))->handle($this->ch->admin);
+    runPurge($this->ch, CH::PURGE_A);
 
     expect(purgeCount($this->ch, CH::PURGE_A))->toBe(0)
         ->and(purgeCount($this->ch, CH::PURGE_B))->toBe(25);
 
-    // Every mutation the purge created has finished (it waited for them), and none failed.
-    $mutations = $this->ch->admin->select("SELECT count() AS pending FROM system.mutations WHERE database = 'posthog' AND table = 'events' AND is_done = 0");
-    expect((int) $mutations[0]['pending'])->toBe(0);
+    // The mutation this purge created has finished by now; the other project never had one.
+    $deadline = microtime(true) + 30;
+    while (pendingMutationsOf($this->ch, CH::PURGE_A) > 0 && microtime(true) < $deadline) {
+        usleep(200_000);
+    }
+    expect(pendingMutationsOf($this->ch, CH::PURGE_A))->toBe(0)
+        ->and(pendingMutationsOf($this->ch, CH::PURGE_B))->toBe(0);
 
-    // Idempotent: a second pass over nothing succeeds and still spares the other project.
-    (new PurgeProjectEvents(CH::PURGE_A, pass: 2))->handle($this->ch->admin);
+    // Idempotent: a second pass over nothing succeeds, sends no DELETE and still spares the other project.
+    (new PurgeProjectEvents(CH::PURGE_A, pass: 2))->withFakeQueueInteractions()->handle($this->ch->admin);
     expect(purgeCount($this->ch, CH::PURGE_B))->toBe(25);
+});
+
+it('does not stack a second mutation while the first is pending', function () {
+    seedPurgeRows($this->ch, CH::PURGE_A, 30);
+    $before = (int) $this->ch->admin->select("SELECT count() AS n FROM system.mutations WHERE database = 'posthog' AND table = 'events' AND match(command, '(^|[^0-9])".CH::PURGE_A."([^0-9]|\$)')")[0]['n'];
+
+    runPurge($this->ch, CH::PURGE_A);
+
+    $created = (int) $this->ch->admin->select("SELECT count() AS n FROM system.mutations WHERE database = 'posthog' AND table = 'events' AND match(command, '(^|[^0-9])".CH::PURGE_A."([^0-9]|\$)')")[0]['n'] - $before;
+    expect(purgeCount($this->ch, CH::PURGE_A))->toBe(0)
+        ->and($created)->toBe(1);
 });
 
 it('removes events that land after the first pass when the second pass runs', function () {
     seedPurgeRows($this->ch, CH::PURGE_A, 10);
-    (new PurgeProjectEvents(CH::PURGE_A))->handle($this->ch->admin);
+    runPurge($this->ch, CH::PURGE_A);
 
     seedPurgeRows($this->ch, CH::PURGE_A, 5); // an in-flight Kafka message arriving late
     expect(purgeCount($this->ch, CH::PURGE_A))->toBe(5);
 
-    (new PurgeProjectEvents(CH::PURGE_A, pass: 2))->handle($this->ch->admin);
+    runPurge($this->ch, CH::PURGE_A, pass: 2);
 
     expect(purgeCount($this->ch, CH::PURGE_A))->toBe(0);
 });

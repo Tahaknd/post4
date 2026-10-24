@@ -95,8 +95,8 @@ describe('project:add-user and project:remove-user', function () {
         $project = Project::factory()->create();
         User::factory()->create(['email' => 'ada@example.test']);
 
-        expect(Artisan::call('project:add-user', ['project' => 'abc', 'email' => 'ada@example.test']))->toBe(1)
-            ->and(Artisan::call('project:add-user', ['project' => 9999, 'email' => 'ada@example.test']))->toBe(1)
+        expect(Artisan::call('project:add-user', ['project' => 'abc', 'email' => 'ada@example.test']))->toBe(2)
+            ->and(Artisan::call('project:add-user', ['project' => 9999, 'email' => 'ada@example.test']))->toBe(3)
             ->and(Artisan::call('project:add-user', ['project' => $project->id, 'email' => 'nobody@example.test']))->toBe(1)
             ->and(Artisan::call('project:add-user', ['project' => $project->id, 'email' => 'ada@example.test', '--role' => 'owner']))->toBe(2)
             ->and(DB::table('project_user')->count())->toBe(0);
@@ -115,7 +115,7 @@ describe('project:add-user and project:remove-user', function () {
     });
 
     it('rejects a malformed project id on remove-user', function () {
-        expect(Artisan::call('project:remove-user', ['project' => '1.5', 'email' => 'a@example.test']))->toBe(1)
-            ->and(Artisan::call('project:remove-user', ['project' => '999', 'email' => 'a@example.test']))->toBe(1);
+        expect(Artisan::call('project:remove-user', ['project' => '1.5', 'email' => 'a@example.test']))->toBe(2)
+            ->and(Artisan::call('project:remove-user', ['project' => '999', 'email' => 'a@example.test']))->toBe(3);
     });
 });

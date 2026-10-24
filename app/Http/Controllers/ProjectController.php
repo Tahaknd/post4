@@ -117,9 +117,11 @@ class ProjectController extends Controller
         $user = $this->user($request);
         $this->throttle($throttle, $user);
 
-        $deleteProject->handle($project, $user, purgeEvents: true);
+        $result = $deleteProject->handle($project, $user, purgeEvents: true);
 
-        return redirect()->route('projects.index', status: 303)->with('status', 'Project deleted. Its events are being removed in the background.');
+        return redirect()->route('projects.index', status: 303)->with('status', $result->purgeFailedToQueue()
+            ? 'Project deleted. Removing its events could not be started; the daily cleanup will remove them.'
+            : 'Project deleted. Its events are being removed in the background.');
     }
 
     private function user(Request $request): User
