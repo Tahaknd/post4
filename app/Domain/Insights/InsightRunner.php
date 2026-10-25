@@ -29,8 +29,10 @@ use Throwable;
  * connect/read timeouts (config/database.php), so a frozen Redis fails quickly; any cache failure FAILS OPEN:
  * the query runs live, the write is skipped (one outage costs one timeout, not two) and a throttled warning is
  * logged (the convention of LimiterOutage). Entries are never flushed (`Cache::flush()` would wipe the shared
- * Redis database); they expire. No stampede protection: concurrent identical misses each run the query, which
- * the profile's max_concurrent_queries_for_user (3) bounds and maps to a "busy" error.
+ * Redis database); they expire. No stampede protection HERE: concurrent identical misses each run the query, which
+ * the profile's max_concurrent_queries_for_user (3) bounds and maps to a "busy" error. The insight API never calls
+ * trends() from a request: RunTrendsInsight does, behind a single-flight lock per (project, definition) and a
+ * per-project running cap (App\Domain\Insights\Runs\InsightGate), and the API reads the cache through cached().
  */
 final class InsightRunner
 {

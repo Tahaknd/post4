@@ -20,7 +20,9 @@ it('runs a supervisor for the insights queue in every environment with exactly t
         // Two workers < max_concurrent_queries_for_user = 3, which every tenant shares.
         ->and($options['maxProcesses'])->toBeLessThan(3)
         ->and($options['tries'])->toBe(1)
-        ->and($options['timeout'])->toBe(60);
+        ->and($options['timeout'])->toBe(60)
+        // an idle worker polls every second: a user is waiting for the chart
+        ->and($options['sleep'])->toBe(1);
 })->with(['production', 'local', '*']);
 
 it('keeps the job timeout below the supervisor timeout and the Redis retry_after', function () {

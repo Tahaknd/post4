@@ -251,6 +251,9 @@ return [
             'memory' => 128,
             'tries' => 1,
             'timeout' => 60,
+            // A user waits for this queue: an idle worker looks for work every second instead of every 3 s (the
+            // Horizon default), which is about 1.5 s of latency saved on every chart. The poll costs one Redis call.
+            'sleep' => 1,
             'nice' => 0,
         ],
     ],
