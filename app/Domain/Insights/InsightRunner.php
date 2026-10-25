@@ -70,6 +70,19 @@ final class InsightRunner
         return $result;
     }
 
+    /**
+     * The cached SUCCESSFUL result of this definition, or null (not cached, cache disabled, or the cache is down:
+     * fail-open like trends(), the caller then queues a run). Never queries ClickHouse.
+     */
+    public function cached(int $projectId, TrendsQuery $query): ?TrendsResult
+    {
+        if ((int) config('insights.cache_ttl_seconds') <= 0) {
+            return null;
+        }
+
+        return $this->cacheGet(self::cacheKey($projectId, $query), $down);
+    }
+
     public static function cacheKey(int $projectId, TrendsQuery $query): string
     {
         return self::KEY_PREFIX.':'.$projectId.':'.$query->hash();
