@@ -56,9 +56,16 @@ function webRoutesCollidingWithReservedPaths(): array
     return $collisions;
 }
 
+/** The JSON API is the one owner of `api`: its routes are named `api.*` and live under api/projects/{project}/. */
+function isAllowedApiRoute(RoutingRoute $route): bool
+{
+    return str_starts_with((string) $route->getName(), 'api.') && str_starts_with($route->uri(), 'api/projects/{project}/');
+}
+
 /**
  * URIs of web-group routes that take a name the application or a package already owns. The owning
- * package's own routes are allowed: Horizon (`horizon.*`) and Inertia DevTools (`inertia.*`).
+ * package's own routes are allowed: Horizon (`horizon.*`), Inertia DevTools (`inertia.*`) and the insight API
+ * (`api.*` under api/projects/{project}/, see isAllowedApiRoute()).
  *
  * @return list<string>
  */
@@ -68,6 +75,10 @@ function webRoutesTakingAppOwnedNames(): array
 
     foreach (webGroupRoutes() as $route) {
         if (preg_match('/^(horizon|inertia)\./', (string) $route->getName())) {
+            continue;
+        }
+
+        if (str_starts_with($route->uri(), 'api/') && isAllowedApiRoute($route)) {
             continue;
         }
 
@@ -158,6 +169,36 @@ it('detects a web route that takes an app-owned name', function (string $uri) {
 
     expect(webRoutesTakingAppOwnedNames())->toContain(ltrim($uri, '/'));
 })->with(['/up', '/build/page', '/storage', '/horizon/custom', '/_inertia/x', '/api/insights']);
+
+it('registers the insight API routes under api/projects/{project}/ with api.* names and nothing else under api', function () {
+    $api = array_values(array_filter(webGroupRoutes(), fn (RoutingRoute $route) => str_starts_with($route->uri(), 'api/')));
+
+    expect(array_map(fn (RoutingRoute $r) => $r->getName(), $api))->toContain('api.insights.trends', 'api.insights.runs.show');
+    foreach ($api as $route) {
+        expect(isAllowedApiRoute($route))->toBeTrue("{$route->uri()} is outside api/projects/{project}/ or not named api.*")
+            ->and(in_array('auth', $route->gatherMiddleware(), true))->toBeTrue("{$route->uri()} must require auth");
+    }
+});
+
+it('flags an api route that is not under api/projects/{project}/ or not named api.*', function (string $uri, ?string $name) {
+    $route = Route::middleware('web')->get($uri, fn () => 'x');
+    if ($name !== null) {
+        $route->name($name);
+    }
+
+    expect(webRoutesTakingAppOwnedNames())->toContain(ltrim($uri, '/'));
+})->with([
+    'unnamed under the project' => ['/api/projects/{project}/other', null],
+    'named api elsewhere' => ['/api/insights', 'api.insights.x'],
+    'wrong name' => ['/api/projects/{project}/thing', 'thing.index'],
+    'bare api' => ['/api', 'api.root'],
+]);
+
+it('accepts an api route that follows the rule', function () {
+    Route::middleware('web')->get('/api/projects/{project}/extra', fn () => 'x')->name('api.extra');
+
+    expect(webRoutesTakingAppOwnedNames())->toBe([]);
+});
 
 it('keeps the capture segments and the app-owned names disjoint', function () {
     expect(array_intersect(ReservedPaths::SEGMENTS, ReservedPaths::APP_OWNED))->toBe([])
