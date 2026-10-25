@@ -100,6 +100,8 @@ return [
 
     'waits' => [
         'redis:default' => 60,
+        // Insight runs normally start within a second; a minute in the queue means both workers are busy.
+        'redis:insights' => 60,
         // A purge waits on a ClickHouse mutation and releases itself every 30 s, so a few minutes is normal.
         'redis:maintenance' => 600,
     ],
@@ -231,6 +233,26 @@ return [
             'timeout' => 60,
             'nice' => 0,
         ],
+        // Insight runs (App\Jobs\RunTrendsInsight): ClickHouse queries triggered by users, on their own queue so a
+        // slow chart never delays the default or maintenance work. EXACTLY two processes: the read-only ClickHouse
+        // user is shared by every tenant and its profile allows max_concurrent_queries_for_user = 3, so 2 < 3
+        // leaves one slot for the interactive event-name list of the UI (Task 3.7). Raising maxProcesses to 3 or
+        // more would make the third query fail with "busy" (kind 202). `balance` simple keeps both running.
+        // The job timeout (45 s) stays below the Redis queue's retry_after (90 s); the job's own $tries (it
+        // releases itself while waiting) overrides the `tries` of the supervisor.
+        'supervisor-insights' => [
+            'connection' => 'redis',
+            'queue' => ['insights'],
+            'balance' => 'simple',
+            'maxProcesses' => 2,
+            'minProcesses' => 2,
+            'maxTime' => 3600,
+            'maxJobs' => 1000,
+            'memory' => 128,
+            'tries' => 1,
+            'timeout' => 60,
+            'nice' => 0,
+        ],
     ],
 
     'environments' => [
@@ -243,6 +265,9 @@ return [
             'supervisor-maintenance' => [
                 'maxProcesses' => 1,
             ],
+            'supervisor-insights' => [
+                'maxProcesses' => 2,
+            ],
         ],
 
         'local' => [
@@ -251,6 +276,9 @@ return [
             ],
             'supervisor-maintenance' => [
                 'maxProcesses' => 1,
+            ],
+            'supervisor-insights' => [
+                'maxProcesses' => 2,
             ],
         ],
 
@@ -262,6 +290,9 @@ return [
             ],
             'supervisor-maintenance' => [
                 'maxProcesses' => 1,
+            ],
+            'supervisor-insights' => [
+                'maxProcesses' => 2,
             ],
         ],
     ],
