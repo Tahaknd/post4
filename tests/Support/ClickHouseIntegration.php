@@ -41,6 +41,13 @@ final class ClickHouseIntegration
 
     public const PURGE_B = 990502;
 
+    /** Tenants of the insight API tests (InsightApiClickHouseTest): A and B have rows, C (990603) never gets one. */
+    public const API_A = 990601;
+
+    public const API_B = 990602;
+
+    public const API_C = 990603;
+
     /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
     public const TREND_D = 990204;
 
@@ -58,6 +65,8 @@ final class ClickHouseIntegration
     private static bool $seeded = false;
 
     private static bool $trendsSeeded = false;
+
+    private static bool $apiSeeded = false;
 
     /**
      * Seeds once per process (the tests of the file only read) and remembers it, so afterAll() knows whether
@@ -98,6 +107,71 @@ final class ClickHouseIntegration
             self::$trendsSeeded = true;
             $this->seedTrends();
         }
+    }
+
+    /** Seeds the insight API tenants once per process (see seedApi()); afterAll cleans up via cleanupApiAfterAll(). */
+    public function seedApiOnce(): void
+    {
+        if (! self::$apiSeeded) {
+            self::$apiSeeded = true;
+            $this->seedApi();
+        }
+    }
+
+    /** Like cleanupAfterAll() for the insight API tenants. */
+    public static function cleanupApiAfterAll(): void
+    {
+        if (! self::$apiSeeded) {
+            return;
+        }
+        self::$apiSeeded = false;
+
+        Http::swap(new Factory);
+        try {
+            self::connect()->deleteRowsOf([self::API_A, self::API_B, self::API_C]);
+        } finally {
+            Facade::clearResolvedInstances();
+        }
+    }
+
+    /**
+     * Fixed rows (UTC) of the two API tenants, hand-computed in InsightApiClickHouseTest. Project A (990601):
+     *   signup u1 03-14 10:00, signup u2 03-14 11:00, signup u1 03-15 09:00 (plan=pro), signup u1 03-15 09:30 (plan=free),
+     *   signup u3 03-16 12:00 (plan=pro), purchase u1 03-15 13:00.
+     * Project B (990602): signup b1 x2 and b2 x1 on 03-14, signup b1 x4 on 03-16, purchase b1 03-15.
+     * Project C has no rows.
+     */
+    public function seedApi(): void
+    {
+        $this->deleteRowsOf([self::API_A, self::API_B, self::API_C]);
+
+        $n = 0;
+        $row = function (int $project, string $event, string $distinct, string $ts, array $props = []) use (&$n): void {
+            $this->admin->execute(
+                'INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '
+                ."SELECT {uuid:UUID}, {p:UInt32}, {e:String}, {d:String}, {props:String}, parseDateTime64BestEffort({ts:String}, 3, 'UTC')",
+                ['uuid' => sprintf('00000000-0000-4000-8000-%012d', 600000 + ++$n), 'p' => $project, 'e' => $event, 'd' => $distinct, 'props' => json_encode($props, JSON_THROW_ON_ERROR), 'ts' => $ts],
+            );
+        };
+
+        $a = self::API_A;
+        $row($a, 'signup', 'u1', '2026-03-14 10:00:00');
+        $row($a, 'signup', 'u2', '2026-03-14 11:00:00');
+        $row($a, 'signup', 'u1', '2026-03-15 09:00:00', ['plan' => 'pro']);
+        $row($a, 'signup', 'u1', '2026-03-15 09:30:00', ['plan' => 'free']);
+        $row($a, 'signup', 'u3', '2026-03-16 12:00:00', ['plan' => 'pro']);
+        $row($a, 'purchase', 'u1', '2026-03-15 13:00:00');
+
+        $b = self::API_B;
+        $row($b, 'signup', 'b1', '2026-03-14 10:00:00');
+        $row($b, 'signup', 'b1', '2026-03-14 10:05:00');
+        $row($b, 'signup', 'b2', '2026-03-14 10:10:00');
+        foreach (['09:00', '09:01', '09:02', '09:03'] as $time) {
+            $row($b, 'signup', 'b1', "2026-03-16 {$time}:00", ['plan' => 'enterprise']);
+        }
+        $row($b, 'purchase', 'b1', '2026-03-15 13:00:00');
+
+        Assert::assertSame(6 + 8, (int) $this->admin->select('SELECT count() AS n FROM posthog.events WHERE project_id IN ('.self::API_A.', '.self::API_B.', '.self::API_C.')')[0]['n']);
     }
 
     /** Like cleanupAfterAll() for the trends projects. */
