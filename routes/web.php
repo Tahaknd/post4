@@ -1,8 +1,10 @@
 <?php
 
+use App\Domain\Insights\Runs\InsightRunStore;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\RegisterController;
 use App\Http\Controllers\HomeController;
+use App\Http\Controllers\InsightController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Middleware\EnsureRegistrationOpen;
 use Illuminate\Support\Facades\Route;
@@ -41,6 +43,21 @@ Route::middleware(['auth', 'auth.session', EncryptHistory::class])->group(functi
         Route::delete('/{project}', [ProjectController::class, 'destroy'])->name('projects.destroy')->middleware('throttle.user:projects.delete');
     });
 });
+
+// The insight JSON API. The ONLY routes under `api/`: ReservedPaths::APP_OWNED keeps UI pages off that prefix, and
+// tests/Feature/ReservedRoutePrefixesTest.php requires every `api/` route to be named `api.*` and to live under
+// api/projects/{project}/. Same session cookie, CSRF token (X-XSRF-TOKEN) and `auth` as the UI, but JSON in and out:
+// a guest gets 401 JSON (never a redirect), errors are fixed JSON (App\Http\ApiErrors), nothing is cached.
+// `{project}` is bound through Project::visibleTo(user) (404 for a non-member); `{run}` is a 128 bit hex id.
+Route::middleware(['auth', 'auth.session', 'api.no-store'])
+    ->prefix('api/projects/{project}/insights')
+    ->name('api.insights.')
+    ->group(function (): void {
+        Route::post('/trends', [InsightController::class, 'trends'])->name('trends')->middleware('throttle.user:insights.run');
+        Route::get('/runs/{run}', [InsightController::class, 'show'])->name('runs.show')
+            ->where('run', InsightRunStore::ID_ROUTE_PATTERN)
+            ->middleware('throttle.user:insights.poll');
+    });
 
 // Unknown paths answer 404 inside the web group, so a signed-in user's error page knows who they are.
 // RejectSessionlessGuests answers 404 itself, without a session, when there is no session cookie or the path

@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Http\ApiErrors;
 use App\Http\NextUrl;
 use App\Http\ReservedPaths;
 use Closure;
@@ -42,7 +43,8 @@ class RejectSessionlessGuests
         }
 
         if ($this->hasNoSession($request) && $this->requiresAuthentication($request) && ! auth()->hasUser()) {
-            return $request->expectsJson()
+            // `api/*` is JSON by definition: a client that forgot the Accept header still gets a 401, not a redirect.
+            return $request->expectsJson() || ApiErrors::isApiRequest($request)
                 ? response()->json(['message' => 'Unauthenticated.'], 401)
                 : self::loginRedirect($request);
         }

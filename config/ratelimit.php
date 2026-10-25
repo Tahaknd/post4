@@ -15,5 +15,9 @@ return [
         'projects.create' => ['limit' => 30, 'window_seconds' => 60],
         'projects.rotate' => ['limit' => 30, 'window_seconds' => 60],
         'projects.delete' => ['limit' => 30, 'window_seconds' => 60],
+        // Insight API: starting a run is the expensive call, polling it is cheap and happens about once a second
+        // while a chart loads (several charts at once on a dashboard).
+        'insights.run' => ['limit' => 60, 'window_seconds' => 60],
+        'insights.poll' => ['limit' => 600, 'window_seconds' => 60],
     ],
 ];

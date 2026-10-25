@@ -6,6 +6,8 @@ use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\PayloadDecoder;
 use App\Domain\Insights\InsightRunner;
+use App\Domain\Insights\Runs\InsightGate;
+use App\Domain\Insights\Runs\InsightRunStore;
 use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
@@ -60,6 +62,11 @@ class AppServiceProvider extends ServiceProvider
             $app->make(ProjectScopedReader::class),
             $app->make(TrendsSqlBuilder::class),
         ));
+
+        // Explicit as well: both take an optional cache Repository, which the container would otherwise fill with the
+        // DEFAULT cache store (CACHE_STORE), while the run state must live on config('insights.cache_store').
+        $this->app->bind(InsightRunStore::class, fn () => new InsightRunStore);
+        $this->app->bind(InsightGate::class, fn () => new InsightGate);
 
         $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
             $app->make(ClickHouseClient::class),

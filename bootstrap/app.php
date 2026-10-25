@@ -1,13 +1,17 @@
 <?php
 
+use App\Http\ApiErrors;
 use App\Http\ErrorPages;
 use App\Http\Middleware\HandleInertiaRequests;
+use App\Http\Middleware\NoStoreResponses;
 use App\Http\Middleware\RejectMalformedUtf8;
 use App\Http\Middleware\RejectSessionlessGuests;
 use App\Http\Middleware\ThrottleUser;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull;
+use Illuminate\Foundation\Http\Middleware\TrimStrings;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 use Symfony\Component\HttpFoundation\Response;
@@ -32,7 +36,12 @@ return Application::configure(basePath: dirname(__DIR__))
         );
 
         // `throttle.user:{family}`: per-user budgets (config/ratelimit.php, user_throttles).
-        $middleware->alias(['throttle.user' => ThrottleUser::class]);
+        $middleware->alias(['throttle.user' => ThrottleUser::class, 'api.no-store' => NoStoreResponses::class]);
+
+        // The JSON API takes strings exactly as sent: an event name keeps its spaces, `equals ''` keeps its empty
+        // value (TrimStrings and ConvertEmptyStringsToNull would silently change the definition being cached).
+        TrimStrings::skipWhen(fn (Request $request) => ApiErrors::isApiRequest($request));
+        ConvertEmptyStringsToNull::skipWhen(fn (Request $request) => ApiErrors::isApiRequest($request));
 
         // A guest with a stale session cookie reaches Authenticate: same /login?next= target as the cookie-less path.
         $middleware->redirectGuestsTo(fn (Request $request) => RejectSessionlessGuests::loginUrl($request));
@@ -48,5 +57,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
         // Error page for HTML requests on UI routes only; capture, SDK and JSON responses are untouched
         // (see App\Http\ErrorPages).
-        $exceptions->respond(fn (Response $response, Throwable $e, Request $request) => app(ErrorPages::class)->respond($response, $e, $request));
+        // Fixed JSON for /api/* first (ApiErrors), the Error page for HTML requests on UI routes second (ErrorPages
+        // skips /api/*).
+        $exceptions->respond(fn (Response $response, Throwable $e, Request $request) => app(ErrorPages::class)->respond(ApiErrors::respond($response, $e, $request), $e, $request));
     })->create();
