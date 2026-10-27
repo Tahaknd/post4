@@ -111,6 +111,11 @@ class ProjectInsightsController extends Controller
             BreakdownColumn::Browser => 'Browser',
             BreakdownColumn::CountryCode => 'Country',
             BreakdownColumn::CurrentUrl => 'Current URL',
+            BreakdownColumn::Os => 'Operating system',
+            BreakdownColumn::DeviceType => 'Device type',
+            BreakdownColumn::UtmSource => 'UTM source',
+            BreakdownColumn::UtmMedium => 'UTM medium',
+            BreakdownColumn::UtmCampaign => 'UTM campaign',
         };
     }
 

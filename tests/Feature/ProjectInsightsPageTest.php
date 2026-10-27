@@ -148,3 +148,17 @@ it('is a GET only route and cannot be written to', function () {
 it('names the page route projects.insights.trends under /projects', function () {
     expect(route('projects.insights.trends', ['project' => 7], absolute: false))->toBe('/projects/7/insights/trends');
 });
+
+it('offers the enrichment columns as breakdown options with labels, taken from the server', function () {
+    $options = $this->actingAs($this->member)->get("/projects/{$this->project->id}/insights/trends")->viewData('page')['props']['options'];
+
+    expect(array_column($options['breakdown_columns'], 'label', 'value'))->toMatchArray([
+        'browser' => 'Browser',
+        'country_code' => 'Country',
+        'os' => 'Operating system',
+        'device_type' => 'Device type',
+        'utm_source' => 'UTM source',
+        'utm_medium' => 'UTM medium',
+        'utm_campaign' => 'UTM campaign',
+    ]);
+});

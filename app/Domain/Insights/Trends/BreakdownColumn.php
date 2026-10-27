@@ -14,6 +14,11 @@ enum BreakdownColumn: string
     case Browser = 'browser';
     case CountryCode = 'country_code';
     case CurrentUrl = 'current_url';
+    case Os = 'os';
+    case DeviceType = 'device_type';
+    case UtmSource = 'utm_source';
+    case UtmMedium = 'utm_medium';
+    case UtmCampaign = 'utm_campaign';
 
     /** Fixed SQL for the raw value (the column name comes from this enum, which is code). */
     public function valueSql(): string

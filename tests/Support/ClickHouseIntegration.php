@@ -60,6 +60,11 @@ final class ClickHouseIntegration
     /** Names whose UTF-8 bytes end or begin like a no-break space (EventNames::normalise must not cut them). */
     public const EVENTS_E = 990705;
 
+    /** Tenants of the enrichment tests (EnrichmentClickHouseTest): events enriched by the real Enricher, then stored. */
+    public const ENRICH_A = 990801;
+
+    public const ENRICH_B = 990802;
+
     /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
     public const TREND_D = 990204;
 
@@ -81,6 +86,8 @@ final class ClickHouseIntegration
     private static bool $apiSeeded = false;
 
     private static bool $eventNamesSeeded = false;
+
+    private static bool $enrichmentSeeded = false;
 
     /**
      * Seeds once per process (the tests of the file only read) and remembers it, so afterAll() knows whether
@@ -138,6 +145,48 @@ final class ClickHouseIntegration
         if (! self::$eventNamesSeeded) {
             self::$eventNamesSeeded = true;
             $this->seedEventNames();
+        }
+    }
+
+    /**
+     * Stores Kafka-shaped messages (the array EventNormalizer produces: uuid, project_id, event, distinct_id,
+     * properties JSON string, timestamp) in `events` exactly as the Kafka materialized view would, so the
+     * materialized columns are computed by the real table. Starts from a clean slate for those projects and
+     * remembers them for cleanupEnrichmentAfterAll().
+     *
+     * @param  list<array{uuid: string, project_id: int, event: string, distinct_id: string, properties: string, timestamp: string}>  $messages
+     */
+    public function seedMessagesOnce(array $messages): void
+    {
+        if (self::$enrichmentSeeded) {
+            return;
+        }
+        self::$enrichmentSeeded = true;
+
+        $this->deleteRowsOf([self::ENRICH_A, self::ENRICH_B]);
+
+        $selects = [];
+        $params = [];
+        foreach ($messages as $i => $m) {
+            $selects[] = "SELECT {u{$i}:UUID}, {p{$i}:UInt32}, {e{$i}:String}, {d{$i}:String}, {props{$i}:String}, parseDateTime64BestEffort({ts{$i}:String}, 3, 'UTC')";
+            $params += ["u{$i}" => $m['uuid'], "p{$i}" => $m['project_id'], "e{$i}" => $m['event'], "d{$i}" => $m['distinct_id'], "props{$i}" => $m['properties'], "ts{$i}" => $m['timestamp']];
+        }
+        $this->admin->execute('INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '.implode(' UNION ALL ', $selects), $params);
+    }
+
+    /** Like cleanupAfterAll() for the enrichment tenants. */
+    public static function cleanupEnrichmentAfterAll(): void
+    {
+        if (! self::$enrichmentSeeded) {
+            return;
+        }
+        self::$enrichmentSeeded = false;
+
+        Http::swap(new Factory);
+        try {
+            self::connect()->deleteRowsOf([self::ENRICH_A, self::ENRICH_B]);
+        } finally {
+            Facade::clearResolvedInstances();
         }
     }
 
