@@ -6,6 +6,13 @@ use App\Domain\Insights\Runs\InsightRunStore;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Jobs\RunTrendsInsight;
 use App\Models\Project;
+use Illuminate\Contracts\Debug\ExceptionHandler;
+use Illuminate\Queue\Connectors\RedisConnector;
+use Illuminate\Queue\Worker;
+use Illuminate\Queue\WorkerOptions;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\Str;
 use Tests\Support\FakeQueueJob;
 use Tests\Support\RedisIntegration;
 use Tests\Support\ScriptedReads;
@@ -281,4 +288,64 @@ it('applies exactly one of two racing transitions to every run (done in one proc
             ->and($record['result'] !== null)->toBe($record['status'] === 'done');
     }
     expect(array_sum($statuses))->toBe(40);
+});
+
+it('releases itself into the delayed set through a real queue worker and is popped again with a higher attempt count', function () {
+    // A throwaway queue name on database 15 (never the live `insights` queue on database 0).
+    $queue = 'zz-smoke-'.bin2hex(random_bytes(4));
+    config([
+        // Laravel's own Redis queue driver: Horizon's replacement driver would write job metadata through its
+        // repositories, which are built once with the (dead) Redis of the test environment.
+        'queue.default' => 'smoke',
+        'queue.connections.smoke' => ['driver' => 'plainredis', 'connection' => 'default', 'queue' => 'default', 'retry_after' => 90, 'block_for' => null],
+        'database.redis.default.host' => RedisIntegration::host(),
+        'database.redis.default.port' => 6379,
+        'database.redis.default.database' => RedisIntegration::DATABASE,
+        'insights.cache_store' => 'array',
+        'insights.cache_ttl_seconds' => 0,
+    ]);
+    app()->forgetInstance('redis');
+    app()->forgetInstance('queue');
+    app()->forgetInstance('queue.worker');
+    app()->forgetInstance('queue.connection');
+    Facade::clearResolvedInstance('redis');
+    Facade::clearResolvedInstance('queue');
+    $manager = app('queue');
+    $manager->extend('plainredis', fn () => new RedisConnector(app('redis')));
+    $worker = new Worker($manager, app('events'), app(ExceptionHandler::class), fn () => false);
+    // `queue:work --once`: pop one job, run it, return
+    $popOnce = fn () => $worker->runNextJob('smoke', $queue, new WorkerOptions(maxTries: 1, timeout: 60));
+
+    $query = T::definition();
+    $runner = T::runner(new ScriptedReads([T::dayRows()]), Cache::store('array'));
+    app()->instance(InsightRunner::class, $runner);
+    $store = app(InsightRunStore::class);
+    $gate = app(InsightGate::class);
+    $runId = InsightRunStore::newId();
+    $store->create($runId, InsightRunStore::TYPE_TRENDS, $this->project->id, 7, $query->hash(), null, null);
+    $holder = $gate->acquireFlight(InsightRunStore::TYPE_TRENDS, $this->project->id, $query->hash(), 'the-holder'); // another run queries: this one must wait
+    $delayed = fn () => (int) $this->it->raw()->zcard(Str::of(config('database.redis.options.prefix'))->append("queues:{$queue}:delayed"));
+
+    try {
+        $manager->connection('smoke')->pushOn($queue, new RunTrendsInsight($this->project->id, $runId, $query->canonical(), 7));
+
+        $popOnce();
+        $waiting = $this->it->raw()->zrange(Str::of(config('database.redis.options.prefix'))->append("queues:{$queue}:delayed")->toString(), 0, -1);
+        expect($delayed())->toBe(1)                                  // released: waiting in the delayed set, not failed
+            ->and(json_decode($waiting[0], true)['attempts'])->toBe(1)  // attempt 1 is spent; the next pop is attempt 2
+            ->and($store->find($runId)['status'])->toBe('queued');
+
+        $holder->release();
+        sleep(2);                                                    // the 1 s release delay has passed
+        $popOnce();
+
+        expect($delayed())->toBe(0)
+            ->and($store->find($runId)['status'])->toBe('done')
+            ->and($this->it->raw()->zcard(Str::of(config('database.redis.options.prefix'))->append("queues:{$queue}:reserved")))->toBe(0);
+    } finally {
+        $keys = $this->it->raw()->keys('*'.$queue.'*');
+        if ($keys !== []) {
+            $this->it->raw()->del(...$keys);
+        }
+    }
 });

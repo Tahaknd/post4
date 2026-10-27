@@ -47,3 +47,19 @@ it('gives every queue its own supervisor so the insights workers never serve oth
 it('watches the insights queue for long waits', function () {
     expect(config('horizon.waits'))->toHaveKey('redis:insights');
 });
+
+it('pins the insight capacity defaults that the worker arithmetic relies on', function () {
+    $config = require base_path('config/insights.php');
+    $retryAfter = (int) config('queue.connections.redis.retry_after');
+
+    expect($config['max_active_runs_per_user'])->toBe(8)
+        ->and($config['max_active_runs_per_project'])->toBe(20)
+        // one project can never hold both of the two workers, and 2 workers < 3 ClickHouse slots leaves one spare
+        ->and($config['max_concurrent_queries_per_project'])->toBe(1)
+        ->and($config['lock_ttl_seconds'])->toBe(50)->toBeGreaterThan((new RunTrendsInsight(1, str_repeat('a', 32), [], 1))->timeout)->toBeLessThan($retryAfter)
+        ->and($config['run_ttl_seconds'])->toBeGreaterThan($config['finished_ttl_seconds'])
+        ->and($config['flightfail_ttl_seconds'])->toBeLessThanOrEqual(15)
+        ->and($config['inflight_ttl_seconds'])->toBeLessThanOrEqual($config['lock_ttl_seconds'] + 15)
+        ->and(file_get_contents(base_path('config/insights.php')))->toContain("env('INSIGHTS_MAX_ACTIVE_RUNS_PER_USER'")->toContain("env('INSIGHTS_LOCK_TTL_SECONDS'")
+        ->and(config('horizon.defaults.supervisor-insights.maxProcesses'))->toBe(2);
+});
