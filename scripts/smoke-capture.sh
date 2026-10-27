@@ -297,6 +297,10 @@ if [[ "$PRE" != "0" ]]; then
   exit 2
 fi
 
+# A browser User-Agent on every request: the capture Enricher derives browser, os and device from it
+# (check (b) below asserts the materialized columns). curl would otherwise send `curl/x`, which is a bot.
+SMOKE_UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
+
 # post <body-or-@file> -> sets HTTP_CODE and HTTP_BODY (POST_PATH selects the endpoint, default /e/)
 POST_PATH="/e/"
 post() {
@@ -304,7 +308,7 @@ post() {
   rm -f "$TMP/body"
   # curl may exit non-zero (55/56) after the server answered early; the printed status is still the answer.
   code="$(curl -sS --max-time 15 -o "$TMP/body" -w '%{http_code}' -X POST "$HOST$POST_PATH" \
-    -H 'Content-Type: application/json' --data-binary "$1" 2>"$TMP/curl_err" || true)"
+    -H 'Content-Type: application/json' -A "$SMOKE_UA" --data-binary "$1" 2>"$TMP/curl_err" || true)"
   HTTP_CODE="${code:-000}"
   HTTP_BODY="$(cat "$TMP/body" 2>/dev/null || true)"
 }
@@ -345,6 +349,26 @@ if [[ $SENT_OK -eq 1 ]]; then
   fi
 else
   fail "event not checked in ClickHouse: it was never accepted"
+fi
+
+# --- (b2) enrichment: browser, os and device come from the User-Agent header -------------------
+if [[ $ARRIVED -eq 1 ]]; then
+  if chv "SELECT concat(browser, '|', os, '|', device_type) FROM posthog.events WHERE event = '$MARK' AND project_id = $PROJECT_ID LIMIT 1"; then
+    if [[ "$CH_OUT" == "Chrome|Mac OS X|Desktop" ]]; then
+      pass "enrichment: browser|os|device_type = '$CH_OUT' (from the User-Agent header)"
+    else
+      fail "enrichment: browser|os|device_type = '$CH_OUT', expected 'Chrome|Mac OS X|Desktop' (Enricher not wired, a stale worker (octane:reload), or migration 003 missing?)"
+    fi
+  fi
+  # Privacy default: the raw ip is not stored (skipped when the operator turned CAPTURE_STORE_IP on).
+  STORE_IP="$(docker compose exec -T app printenv CAPTURE_STORE_IP 2>/dev/null | tr -d '\r' || true)"
+  if [[ "$STORE_IP" == "true" ]]; then
+    pass "raw ip check skipped (CAPTURE_STORE_IP=true)"
+  elif chv "SELECT countIf(position(properties, '\$ip') > 0) FROM posthog.events WHERE event = '$MARK' AND project_id = $PROJECT_ID"; then
+    if [[ "$CH_OUT" == "0" ]]; then pass "no raw \$ip in the stored properties (CAPTURE_STORE_IP is off)"; else fail "\$ip is stored although CAPTURE_STORE_IP is off"; fi
+  fi
+else
+  fail "enrichment not checked: the event never arrived"
 fi
 
 # --- (c) no pipeline errors from this run ----------------------------------------------------

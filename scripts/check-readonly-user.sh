@@ -184,7 +184,7 @@ trap cleanup_seed EXIT
 seed_rows() {
   SEEDED=1
   delete_seed || return 1
-  adx --query "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT generateUUIDv4(), if(number < 3, $SEED_A, $SEED_B), 'ro_check', 'ro_check', '{}', now64(3) FROM numbers(5)" >/dev/null 2>&1
+  adx --query "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT generateUUIDv4(), if(number < 3, $SEED_A, $SEED_B), 'ro_check', 'ro_check', '{\"\$os\":\"ro_os\",\"\$device_type\":\"ro_device\",\"utm_source\":\"ro_utm\"}', now64(3) FROM numbers(5)" >/dev/null 2>&1
 }
 
 echo "check-readonly-user: target=${CH_CONTAINER:-compose service clickhouse}"
@@ -222,6 +222,21 @@ check_out "project $SEED_B sees only its own project id" "SELECT toString(groupU
 check_out "the view hides every other project (WHERE project_id != $SEED_A is empty)" "SELECT count() FROM posthog.project_events_v WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
 check_out "the filter applies inside a UNION ALL subquery too" "SELECT count() FROM (SELECT project_id FROM posthog.project_events_v UNION ALL SELECT project_id FROM posthog.project_events_v) WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
 check_out "a project id nobody owns (0) sees no rows although the table has some" 'SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = 0' 0
+
+# --- the view after a CREATE OR REPLACE (migration 003 recreated it): columns, grant, policy, definer ---------
+# The columns materialized by 003 are readable through the replaced view, from the seeded properties.
+check_out "the columns added by migration 003 (os, device_type, utm_source) are readable through the view" \
+  "SELECT concat(os, '|', device_type, '|', utm_source, '|', toString(count())) FROM posthog.project_events_v WHERE project_id = $SEED_A GROUP BY os, device_type, utm_source SETTINGS SQL_project_id = $SEED_A" \
+  "ro_os|ro_device|ro_utm|3"
+check_out "the other columns of the view are still readable (browser, country_code, current_url are empty here)" \
+  "SELECT concat(browser, country_code, current_url, utm_medium, utm_campaign, toString(count())) FROM posthog.project_events_v WHERE project_id = $SEED_B GROUP BY browser, country_code, current_url, utm_medium, utm_campaign SETTINGS SQL_project_id = $SEED_B" \
+  "2"
+# The grant and the row policy are declared by NAME in 20-readonly-user.xml, so they apply to the replaced
+# view; the admin looks at the server's own catalogue (the read-only user cannot read system tables).
+POLICIES="$(adx --query "SELECT count() FROM system.row_policies WHERE database = 'posthog' AND table = 'project_events_v'" 2>/dev/null || echo ERR)"
+if [[ "$POLICIES" =~ ^[0-9]+$ && "$POLICIES" -ge 1 ]]; then pass "a row policy exists on posthog.project_events_v ($POLICIES)"; else fail "no row policy on posthog.project_events_v (got '$POLICIES'): it must survive CREATE OR REPLACE VIEW"; fi
+DEFINER_OK="$(adx --query "SELECT count() FROM system.tables WHERE database = 'posthog' AND name = 'project_events_v' AND create_table_query LIKE '%SQL SECURITY DEFINER%' AND create_table_query LIKE '%getSetting(\\'SQL_project_id\\')%'" 2>/dev/null || echo ERR)"
+if [[ "$DEFINER_OK" == "1" ]]; then pass "the current view is SQL SECURITY DEFINER and keeps the SQL_project_id filter"; else fail "the current view lost SQL SECURITY DEFINER or its SQL_project_id filter (got '$DEFINER_OK')"; fi
 
 # Every relation the user may SELECT from needs a filter: derive them from SHOW GRANTS (not from this
 # script) and require that a bare read FAILS with 115 for each. A relation granted without a filter would
