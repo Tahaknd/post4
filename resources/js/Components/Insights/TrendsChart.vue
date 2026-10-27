@@ -13,6 +13,9 @@ const props = defineProps({
     result: { type: Object, required: true },
     interval: { type: String, required: true },
     metric: { type: String, required: true },
+    // The result is out of date (a new one is loading, or the form is unfinished): only the PLOT is dimmed. Dimming text
+    // would drop its contrast below what is readable.
+    stale: { type: Boolean, default: false },
 });
 
 const id = useId();
@@ -60,7 +63,9 @@ const TYPES = [
             </div>
         </div>
 
-        <LazyChart :labels="labels" :series="drawn" :chart-type="chartType" :description="description" />
+        <div :class="stale ? 'opacity-50 transition-opacity' : 'transition-opacity'">
+            <LazyChart :labels="labels" :series="drawn" :chart-type="chartType" :description="description" />
+        </div>
 
         <p v-if="selection.hidden > 0" class="text-sm text-muted" data-testid="chart-hidden-note">
             Showing the {{ selection.shown.length }} largest of {{ result.series.length }} series ({{ selection.hidden }} more). The table lists all of them.

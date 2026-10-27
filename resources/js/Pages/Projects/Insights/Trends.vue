@@ -272,9 +272,7 @@ function reload() {
             <p v-if="busy" class="text-sm text-muted" aria-hidden="true" data-testid="status-visible">{{ state.notice ?? 'Running query…' }}</p>
             <p v-else-if="stale" class="text-sm text-muted" data-testid="status-held">Showing the previous result. Complete the form above to update it.</p>
 
-            <div v-if="view === 'result'" :class="stale ? 'opacity-60 transition-opacity' : 'transition-opacity'">
-                <TrendsChart :result="shown.result" :interval="shown.interval" :metric="shown.metric" />
-            </div>
+            <TrendsChart v-if="view === 'result'" :result="shown.result" :interval="shown.interval" :metric="shown.metric" :stale="stale" />
 
             <ResultState v-else :kind="view" :error="state.error" noun="trend" @retry="run.retry()" @reload="reload" />
         </section>
