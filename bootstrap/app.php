@@ -38,10 +38,12 @@ return Application::configure(basePath: dirname(__DIR__))
         // `throttle.user:{family}`: per-user budgets (config/ratelimit.php, user_throttles).
         $middleware->alias(['throttle.user' => ThrottleUser::class, 'api.no-store' => NoStoreResponses::class]);
 
-        // The JSON API takes strings exactly as sent: an event name keeps its spaces, `equals ''` keeps its empty
-        // value (TrimStrings and ConvertEmptyStringsToNull would silently change the definition being cached).
-        TrimStrings::skipWhen(fn (Request $request) => ApiErrors::isApiRequest($request));
-        ConvertEmptyStringsToNull::skipWhen(fn (Request $request) => ApiErrors::isApiRequest($request));
+        // The insight DEFINITION takes strings exactly as sent: an event name keeps its spaces, `equals ''` keeps its
+        // empty value (TrimStrings and ConvertEmptyStringsToNull would silently change the definition being cached).
+        // CONVENTION: only that route (ApiErrors::keepsStringsExact); every other API endpoint trims and null-checks
+        // the few strings it takes by hand (the event-name endpoint of Task 3.7 will).
+        TrimStrings::skipWhen(fn (Request $request) => ApiErrors::keepsStringsExact($request));
+        ConvertEmptyStringsToNull::skipWhen(fn (Request $request) => ApiErrors::keepsStringsExact($request));
 
         // A guest with a stale session cookie reaches Authenticate: same /login?next= target as the cookie-less path.
         $middleware->redirectGuestsTo(fn (Request $request) => RejectSessionlessGuests::loginUrl($request));
@@ -52,7 +54,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->dontFlash(['name', 'confirm_name']);
 
         $exceptions->shouldRenderJsonWhen(
-            fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
+            fn (Request $request) => ApiErrors::isApiRequest($request) || $request->expectsJson(),
         );
 
         // Error page for HTML requests on UI routes only; capture, SDK and JSON responses are untouched

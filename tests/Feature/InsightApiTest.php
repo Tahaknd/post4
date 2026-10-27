@@ -4,17 +4,20 @@ use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
 use App\Domain\Insights\Trends\TrendsQuery;
+use App\Http\ApiErrors;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Infrastructure\ClickHouse\ClickHouseException;
 use App\Jobs\RunTrendsInsight;
 use App\Models\Project;
 use App\Models\User;
 use App\Support\RateLimit\LimiterOutage;
+use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Testing\TestResponse;
 use Tests\Support\ProjectCache;
 use Tests\Support\ScriptedReads;
@@ -33,7 +36,8 @@ beforeEach(function () {
         'insights.cache_store' => 'array',
         'insights.cache_ttl_seconds' => 60,
         'insights.cache_warning_interval_seconds' => 60,
-        'insights.max_runs_per_project' => 20,
+        'insights.max_active_runs_per_project' => 20,
+        'insights.max_active_runs_per_user' => 50,
     ]);
     Cache::store('array')->flush();
     LimiterOutage::reset();
@@ -117,7 +121,7 @@ it('shows a non-member exactly what a missing or deleted project looks like', fu
     $gone = apiPost($this->member, $deletedId, apiBody())->assertNotFound();
 
     expect($forbidden->getContent())->toBe($missing->getContent())->toBe($gone->getContent())
-        ->and($forbidden->json())->toBe(['message' => 'Not found.']);
+        ->and($forbidden->json())->toBe(ApiErrors::body('not_found', 'Not found.'));
     Queue::assertNothingPushed();
 
     $run = InsightRunStore::newId();
@@ -244,6 +248,35 @@ it('rejects hostile and malformed bodies with 422 and fixed messages that never 
     'contains empty' => [apiBody(['filters' => [['key' => API_MARKER, 'operator' => 'contains', 'value' => '']]]), 'definition'],
     'too many rows' => [apiBody(['events' => ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'], 'interval' => 'hour', 'date_from' => '2026-01-01', 'date_to' => '2026-03-01', 'breakdown' => ['property' => API_MARKER]]), 'definition'],
 ]);
+
+it('answers an empty string in a text field with that field\'s own fixed message', function (array $body, string $errorKey) {
+    Queue::fake();
+
+    $response = apiPost($this->member, $this->project, $body)->assertStatus(422)->assertJsonValidationErrors([$errorKey]);
+
+    expect(array_keys($response->json('errors')))->toBe([$errorKey])
+        ->and($response->json('errors')[$errorKey][0])->not->toContain('combination');
+    Queue::assertNothingPushed();
+})->with([
+    'metric' => [apiBody(['metric' => '']), 'metric'],
+    'interval' => [apiBody(['interval' => '']), 'interval'],
+    'timezone' => [apiBody(['timezone' => '']), 'timezone'],
+    'preset' => [['events' => ['a'], 'date_preset' => ''], 'date_preset'],
+    'date_from' => [apiBody(['date_from' => '']), 'date_from'],
+    'date_to' => [apiBody(['date_to' => '']), 'date_to'],
+    'breakdown column' => [apiBody(['breakdown' => ['column' => '']]), 'breakdown.column'],
+    'breakdown property' => [apiBody(['breakdown' => ['property' => '']]), 'breakdown.property'],
+    'whitespace metric' => [apiBody(['metric' => '   ']), 'metric'],
+    'filter key' => [apiBody(['filters' => [['key' => '', 'operator' => 'equals', 'value' => 'x']]]), 'filters.0.key'],
+    'event name' => [apiBody(['events' => ['']]), 'events.0'],
+]);
+
+it('accepts the empty strings that mean something: an empty filter value, and null for the optional parts', function () {
+    Queue::fake();
+
+    apiPost($this->member, $this->project, apiBody(['breakdown' => null, 'filters' => [['key' => 'a', 'operator' => 'equals', 'value' => '']]]))->assertStatus(202);
+    apiPost($this->member, $this->project, apiBody(['events' => ['b'], 'breakdown' => ['column' => null, 'property' => 'plan']]))->assertStatus(202);
+});
 
 it('rejects a body that is not JSON, too large or malformed with a fixed status', function () {
     Queue::fake();
@@ -387,7 +420,7 @@ it('answers 200 done straight from the result cache without queueing anything', 
 
     $response = apiPost($this->member, $this->project, apiBody())->assertOk();
 
-    expect($response->json())->toBe(['status' => 'done', 'result' => $result->toArray()])
+    expect($response->json())->toBe(['status' => 'done', 'run_id' => null, 'result' => $result->toArray()])
         ->and($response->json('result.series.0.data'))->toBe([0, 5, 0, 0, 0, 0, 0])
         ->and($response->headers->get('Cache-Control'))->toContain('no-store');
     Queue::assertNothingPushed();
@@ -419,7 +452,7 @@ it('queues a run on the insights queue with only ids and the canonical definitio
         && $job->runId === $runId
         && $job->canonical === TrendsQuery::fromCanonical($job->canonical)->canonical());
 
-    $record = (new InsightRunStore)->find($runId);
+    $record = app(InsightRunStore::class)->find($runId);
     expect($record['status'])->toBe('queued')->and($record['user_id'])->toBe($this->member->id)->and($record['project_id'])->toBe($this->project->id);
 });
 
@@ -427,7 +460,7 @@ it('queues a run on the insights queue with only ids and the canonical definitio
 
 it('reports every run state with the documented shape', function () {
     $runId = apiQueueRun($this->member, $this->project);
-    $store = new InsightRunStore;
+    $store = app(InsightRunStore::class);
     $result = T::runner(new ScriptedReads([T::dayRows()]))->trends($this->project->id, T::definition());
 
     $queued = apiPoll($this->member, $this->project, $runId)->assertOk();
@@ -438,7 +471,7 @@ it('reports every run state with the documented shape', function () {
     $store->markRunning($runId);
     expect(apiPoll($this->member, $this->project, $runId)->json())->toBe(['status' => 'running', 'run_id' => $runId]);
 
-    $store->markDone($runId, $result);
+    $store->markDone($runId, $result->toArray());
     $done = apiPoll($this->member, $this->project, $runId)->assertOk();
     expect($done->json())->toBe(['status' => 'done', 'run_id' => $runId, 'result' => $result->toArray()])
         ->and($done->headers->has('Retry-After'))->toBeFalse();
@@ -446,7 +479,7 @@ it('reports every run state with the documented shape', function () {
 
 it('maps every failure kind to a 200 poll answer with the kind, the fixed message and retryability', function (ClickHouseErrorKind $kind) {
     $runId = apiQueueRun($this->member, $this->project);
-    (new InsightRunStore)->markFailed($runId, $kind);
+    app(InsightRunStore::class)->markFailed($runId, $kind);
 
     $response = apiPoll($this->member, $this->project, $runId)->assertOk();
 
@@ -558,7 +591,7 @@ it('does not count requests the project binder already answered with 404', funct
 });
 
 it('caps the runs of one project that exist at once with 429 busy, per project, and frees a slot when a run ends', function () {
-    config(['insights.max_runs_per_project' => 2]);
+    config(['insights.max_active_runs_per_project' => 2]);
     Queue::fake();
     $other = Project::factory()->create();
     $other->users()->attach($this->member);
@@ -578,8 +611,8 @@ it('caps the runs of one project that exist at once with 429 busy, per project, 
     apiPost($this->member, $other, apiBody(['events' => ['a']]))->assertStatus(202); // another project is unaffected
 
     // the job of the first run ends: its slot is free again
-    $record = (new InsightRunStore)->find($first);
-    (new InsightGate)->releaseDispatchSlot($this->project->id, $first, $record['slot']);
+    $record = app(InsightRunStore::class)->find($first);
+    app(InsightGate::class)->releaseSlots($this->project->id, $this->member->id, $first, $record['project_slot'], $record['user_slot']);
     apiPost($this->member, $this->project, apiBody(['events' => ['c']]))->assertStatus(202);
 });
 
@@ -605,7 +638,7 @@ it('answers a poll with 503 when the run store is down', function () {
 });
 
 it('releases the dispatch slot and the record when queueing the job fails and answers 503 without the exception text', function () {
-    config(['insights.max_runs_per_project' => 1]);
+    config(['insights.max_active_runs_per_project' => 1]);
     Bus::shouldReceive('dispatch')->once()->andThrow(new RuntimeException('redis exploded SECRET-QUEUE-TEXT'));
 
     $response = apiPost($this->member, $this->project, apiBody());
@@ -614,31 +647,243 @@ it('releases the dispatch slot and the record when queueing the job fails and an
         ->and($response->json('error.kind'))->toBe('unavailable')
         ->and($response->getContent())->not->toContain('SECRET-QUEUE-TEXT')
         // the one slot is free again: a second attempt is not answered 429
-        ->and((new InsightGate)->acquireDispatchSlot($this->project->id, 'x'))->toBe(0);
+        ->and(app(InsightGate::class)->acquireProjectSlot($this->project->id, 'x'))->toBe(0);
 });
 
-// ---------------------------------------------------------------- errors stay JSON
+// ---------------------------------------------------------------- idempotent POST, cancel, caps
 
-it('keeps every /api error JSON with a fixed message, never an Inertia page or a redirect', function (string $method, string $uri, int $status) {
+it('answers an identical POST of the same user while the run is queued with the SAME run, queueing nothing new', function () {
+    Queue::fake();
+
+    $first = apiPost($this->member, $this->project, apiBody())->assertStatus(202);
+    $second = apiPost($this->member, $this->project, apiBody())->assertStatus(202);
+
+    expect($second->json())->toBe($first->json())->and($second->headers->get('Location'))->toBe($first->headers->get('Location'));
+    Queue::assertPushed(RunTrendsInsight::class, 1);
+
+    // a different definition is a different run; so is another user (inflight is user-scoped)
+    apiPost($this->member, $this->project, apiBody(['events' => ['other']]))->assertStatus(202);
+    $colleague = User::factory()->create();
+    $this->project->users()->attach($colleague);
+    $theirs = apiPost($colleague, $this->project, apiBody())->assertStatus(202);
+    expect($theirs->json('run_id'))->not->toBe($first->json('run_id'));
+    Queue::assertPushed(RunTrendsInsight::class, 3);
+});
+
+it('takes no second slot for the repeated POST, and queues again once the first run is finished or gone', function () {
+    config(['insights.max_active_runs_per_project' => 1, 'insights.max_active_runs_per_user' => 1]);
+    Queue::fake();
+
+    $first = apiPost($this->member, $this->project, apiBody())->assertStatus(202)->json('run_id');
+    apiPost($this->member, $this->project, apiBody())->assertStatus(202)->assertJsonPath('run_id', $first); // not 429: no new slot
+
+    $store = app(InsightRunStore::class);
+    $store->markDone($first, ['timezone' => 'UTC']);
+    $again = apiPost($this->member, $this->project, apiBody());
+    // the run is finished but its job has not freed the slot yet: busy, and never a second run of the definition
+    expect($again->getStatusCode())->toBeIn([202, 429]);
+    Queue::assertPushed(RunTrendsInsight::class, $again->getStatusCode() === 202 ? 2 : 1);
+
+    // an evicted record leaves a stale inflight key: it is freed and a new run is queued
+    Cache::store('array')->forget(InsightRunStore::key($first));
+    $gate = app(InsightGate::class);
+    $gate->releaseSlots($this->project->id, $this->member->id, $first, 0, 0);
+    apiPost($this->member, $this->project, apiBody())->assertStatus(202);
+});
+
+it('cancels a queued run: 204, idempotent, frees its slots and inflight key, and the poll says cancelled', function () {
+    config(['insights.max_active_runs_per_project' => 1]);
+    Queue::fake();
+    $runId = apiPost($this->member, $this->project, apiBody())->assertStatus(202)->json('run_id');
+    $url = "/api/projects/{$this->project->id}/insights/runs/{$runId}";
+
+    $this->actingAs($this->member)->deleteJson($url)->assertNoContent();
+    $this->actingAs($this->member)->deleteJson($url)->assertNoContent(); // again: still 204
+
+    expect(app(InsightRunStore::class)->find($runId)['status'])->toBe('cancelled');
+    apiPoll($this->member, $this->project, $runId)->assertOk()->assertExactJson(['status' => 'cancelled', 'run_id' => $runId]);
+    // slot and inflight are free: the same definition queues again as a NEW run
+    $next = apiPost($this->member, $this->project, apiBody())->assertStatus(202)->json('run_id');
+    expect($next)->not->toBe($runId);
+});
+
+it('lets a finished run be cancelled idempotently without changing it', function () {
+    $runId = apiQueueRun($this->member, $this->project);
+    app(InsightRunStore::class)->markDone($runId, ['timezone' => 'UTC', 'buckets' => [], 'labels' => [], 'series' => []]);
+
+    $this->actingAs($this->member)->deleteJson("/api/projects/{$this->project->id}/insights/runs/{$runId}")->assertNoContent();
+
+    expect(app(InsightRunStore::class)->find($runId)['status'])->toBe('done');
+});
+
+it('authorises a cancel exactly like a poll: another member, another project, an unknown run and a non-member get the same 404', function () {
+    $runId = apiQueueRun($this->member, $this->project);
+    $colleague = User::factory()->create();
+    $this->project->users()->attach($colleague);
+    $outsider = User::factory()->create();
+    $admin = User::factory()->admin()->create();
+    $other = Project::factory()->create();
+    $other->users()->attach($this->member);
+    $del = fn (User $user, Project|int $project, string $run) => $this->actingAs($user)->deleteJson('/api/projects/'.($project instanceof Project ? $project->id : $project)."/insights/runs/{$run}");
+
+    $bodies = [
+        $del($colleague, $this->project, $runId)->assertNotFound()->getContent(),
+        $del($outsider, $this->project, $runId)->assertNotFound()->getContent(),
+        $del($this->member, $other, $runId)->assertNotFound()->getContent(),
+        $del($this->member, $this->project, InsightRunStore::newId())->assertNotFound()->getContent(),
+        $del($this->member, 999999, $runId)->assertNotFound()->getContent(),
+    ];
+    expect(array_unique($bodies))->toHaveCount(1)
+        ->and(app(InsightRunStore::class)->find($runId)['status'])->toBe('queued');
+
+    $del($admin, $this->project, $runId)->assertNoContent(); // an administrator may cancel any run of a project
+    expect(app(InsightRunStore::class)->find($runId)['status'])->toBe('cancelled');
+});
+
+it('throttles cancels on their own family and does not count a binder 404', function () {
+    $runId = apiQueueRun($this->member, $this->project);
+    apiThrottle('insights.cancel', 1);
+    $url = "/api/projects/{$this->project->id}/insights/runs/{$runId}";
+
+    $this->actingAs($this->member)->deleteJson($url)->assertNoContent();
+    $this->actingAs($this->member)->deleteJson($url)->assertStatus(429)->assertHeader('Retry-After');
+});
+
+it('caps the active runs of one USER across all projects, an administrator included, with 429 busy and a clear message', function () {
+    config(['insights.max_active_runs_per_user' => 3]);
+    Queue::fake();
+    $admin = User::factory()->admin()->create();
+    $projects = Project::factory()->count(5)->create();
+
+    $statuses = [];
+    foreach ($projects as $project) {
+        $statuses[] = apiPost($admin, $project, apiBody())->getStatusCode();
+    }
+    $capped = apiPost($admin, $projects[0], apiBody(['events' => ['more']]))->assertStatus(429)->assertHeader('Retry-After', '3');
+
+    expect($statuses)->toBe([202, 202, 202, 429, 429])
+        ->and($capped->json('error.kind'))->toBe('busy')
+        ->and($capped->json('message'))->toContain('You have too many insights running');
+    Queue::assertPushed(RunTrendsInsight::class, 3);
+
+    // another user is not affected; cancelling one of the admin's runs frees capacity
+    apiPost($this->member, $this->project, apiBody())->assertStatus(202);
+    $first = Queue::pushed(RunTrendsInsight::class)->first();
+    $this->actingAs($admin)->deleteJson("/api/projects/{$first->projectId}/insights/runs/{$first->runId}")->assertNoContent();
+    apiPost($admin, $projects[3], apiBody())->assertStatus(202);
+});
+
+it('frees the user slot too when the project cap rejects the request', function () {
+    config(['insights.max_active_runs_per_project' => 1, 'insights.max_active_runs_per_user' => 1]);
+    Queue::fake();
+    $colleague = User::factory()->create();
+    $this->project->users()->attach($colleague);
+
+    apiPost($this->member, $this->project, apiBody())->assertStatus(202);
+    apiPost($colleague, $this->project, apiBody(['events' => ['b']]))->assertStatus(429);
+
+    // the colleague's user slot was given back: they can run on another project
+    $other = Project::factory()->create();
+    $other->users()->attach($colleague);
+    apiPost($colleague, $other, apiBody())->assertStatus(202);
+});
+
+// ---------------------------------------------------------------- errors stay JSON, one shape
+
+it('keeps every /api error JSON with a fixed message and the one error shape, never an Inertia page or a redirect', function (string $method, string $uri, int $status, string $kind) {
     $response = $this->actingAs($this->member)->call($method, $uri, server: ['HTTP_ACCEPT' => 'text/html']);
 
     expect($response->getStatusCode())->toBe($status)
         ->and($response->headers->get('Content-Type'))->toContain('application/json')
         ->and($response->headers->has('X-Inertia'))->toBeFalse()
+        ->and($response->json('error.kind'))->toBe($kind)
+        ->and($response->json('message'))->toBe($response->json('error.message'))
+        ->and(array_keys($response->json('error')))->toBe(['kind', 'message', 'retryable', 'retry_after_seconds'])
         ->and($response->getContent())->not->toContain('data-page')->not->toContain('Illuminate')->not->toContain('App\\');
 })->with([
-    ['GET', '/api/nothing', 404],
-    ['GET', '/api/projects/1/insights/nothing', 404],
-    ['GET', '/api/projects/abc/insights/runs/x', 404],
-    ['DELETE', '/api/projects/1/insights/trends', 405],
-    ['POST', '/api/projects/1/insights/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 405],
+    ['GET', '/api/nothing', 404, 'not_found'],
+    ['GET', '/api', 404, 'not_found'],
+    ['GET', '/api/', 404, 'not_found'],
+    ['GET', '/API/projects/1/insights/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 404, 'not_found'],
+    ['GET', '/Api/x', 404, 'not_found'],
+    ['GET', '/api/projects/1/insights/nothing', 404, 'not_found'],
+    ['DELETE', '/api/projects/1/insights/trends', 404, 'not_found'],
+    ['POST', '/api/projects/1/insights/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 404, 'not_found'],
+    ['POST', '/api/projects/abc/insights/trends', 404, 'not_found'],
+    ['DELETE', '/api/projects/abc/insights/runs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 404, 'not_found'],
+    ['PUT', '/api/projects/99999999999999999999/insights/trends', 404, 'not_found'],
 ]);
 
-it('does not leak the model name or id in a 404 or the route in a 405', function () {
+it('does not leak the model name or id in a 404', function () {
     $missing = $this->actingAs($this->member)->postJson('/api/projects/987654/insights/trends', apiBody());
-    $method = $this->actingAs($this->member)->deleteJson("/api/projects/{$this->project->id}/insights/trends");
 
-    expect($missing->getContent())->not->toContain('987654')->not->toContain('Project')
-        ->and($method->json())->toBe(['message' => 'This method is not allowed here.'])
-        ->and($method->headers->get('Allow'))->toContain('POST');
+    expect($missing->getContent())->not->toContain('987654')->not->toContain('Project');
 });
+
+it('answers X-Inertia on an API route as JSON, not as an empty 409 location response', function () {
+    $response = $this->actingAs($this->member)->call('GET', '/api/nothing', server: ['HTTP_X_INERTIA' => 'true', 'HTTP_X_INERTIA_VERSION' => 'stale', 'HTTP_ACCEPT' => 'text/html']);
+    $run = $this->actingAs($this->member)->call('GET', "/api/projects/{$this->project->id}/insights/runs/".InsightRunStore::newId(), server: ['HTTP_X_INERTIA' => 'true', 'HTTP_X_INERTIA_VERSION' => 'stale']);
+
+    expect($response->getStatusCode())->toBe(404)->and($response->headers->has('X-Inertia-Location'))->toBeFalse()->and($response->json('error.kind'))->toBe('not_found')
+        ->and($run->getStatusCode())->toBe(404)->and($run->headers->has('X-Inertia'))->toBeFalse();
+});
+
+it('gives a guest the same shape: 401 with the unauthenticated kind', function () {
+    $response = $this->getJson("/api/projects/{$this->project->id}/insights/runs/".InsightRunStore::newId())->assertUnauthorized();
+
+    expect($response->json())->toBe(ApiErrors::body('unauthenticated', 'Unauthenticated.'));
+});
+
+it('answers every other API error status with the shape and a fixed sentence, and masks abort() text', function (int $status, string $kind, bool $retryable) {
+    Route::middleware('web')->get('/api/projects/{project}/probe', fn () => abort($status, 'SECRET-ABORT-TEXT'))->name('api.probe');
+    Route::middleware('web')->get('/api/projects/{project}/probe-retry', fn () => abort($status, 'SECRET-ABORT-TEXT', ['Retry-After' => '7']))->name('api.probe-retry');
+
+    $response = $this->actingAs($this->member)->getJson("/api/projects/{$this->project->id}/probe");
+    $retry = $this->actingAs($this->member)->getJson("/api/projects/{$this->project->id}/probe-retry");
+
+    expect($response->getStatusCode())->toBe($status)
+        ->and($response->getContent())->not->toContain('SECRET-ABORT-TEXT')
+        ->and($response->json('error.kind'))->toBe($kind)
+        ->and($response->json('error.retryable'))->toBe($retryable)
+        ->and($response->json('error.retry_after_seconds'))->toBeNull()
+        ->and($retry->json('error.retry_after_seconds'))->toBe(7)->and($retry->headers->get('Retry-After'))->toBe('7');
+})->with([
+    [400, 'bad_request', false], [403, 'forbidden', false], [405, 'method_not_allowed', false], [409, 'conflict', false],
+    [410, 'gone', false], [413, 'payload_too_large', false], [415, 'unsupported_media_type', false], [419, 'page_expired', false],
+    [422, 'unprocessable', false], [423, 'locked', false], [429, 'rate_limited', true], [500, 'server_error', false], [503, 'unavailable', true],
+    [418, 'client_error', false],
+]);
+
+it('keeps the validation errors map and adds the error object to a 422', function () {
+    $response = apiPost($this->member, $this->project, ['events' => []])->assertStatus(422);
+
+    expect($response->json('errors.events'))->toBeArray()->not->toBeEmpty()
+        ->and($response->json('error.kind'))->toBe('validation')
+        ->and($response->json('error.retryable'))->toBeFalse()
+        ->and($response->json('message'))->toBe($response->json('error.message'));
+});
+
+it('does not mask a 500 while APP_DEBUG is on, and masks it otherwise', function () {
+    Route::middleware('web')->get('/api/projects/{project}/boom', fn () => throw new RuntimeException('SECRET-BOOM'))->name('api.boom');
+    $url = "/api/projects/{$this->project->id}/boom";
+
+    config(['app.debug' => false]);
+    $masked = $this->actingAs($this->member)->getJson($url);
+    config(['app.debug' => true]);
+    $debug = $this->actingAs($this->member)->getJson($url);
+
+    expect($masked->getStatusCode())->toBe(500)->and($masked->getContent())->not->toContain('SECRET-BOOM')->and($masked->json('error.kind'))->toBe('server_error')
+        ->and($debug->getStatusCode())->toBe(500)->and($debug->getContent())->toContain('SECRET-BOOM');
+});
+
+it('keeps the strings of the definition route exact and trims nowhere else', function () {
+    expect(ApiErrors::keepsStringsExact(Request::create('/api/projects/7/insights/trends', 'POST')))->toBeTrue()
+        ->and(ApiErrors::keepsStringsExact(Request::create('/api/projects/7/insights/trends', 'GET')))->toBeFalse()
+        ->and(ApiErrors::keepsStringsExact(Request::create('/api/projects/7/insights/runs/'.str_repeat('a', 32), 'POST')))->toBeFalse()
+        ->and(ApiErrors::keepsStringsExact(Request::create('/api/projects/x/insights/trends', 'POST')))->toBeFalse()
+        ->and(ApiErrors::keepsStringsExact(Request::create('/projects/7/insights/trends', 'POST')))->toBeFalse();
+});
+
+it('detects the API prefix in any case and with or without a trailing part', function (string $path, bool $api) {
+    expect(ApiErrors::isApiRequest(Request::create($path)))->toBe($api);
+})->with([['/api', true], ['/api/', true], ['/api/x', true], ['/API/x', true], ['/Api', true], ['/apis', false], ['/capi/x', false], ['/', false], ['/projects/api', false]]);

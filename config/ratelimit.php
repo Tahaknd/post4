@@ -19,5 +19,6 @@ return [
         // while a chart loads (several charts at once on a dashboard).
         'insights.run' => ['limit' => 60, 'window_seconds' => 60],
         'insights.poll' => ['limit' => 600, 'window_seconds' => 60],
+        'insights.cancel' => ['limit' => 120, 'window_seconds' => 60],
     ],
 ];

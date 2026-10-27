@@ -59,6 +59,11 @@ function webRoutesCollidingWithReservedPaths(): array
 /** The JSON API is the one owner of `api`: its routes are named `api.*` and live under api/projects/{project}/. */
 function isAllowedApiRoute(RoutingRoute $route): bool
 {
+    // The one exception is the catch-all that answers every other verb on an api/ path with a JSON 404.
+    if ($route->getName() === 'api.fallback') {
+        return $route->uri() === 'api/{rest?}' && $route->isFallback;
+    }
+
     return str_starts_with((string) $route->getName(), 'api.') && str_starts_with($route->uri(), 'api/projects/{project}/');
 }
 
@@ -173,10 +178,13 @@ it('detects a web route that takes an app-owned name', function (string $uri) {
 it('registers the insight API routes under api/projects/{project}/ with api.* names and nothing else under api', function () {
     $api = array_values(array_filter(webGroupRoutes(), fn (RoutingRoute $route) => str_starts_with($route->uri(), 'api/')));
 
-    expect(array_map(fn (RoutingRoute $r) => $r->getName(), $api))->toContain('api.insights.trends', 'api.insights.runs.show');
+    expect(array_map(fn (RoutingRoute $r) => $r->getName(), $api))->toContain('api.insights.trends', 'api.insights.runs.show', 'api.insights.runs.cancel', 'api.fallback');
     foreach ($api as $route) {
-        expect(isAllowedApiRoute($route))->toBeTrue("{$route->uri()} is outside api/projects/{project}/ or not named api.*")
-            ->and(in_array('auth', $route->gatherMiddleware(), true))->toBeTrue("{$route->uri()} must require auth");
+        expect(isAllowedApiRoute($route))->toBeTrue("{$route->uri()} is outside api/projects/{project}/ or not named api.*");
+        // everything except the 404 catch-all requires a signed-in user
+        if ($route->getName() !== 'api.fallback') {
+            expect(in_array('auth', $route->gatherMiddleware(), true))->toBeTrue("{$route->uri()} must require auth");
+        }
     }
 });
 

@@ -2,18 +2,23 @@
 
 namespace App\Http\Requests\Insights;
 
+use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\DatePreset;
 use App\Domain\Insights\Trends\DateRange;
 use App\Domain\Insights\Trends\FilterOperator;
 use App\Domain\Insights\Trends\Interval;
+use App\Domain\Insights\Trends\InvalidDateSelection;
 use App\Domain\Insights\Trends\InvalidTrendsQuery;
 use App\Domain\Insights\Trends\Metric;
+use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Models\Project;
+use DateTimeInterface;
 use DateTimeZone;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\Validation\Validator;
 
 /**
@@ -64,27 +69,35 @@ class TrendsInsightRequest extends FormRequest
         return $this->user()?->can('view', $this->route('project')) === true;
     }
 
-    /** @return array<string, list<mixed>> */
+    /**
+     * `filled` on every text field that must not be empty: the validator skips most rules for an empty string, so
+     * without it `metric: ""` would reach the domain and answer with the generic "combination" sentence instead of
+     * the field's own. A filter VALUE may be empty (`equals ''` is meaningful); a filter KEY may not (`required`).
+     * `filled` cannot be combined with `nullable` (it rejects null), so the two nullable breakdown texts are checked
+     * for emptiness in checkShape() instead.
+     *
+     * @return array<string, list<mixed>>
+     */
     public function rules(): array
     {
         return [
             'events' => ['required', 'array', 'min:1', 'max:'.TrendsQuery::MAX_SERIES],
             'events.*' => ['required', 'string', 'min:1', 'max:'.TrendsQuery::MAX_EVENT_LENGTH, 'distinct:strict'],
-            'metric' => ['sometimes', 'string', Rule::in(array_column(Metric::cases(), 'value'))],
-            'interval' => ['sometimes', 'string', Rule::in(array_column(Interval::cases(), 'value'))],
-            'timezone' => ['sometimes', 'string', Rule::in(DateTimeZone::listIdentifiers())],
-            'date_preset' => ['sometimes', 'string', Rule::in(array_column(DatePreset::cases(), 'value'))],
-            'date_from' => ['sometimes', 'string', 'regex:/\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/'],
-            'date_to' => ['sometimes', 'string', 'regex:/\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/'],
+            'metric' => ['sometimes', 'filled', 'string', Rule::in(array_column(Metric::cases(), 'value'))],
+            'interval' => ['sometimes', 'filled', 'string', Rule::in(array_column(Interval::cases(), 'value'))],
+            'timezone' => ['sometimes', 'filled', 'string', Rule::in(DateTimeZone::listIdentifiers())],
+            'date_preset' => ['sometimes', 'filled', 'string', Rule::in(array_column(DatePreset::cases(), 'value'))],
+            'date_from' => ['sometimes', 'filled', 'string', 'regex:/\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/'],
+            'date_to' => ['sometimes', 'filled', 'string', 'regex:/\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/'],
             'breakdown' => ['sometimes', 'nullable', 'array'],
             'breakdown.column' => ['nullable', 'string', Rule::in(array_column(BreakdownColumn::cases(), 'value'))],
-            'breakdown.property' => ['nullable', 'string', 'min:1', 'max:200'],
-            'breakdown.top_n' => ['sometimes', 'integer:strict', 'min:1', 'max:25'],
+            'breakdown.property' => ['nullable', 'string', 'max:'.Breakdown::MAX_KEY_LENGTH],
+            'breakdown.top_n' => ['sometimes', 'integer:strict', 'min:1', 'max:'.Breakdown::MAX_TOP_N],
             'filters' => ['sometimes', 'array', 'max:'.TrendsQuery::MAX_FILTERS],
             'filters.*' => ['array'],
-            'filters.*.key' => ['required', 'string', 'min:1', 'max:200'],
+            'filters.*.key' => ['required', 'string', 'max:'.PropertyFilter::MAX_KEY_LENGTH],
             'filters.*.operator' => ['required', 'string', Rule::in(array_column(FilterOperator::cases(), 'value'))],
-            'filters.*.value' => ['nullable', 'string', 'max:1000'],
+            'filters.*.value' => ['nullable', 'string', 'max:'.PropertyFilter::MAX_VALUE_LENGTH],
         ];
     }
 
@@ -106,26 +119,45 @@ class TrendsInsightRequest extends FormRequest
             'date_to' => 'Dates must look like 2026-03-01.',
             'breakdown' => 'The breakdown must be null or an object.',
             'breakdown.column' => 'The breakdown column must be one of '.implode(', ', array_column(BreakdownColumn::cases(), 'value')).'.',
-            'breakdown.property' => 'The breakdown property must be 1 to 200 characters of text.',
-            'breakdown.top_n' => 'The breakdown top_n must be a whole number from 1 to 25.',
+            'breakdown.property' => 'The breakdown property must be 1 to '.Breakdown::MAX_KEY_LENGTH.' characters of text.',
+            'breakdown.top_n' => 'The breakdown top_n must be a whole number from 1 to '.Breakdown::MAX_TOP_N.'.',
             'filters' => 'Provide a list of at most '.TrendsQuery::MAX_FILTERS.' filters.',
             'filters.*' => 'Each filter must be an object with key, operator and value.',
-            'filters.*.key' => 'A filter key must be 1 to 200 characters of text.',
+            'filters.*.key' => 'A filter key must be 1 to '.PropertyFilter::MAX_KEY_LENGTH.' characters of text.',
             'filters.*.operator' => 'A filter operator must be equals, not_equals, contains or is_set.',
-            'filters.*.value' => 'A filter value must be text of at most 1000 characters, or null.',
+            'filters.*.value' => 'A filter value must be text of at most '.PropertyFilter::MAX_VALUE_LENGTH.' characters, or null.',
         ];
     }
 
     /** @return list<callable(Validator): void> */
     public function after(): array
     {
-        return [function (Validator $validator): void {
-            $this->checkShape($validator);
+        return [fn (Validator $validator) => $this->checkShape($validator)];
+    }
 
-            if ($validator->errors()->isEmpty()) {
-                $this->buildQuery($validator);
-            }
-        }];
+    /**
+     * Assembly belongs to the domain ({@see TrendsQuery::fromInput()}); this only feeds it the validated input and
+     * turns its two exception types into fixed field-level messages. Runs after every rule passed.
+     */
+    protected function passedValidation(): void
+    {
+        /** @var Project $project */
+        $project = $this->route('project');
+
+        try {
+            $this->trends = TrendsQuery::fromInput($this->validated(), new DateTimeZone($project->timezone), $this->now());
+        } catch (InvalidDateSelection) {
+            throw ValidationException::withMessages(['date_from' => 'Use real calendar days: the end must not be before the start, and the range can be at most '.DateRange::MAX_DAYS.' days.']);
+        } catch (InvalidTrendsQuery) {
+            // The exception text names the broken rule but is not shown: one fixed sentence per request.
+            throw ValidationException::withMessages(['definition' => 'This combination is not allowed. Use at most '.TrendsQuery::MAX_SERIES.' series, a smaller breakdown, or a shorter range or larger interval (a result may have at most '.TrendsQuery::MAX_ROWS.' rows).']);
+        }
+    }
+
+    /** The clock of date presets; a test (or a different clock source) overrides this one method. */
+    protected function now(): DateTimeInterface
+    {
+        return now();
     }
 
     /** The validated definition. Only meaningful after validation passed (the controller runs after it). */
@@ -150,6 +182,12 @@ class TrendsInsightRequest extends FormRequest
         if (is_array($breakdown)) {
             if (array_diff(array_keys($breakdown), ['column', 'property', 'top_n']) !== []) {
                 $validator->errors()->add('breakdown', 'The breakdown has fields that are not supported.');
+            } elseif (array_filter(['column', 'property'], fn (string $key) => is_string($breakdown[$key] ?? null) && trim($breakdown[$key]) === '') !== []) {
+                foreach (['column', 'property'] as $key) {
+                    if (is_string($breakdown[$key] ?? null) && trim($breakdown[$key]) === '') {
+                        $validator->errors()->add("breakdown.{$key}", $this->messages()["breakdown.{$key}"]);
+                    }
+                }
             } elseif ((($breakdown['column'] ?? null) === null) === (($breakdown['property'] ?? null) === null)) {
                 $validator->errors()->add('breakdown', 'A breakdown needs exactly one of column and property.');
             }
@@ -182,49 +220,6 @@ class TrendsInsightRequest extends FormRequest
         $absolute = array_key_exists('date_from', $input) || array_key_exists('date_to', $input);
         if ($preset === $absolute || ($absolute && ! (array_key_exists('date_from', $input) && array_key_exists('date_to', $input)))) {
             $validator->errors()->add('date_preset', 'Send either a date_preset, or both date_from and date_to.');
-        }
-    }
-
-    private function buildQuery(Validator $validator): void
-    {
-        $input = $this->json()->all();
-        /** @var Project $project */
-        $project = $this->route('project');
-        $timezone = $input['timezone'] ?? $project->timezone;
-
-        try {
-            $zone = new DateTimeZone($timezone);
-            $range = array_key_exists('date_preset', $input)
-                ? DatePreset::from($input['date_preset'])->resolve(now(), $zone)
-                : DateRange::localDays($input['date_from'], $input['date_to'], $zone);
-        } catch (InvalidTrendsQuery|\ValueError|\Exception) {
-            $validator->errors()->add('date_from', 'Use real calendar days: the end must not be before the start, and the range can be at most '.DateRange::MAX_DAYS.' days.');
-
-            return;
-        }
-
-        $breakdown = $input['breakdown'] ?? null;
-
-        $canonical = [
-            'v' => TrendsQuery::VERSION,
-            'events' => $input['events'],
-            'metric' => $input['metric'] ?? Metric::TotalEvents->value,
-            'range' => $range->canonical(),
-            'interval' => $input['interval'] ?? Interval::Day->value,
-            'timezone' => $timezone,
-            'breakdown' => $breakdown === null ? null : [
-                'column' => $breakdown['column'] ?? null,
-                'property' => $breakdown['property'] ?? null,
-                'top_n' => $breakdown['top_n'] ?? 10,
-            ],
-            'filters' => array_map(fn (array $f) => ['key' => $f['key'], 'operator' => $f['operator'], 'value' => $f['value'] ?? null], $input['filters'] ?? []),
-        ];
-
-        try {
-            $this->trends = TrendsQuery::fromCanonical($canonical);
-        } catch (InvalidTrendsQuery) {
-            // The exception text names the broken rule but is not shown: one fixed sentence per request.
-            $validator->errors()->add('definition', 'This combination is not allowed. Use at most '.TrendsQuery::MAX_SERIES.' series, a smaller breakdown, or a shorter range or larger interval (a result may have at most '.TrendsQuery::MAX_ROWS.' rows).');
         }
     }
 }

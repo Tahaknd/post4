@@ -57,7 +57,18 @@ Route::middleware(['auth', 'auth.session', 'api.no-store'])
         Route::get('/runs/{run}', [InsightController::class, 'show'])->name('runs.show')
             ->where('run', InsightRunStore::ID_ROUTE_PATTERN)
             ->middleware('throttle.user:insights.poll');
+        Route::delete('/runs/{run}', [InsightController::class, 'cancel'])->name('runs.cancel')
+            ->where('run', InsightRunStore::ID_ROUTE_PATTERN)
+            ->middleware('throttle.user:insights.cancel');
     });
+
+// Every other method on an `api/` path that no route above takes (a malformed `{project}` segment, a wrong verb) is a
+// plain 404 JSON, not Laravel's 405 that would name the verbs the web fallback happens to accept. GET/HEAD are covered
+// by the web fallback below. Flagged as a fallback so a guest without a session cookie is answered 404 early too.
+Route::match(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'], 'api/{rest?}', fn () => abort(404))
+    ->where('rest', '.*')
+    ->name('api.fallback')
+    ->fallback();
 
 // Unknown paths answer 404 inside the web group, so a signed-in user's error page knows who they are.
 // RejectSessionlessGuests answers 404 itself, without a session, when there is no session cookie or the path

@@ -2,7 +2,9 @@
 
 namespace App\Http\Middleware;
 
+use App\Http\ApiErrors;
 use App\Models\Project;
+use Closure;
 use Illuminate\Http\Request;
 use Inertia\Middleware;
 
@@ -20,6 +22,19 @@ class HandleInertiaRequests extends Middleware
      * @var string
      */
     protected $rootView = 'app';
+
+    /**
+     * The JSON API is not an Inertia surface: an `X-Inertia` header on an `/api/*` request must not start the
+     * version check (an empty 409 with `X-Inertia-Location`) or the page protocol; the request is answered as JSON.
+     */
+    public function handle(Request $request, Closure $next)
+    {
+        if (ApiErrors::isApiRequest($request)) {
+            return $next($request);
+        }
+
+        return parent::handle($request, $next);
+    }
 
     /**
      * The asset version: an md5 of public/build/manifest.json, or null when nothing is built. A

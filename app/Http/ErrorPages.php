@@ -109,7 +109,7 @@ final class ErrorPages
     /** An HTML (or Inertia) request for a path the UI owns. */
     private function isUiRequest(Request $request): bool
     {
-        if ($request->expectsJson() || $request->is('api/*')) {
+        if ($request->expectsJson() || ApiErrors::isApiRequest($request)) {
             return false;
         }
 

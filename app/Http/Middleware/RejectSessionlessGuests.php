@@ -45,7 +45,7 @@ class RejectSessionlessGuests
         if ($this->hasNoSession($request) && $this->requiresAuthentication($request) && ! auth()->hasUser()) {
             // `api/*` is JSON by definition: a client that forgot the Accept header still gets a 401, not a redirect.
             return $request->expectsJson() || ApiErrors::isApiRequest($request)
-                ? response()->json(['message' => 'Unauthenticated.'], 401)
+                ? response()->json(ApiErrors::body('unauthenticated', 'Unauthenticated.'), 401)
                 : self::loginRedirect($request);
         }
 
