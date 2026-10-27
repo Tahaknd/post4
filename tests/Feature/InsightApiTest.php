@@ -249,6 +249,19 @@ it('rejects hostile and malformed bodies with 422 and fixed messages that never 
     'too many rows' => [apiBody(['events' => ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'], 'interval' => 'hour', 'date_from' => '2026-01-01', 'date_to' => '2026-03-01', 'breakdown' => ['property' => API_MARKER]]), 'definition'],
 ]);
 
+it('answers a list-level rule with the list sentence, not the one of its items', function () {
+    Queue::fake();
+
+    $events = apiPost($this->member, $this->project, apiBody(['events' => []]))->assertStatus(422)->json('errors.events.0');
+    $many = apiPost($this->member, $this->project, apiBody(['events' => array_map(fn ($i) => "e{$i}", range(1, 11))]))->json('errors.events.0');
+    $filters = apiPost($this->member, $this->project, apiBody(['filters' => array_fill(0, 11, ['key' => 'a', 'operator' => 'is_set'])]))->json('errors.filters.0');
+    $item = apiPost($this->member, $this->project, apiBody(['events' => ['']]))->json('errors')['events.0'][0];
+
+    expect($events)->toBe('Provide a list of 1 to 10 event names.')->and($many)->toBe($events)
+        ->and($filters)->toBe('Provide a list of at most 10 filters.')
+        ->and($item)->toContain('Each event name');
+});
+
 it('answers an empty string in a text field with that field\'s own fixed message', function (array $body, string $errorKey) {
     Queue::fake();
 

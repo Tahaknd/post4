@@ -108,8 +108,15 @@ class TrendsInsightRequest extends FormRequest
      */
     public function messages(): array
     {
+        // Laravel matches a wildcard key against `attribute.rule` too, so `events.*` would also answer a failed `min` of
+        // `events` itself: the list-level rules get their own keys, which are looked up first.
+        $events = 'Provide a list of 1 to '.TrendsQuery::MAX_SERIES.' event names.';
+        $filters = 'Provide a list of at most '.TrendsQuery::MAX_FILTERS.' filters.';
+
         return [
-            'events' => 'Provide a list of 1 to '.TrendsQuery::MAX_SERIES.' event names.',
+            'events.required' => $events, 'events.array' => $events, 'events.min' => $events, 'events.max' => $events,
+            'filters.array' => $filters, 'filters.max' => $filters,
+            'events' => $events,
             'events.*' => 'Each event name must be 1 to '.TrendsQuery::MAX_EVENT_LENGTH.' characters of text, and names must be distinct.',
             'metric' => 'The metric must be total_events or unique_users.',
             'interval' => 'The interval must be hour, day, week or month.',
