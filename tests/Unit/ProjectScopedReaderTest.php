@@ -6,7 +6,10 @@ use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 
-const SCOPED_PREFIX = 'WITH project_events AS (SELECT uuid, project_id, event, distinct_id, properties, timestamp, created_at, current_url, browser, country_code FROM posthog.project_events_v) ';
+// Built from COLUMNS so a new column needs no edit here; the explicit list is pinned by 'has an explicit column list'.
+const SCOPED_PREFIX = 'WITH project_events AS (SELECT '.
+    'uuid, project_id, event, distinct_id, properties, timestamp, created_at, current_url, browser, country_code, os, device_type, utm_source, utm_medium, utm_campaign'.
+    ' FROM posthog.project_events_v) ';
 
 beforeEach(function () {
     $this->reader = new ProjectScopedReader(
@@ -159,6 +162,7 @@ it('does not reject words that merely contain a forbidden word', function () {
 it('has an explicit column list that matches the CTE (over the scoped view) and excludes nothing the builders need', function () {
     expect(ProjectScopedReader::COLUMNS)->toBe([
         'uuid', 'project_id', 'event', 'distinct_id', 'properties', 'timestamp', 'created_at', 'current_url', 'browser', 'country_code',
+        'os', 'device_type', 'utm_source', 'utm_medium', 'utm_campaign',
     ])->and(ProjectScopedReader::cte())->not->toContain('*')
         ->and(ProjectScopedReader::cte())->toContain('FROM posthog.project_events_v)');
 });

@@ -2,6 +2,7 @@
 
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
+use Tests\Support\MigrationColumns;
 
 /*
  * Offline guard for docker/clickhouse/users.d/20-readonly-user.xml: the read-only user may SELECT only from
@@ -78,30 +79,63 @@ it('mounts the config.d file next to the users.d file in docker-compose.yml', fu
         ->and($compose)->toContain('target: /etc/clickhouse-server/config.d/10-custom-settings.xml');
 });
 
-it('defines the scoped view in migration 002 as a DEFINER view over events with the SQL_project_id filter', function () {
+it('creates the scoped view in migration 002 as a DEFINER view over events with the SQL_project_id filter', function () {
     $sql = (string) file_get_contents(base_path('database/clickhouse/migrations/002_scoped_events_view.sql'));
     // comments dropped the way the migrator does
     [$statement] = ClickHouseMigrator::statements($sql);
     $flat = preg_replace('/\s+/', ' ', $statement);
 
+    // 002 itself is checksummed and never edited: only its shape is pinned here. Which columns the view has NOW
+    // is decided by the last migration that replaces it (next test).
     expect(ClickHouseMigrator::statements($sql))->toHaveCount(1)
         ->and($flat)->toContain('CREATE VIEW IF NOT EXISTS '.ProjectScopedReader::VIEW)
         ->and($flat)->toContain('DEFINER = CURRENT_USER SQL SECURITY DEFINER')
         ->and($flat)->toContain("WHERE project_id = toUInt32(getSetting('SQL_project_id'))")
         ->and($flat)->toContain('FROM events');
-
-    // the view lists exactly ProjectScopedReader::COLUMNS (no SELECT *: it would skip MATERIALIZED columns)
-    preg_match('/AS SELECT (.+?) FROM events/', $flat, $m);
-    $columns = array_map('trim', explode(',', $m[1] ?? ''));
-    expect($columns)->toBe(ProjectScopedReader::COLUMNS);
 });
 
-it('keeps ProjectScopedReader::COLUMNS equal to the column names of CREATE TABLE events in migration 001', function () {
-    $sql = (string) file_get_contents(base_path('database/clickhouse/migrations/001_events.sql'));
-    preg_match('/CREATE TABLE IF NOT EXISTS events \((.*?)\) ENGINE = ReplacingMergeTree/s', $sql, $m);
-    preg_match_all('/^\s{4}(\w+) /m', $m[1] ?? '', $names);
+it('ends with a scoped view that lists exactly ProjectScopedReader::COLUMNS, in order (all migrations folded)', function () {
+    // no SELECT *: it would skip MATERIALIZED columns. The order is the order of ProjectScopedReader::COLUMNS.
+    expect(MigrationColumns::viewColumns())->toBe(ProjectScopedReader::COLUMNS);
+});
 
-    expect($names[1])->toEqualCanonicalizing(ProjectScopedReader::COLUMNS);
+it('keeps the final view definition a DEFINER view with the SQL_project_id filter, whichever migration wrote it', function () {
+    $flat = MigrationColumns::viewStatement();
+
+    expect($flat)->not->toBe('')
+        ->and($flat)->toContain('DEFINER = CURRENT_USER SQL SECURITY DEFINER')
+        ->and($flat)->toContain("WHERE project_id = toUInt32(getSetting('SQL_project_id'))")
+        ->and($flat)->toContain('FROM events');
+});
+
+it('keeps ProjectScopedReader::COLUMNS equal to the columns events has after ALL migrations', function () {
+    expect(MigrationColumns::tableColumns())->toEqualCanonicalizing(ProjectScopedReader::COLUMNS)
+        ->and(MigrationColumns::tableColumns())->toBe(ProjectScopedReader::COLUMNS);
+});
+
+it('recreates the view in the migration that last changed the columns of events (or later)', function () {
+    // ADD COLUMN leaves the view silently without the column: the migration that changes events must also
+    // CREATE OR REPLACE the view (ScopedViewDriftCheck finds the mistake at deploy time, this finds it in CI).
+    expect(MigrationColumns::lastViewMigration())->not->toBeNull()
+        ->and(MigrationColumns::lastViewMigration() >= MigrationColumns::lastColumnMigration())->toBeTrue(
+            'the last migration that changes events is '.MigrationColumns::lastColumnMigration().' but the view was last written by '.MigrationColumns::lastViewMigration(),
+        );
+});
+
+it('numbers the migrations without gaps or duplicates and never edits applied ones by accident', function () {
+    $numbers = array_map(fn (string $f) => (int) substr($f, 0, 3), MigrationColumns::files());
+
+    expect($numbers)->toBe(range(1, count($numbers)));
+});
+
+it('applies every migration with exactly one statement per MATERIALIZE COLUMN', function () {
+    $sql = (string) file_get_contents(base_path('database/clickhouse/migrations/003_enrichment_columns.sql'));
+    $statements = ClickHouseMigrator::statements($sql);
+    $added = array_values(array_filter(array_map(fn ($s) => preg_match('/ADD COLUMN IF NOT EXISTS (\w+) /', $s, $m) ? $m[1] : null, $statements)));
+    $materialized = array_values(array_filter(array_map(fn ($s) => preg_match('/^ALTER TABLE events MATERIALIZE COLUMN (\w+)$/', $s, $m) ? $m[1] : null, $statements)));
+
+    expect($added)->toBe(['os', 'device_type', 'utm_source', 'utm_medium', 'utm_campaign'])
+        ->and($materialized)->toBe($added);
 });
 
 it('pins the result shape settings of the ro_insights profile and makes them constant', function (string $setting, string $value) {

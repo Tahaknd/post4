@@ -3,6 +3,7 @@
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\RoSettings;
 use Tests\Support\ClickHouseIntegration as CH;
+use Tests\Support\MigrationColumns;
 
 /*
  * Two-tenant isolation against a real ClickHouse (25.8) with the DEFINER view posthog.project_events_v
@@ -191,7 +192,10 @@ it('keeps ProjectScopedReader::COLUMNS equal to the real columns of posthog.even
     // ProjectScopedReader::COLUMNS on purpose (no SELECT *, which would miss MATERIALIZED columns).
     expect($table)->toEqualCanonicalizing(ProjectScopedReader::COLUMNS)
         ->and($view)->toEqualCanonicalizing(ProjectScopedReader::COLUMNS)
-        ->and($view)->toEqualCanonicalizing($table);
+        ->and($view)->toEqualCanonicalizing($table)
+        // the live column order of the view is the order the migrations wrote and COLUMNS lists
+        ->and($view)->toBe(ProjectScopedReader::COLUMNS)
+        ->and($view)->toBe(MigrationColumns::viewColumns());
 });
 
 it('created the view as a DEFINER view that filters on SQL_project_id', function () {

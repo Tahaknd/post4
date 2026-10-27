@@ -51,7 +51,7 @@ it('exits non-zero with a clear message when the scoped view lacks a column of e
             return Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], ProjectScopedReader::COLUMNS)]));
         }
         if (str_starts_with($request->body(), 'DESCRIBE TABLE events')) {
-            return Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], [...ProjectScopedReader::COLUMNS, 'utm_source'])]));
+            return Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], [...ProjectScopedReader::COLUMNS, 'future_column'])]));
         }
 
         return Http::response('{"data":[]}');
@@ -62,7 +62,7 @@ it('exits non-zero with a clear message when the scoped view lacks a column of e
 
     try {
         $this->artisan('clickhouse:migrate')
-            ->expectsOutputToContain('events table has columns ProjectScopedReader::COLUMNS does not list: utm_source')
+            ->expectsOutputToContain('events table has columns ProjectScopedReader::COLUMNS does not list: future_column')
             ->expectsOutputToContain('CREATE OR REPLACE VIEW')
             ->assertExitCode(1);
     } finally {

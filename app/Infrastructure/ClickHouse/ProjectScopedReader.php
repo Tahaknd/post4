@@ -83,7 +83,7 @@ class ProjectScopedReader
      *
      * @var list<string>
      */
-    public const COLUMNS = ['uuid', 'project_id', 'event', 'distinct_id', 'properties', 'timestamp', 'created_at', 'current_url', 'browser', 'country_code'];
+    public const COLUMNS = ['uuid', 'project_id', 'event', 'distinct_id', 'properties', 'timestamp', 'created_at', 'current_url', 'browser', 'country_code', 'os', 'device_type', 'utm_source', 'utm_medium', 'utm_campaign'];
 
     /** `events.project_id` UInt32'dir. */
     private const MAX_PROJECT_ID = 4294967295;
