@@ -6,7 +6,6 @@ use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsResult;
-use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Infrastructure\ClickHouse\ClickHouseException;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
@@ -247,8 +246,8 @@ it('resolves from the container on the read-only client', function () {
     $reader = (new ReflectionProperty(InsightRunner::class, 'reader'))->getValue($runner);
 
     expect($reader)->toBeInstanceOf(ProjectScopedReader::class)
-        // no store injected: the runner resolves config('insights.cache_store') itself, not the default store
-        ->and((new ReflectionProperty(InsightRunner::class, 'cache'))->getValue($runner))->toBeNull();
+        // the container gives the runner config('insights.cache_store'), not the default store
+        ->and((new ReflectionProperty(InsightRunner::class, 'cache'))->getValue($runner))->toBe(Cache::store((string) config('insights.cache_store')));
 });
 
 it('keeps a breakdown result ordered: top series by size, other last', function () {
@@ -351,10 +350,10 @@ describe('cache store and outage cost', function () {
         expect($store->get(InsightRunner::cacheKey(1, T::definition())))->toBeArray();
     });
 
-    it('resolves the store from config insights.cache_store when none is injected', function () {
-        config(['insights.cache_store' => 'array']);
+    it('resolves the store from config insights.cache_store through the container', function () {
+        config(['insights.cache_store' => 'array', 'cache.default' => 'file']);
         $client = new ScriptedReads([T::dayRows(), T::dayRows('x')]);
-        $runner = new InsightRunner(new ProjectScopedReader($client), new TrendsSqlBuilder);
+        $runner = app()->makeWith(InsightRunner::class, ['reader' => new ProjectScopedReader($client)]);
 
         $runner->trends(77, T::definition());
         $runner->trends(77, T::definition());

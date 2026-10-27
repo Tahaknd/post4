@@ -11,7 +11,6 @@ use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\RoSettings;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Support\Facades\Cache as CacheFacade;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Throwable;
@@ -44,8 +43,8 @@ final class InsightRunner
     public function __construct(
         private readonly ProjectScopedReader $reader,
         private readonly TrendsSqlBuilder $builder,
-        /** Tests inject a store; null resolves config('insights.cache_store') on first use. */
-        private readonly ?Cache $cache = null,
+        /** The insight store: the container gives this class `config('insights.cache_store')` (AppServiceProvider). */
+        private readonly Cache $cache,
     ) {}
 
     /** @throws InsightFailed */
@@ -141,7 +140,7 @@ final class InsightRunner
 
     private function store(): Cache
     {
-        return $this->cache ?? CacheFacade::store((string) config('insights.cache_store'));
+        return $this->cache;
     }
 
     private function cacheGet(string $key, ?bool &$down): ?TrendsResult

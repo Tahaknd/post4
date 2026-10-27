@@ -8,7 +8,6 @@ use App\Domain\Capture\PayloadDecoder;
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
-use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
@@ -18,9 +17,11 @@ use App\Infrastructure\ClickHouse\RoSettings;
 use App\Infrastructure\Kafka\KafkaEventProducer;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
 use App\Models\Project;
+use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
@@ -56,17 +57,14 @@ class AppServiceProvider extends ServiceProvider
         ));
         $this->app->when(ProjectScopedReader::class)->needs(ClickHouseReads::class)->give(ReadOnlyClickHouseClient::class);
 
-        // Explicit: autowiring would inject the DEFAULT cache store into the nullable cache argument, while the
-        // runner must use config('insights.cache_store').
-        $this->app->singleton(InsightRunner::class, fn ($app) => new InsightRunner(
-            $app->make(ProjectScopedReader::class),
-            $app->make(TrendsSqlBuilder::class),
-        ));
-
-        // Explicit as well: both take an optional cache Repository, which the container would otherwise fill with the
-        // DEFAULT cache store (CACHE_STORE), while the run state must live on config('insights.cache_store').
-        $this->app->bind(InsightRunStore::class, fn () => new InsightRunStore);
-        $this->app->bind(InsightGate::class, fn () => new InsightGate);
+        // The insight classes keep their state on the insight store (config('insights.cache_store'), Redis), never on the
+        // DEFAULT cache store (CACHE_STORE), which the container would otherwise inject for a Repository argument.
+        $this->app->when([InsightRunner::class, InsightGate::class, InsightRunStore::class])
+            ->needs(CacheRepository::class)
+            ->give(fn () => Cache::store((string) config('insights.cache_store')));
+        $this->app->singleton(InsightRunner::class);
+        $this->app->bind(InsightRunStore::class);
+        $this->app->bind(InsightGate::class);
 
         $this->app->singleton(ClickHouseMigrator::class, fn ($app) => new ClickHouseMigrator(
             $app->make(ClickHouseClient::class),

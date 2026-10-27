@@ -26,7 +26,7 @@ it('runs a supervisor for the insights queue in every environment with exactly t
 })->with(['production', 'local', '*']);
 
 it('keeps the job timeout below the supervisor timeout and the Redis retry_after', function () {
-    $job = new RunTrendsInsight(1, str_repeat('a', 32), []);
+    $job = new RunTrendsInsight(1, str_repeat('a', 32), [], 1);
 
     expect($job->timeout)->toBeLessThan(supervisor('*', 'supervisor-insights')['timeout'])
         ->and(supervisor('*', 'supervisor-insights')['timeout'])->toBeLessThan((int) config('queue.connections.redis.retry_after'));

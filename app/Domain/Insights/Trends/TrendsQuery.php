@@ -3,6 +3,7 @@
 namespace App\Domain\Insights\Trends;
 
 use DateTimeImmutable;
+use DateTimeInterface;
 use DateTimeZone;
 
 /**
@@ -151,6 +152,71 @@ final readonly class TrendsQuery
             self::breakdownFrom($data['breakdown']),
             self::filtersFrom($data['filters']),
         );
+    }
+
+    /**
+     * Assembles a definition from the INPUT of a client: the shape of the insight API body, with the conveniences a
+     * stored definition does not have. Defaults: metric `total_events`, interval `day`, `timezone` = `$defaultZone`
+     * (the project's), breakdown `top_n` = Breakdown::DEFAULT_TOP_N. The range is whole LOCAL days of the zone,
+     * either a {@see DatePreset} resolved against `$now`, or `date_from` + `date_to` as `YYYY-MM-DD` (both
+     * inclusive): the same input within one local day gives the same canonical definition, hence the same hash.
+     * The result goes through {@see self::fromCanonical()}, so every constructor rule applies.
+     *
+     * The caller validates the SHAPE of the input first (types, lengths, unknown keys); this method still never
+     * trusts it: a value of the wrong kind is an {@see InvalidTrendsQuery}, never a TypeError.
+     *
+     * @param  array<array-key, mixed>  $input  keys: events, metric, interval, timezone, date_preset, date_from, date_to, breakdown, filters
+     *
+     * @throws InvalidDateSelection the date part is unusable
+     * @throws InvalidTrendsQuery any other rule is violated
+     */
+    public static function fromInput(array $input, DateTimeZone $defaultZone, DateTimeInterface $now): self
+    {
+        $timezone = $input['timezone'] ?? $defaultZone->getName();
+        if (! is_string($timezone) || ! in_array($timezone, DateTimeZone::listIdentifiers(), true)) {
+            throw new InvalidTrendsQuery('Unknown time zone');
+        }
+        $zone = new DateTimeZone($timezone);
+
+        if (isset($input['date_preset'])) {
+            $preset = is_string($input['date_preset']) ? DatePreset::tryFrom($input['date_preset']) : null;
+            $range = ($preset ?? throw new InvalidDateSelection('Unknown date preset'))->resolve($now, $zone);
+        } elseif (is_string($input['date_from'] ?? null) && is_string($input['date_to'] ?? null)) {
+            try {
+                $range = DateRange::localDays($input['date_from'], $input['date_to'], $zone);
+            } catch (InvalidTrendsQuery $e) {
+                throw new InvalidDateSelection($e->getMessage(), previous: $e);
+            }
+        } else {
+            throw new InvalidDateSelection('A date range needs a preset, or both a first and a last day');
+        }
+
+        $breakdown = $input['breakdown'] ?? null;
+        if ($breakdown !== null && ! is_array($breakdown)) {
+            throw new InvalidTrendsQuery('Malformed breakdown');
+        }
+        $filters = $input['filters'] ?? [];
+        if (! is_array($filters) || ! array_is_list($filters)) {
+            throw new InvalidTrendsQuery('Malformed filters');
+        }
+
+        return self::fromCanonical([
+            'v' => self::VERSION,
+            'events' => $input['events'] ?? [],
+            'metric' => $input['metric'] ?? Metric::TotalEvents->value,
+            'range' => $range->canonical(),
+            'interval' => $input['interval'] ?? Interval::Day->value,
+            'timezone' => $timezone,
+            'breakdown' => $breakdown === null ? null : [
+                'column' => $breakdown['column'] ?? null,
+                'property' => $breakdown['property'] ?? null,
+                'top_n' => $breakdown['top_n'] ?? Breakdown::DEFAULT_TOP_N,
+            ],
+            'filters' => array_map(
+                fn (mixed $f) => is_array($f) ? ['key' => $f['key'] ?? null, 'operator' => $f['operator'] ?? null, 'value' => $f['value'] ?? null] : $f,
+                $filters,
+            ),
+        ]);
     }
 
     /** @param  array<array-key, mixed>  $data */
