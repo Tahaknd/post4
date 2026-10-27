@@ -8,9 +8,9 @@ use App\Http\Controllers\InsightController;
 use App\Http\Controllers\InsightEventsController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ProjectInsightsController;
+use App\Http\Middleware\EncryptHistoryWhenSecure;
 use App\Http\Middleware\EnsureRegistrationOpen;
 use Illuminate\Support\Facades\Route;
-use Inertia\Middleware\EncryptHistory;
 
 // UI routes must not start with a prefix in App\Http\ReservedPaths (capture and posthog-js SDK
 // endpoints); tests/Feature/ReservedRoutePrefixesTest.php enforces it. Static URLs the frontend links
@@ -28,8 +28,9 @@ Route::middleware('guest')->group(function (): void {
 });
 
 // auth.session signs a user out everywhere when their password changes (user:reset-password). Pages are
-// served with encrypted history so the back button after sign-out shows nothing readable.
-Route::middleware(['auth', 'auth.session', EncryptHistory::class])->group(function (): void {
+// served with encrypted history where the browser can do it (https or localhost: App\Http\HistoryEncryption), so the
+// back button after sign-out shows nothing readable.
+Route::middleware(['auth', 'auth.session', EncryptHistoryWhenSecure::class])->group(function (): void {
     Route::get('/', HomeController::class)->name('home');
     Route::post('/logout', [LoginController::class, 'destroy'])->name('logout');
 

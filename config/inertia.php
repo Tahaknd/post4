@@ -143,11 +143,20 @@ return [
     | being accessible after logout. Can also be enabled per-request
     | or via the `inertia.encrypt` middleware.
     |
+    | This application decides PER REQUEST (App\Http\HistoryEncryption, middleware
+    | EncryptHistoryWhenSecure on the signed-in routes), so `encrypt` stays false:
+    | encryption needs `crypto.subtle`, which browsers only offer on https and
+    | localhost; on a plain-http LAN address it makes every transition hang.
+    | `mode` (INERTIA_ENCRYPT_HISTORY): `auto` (default: on for https and
+    | localhost), `true` (always) or `false` (never).
+    |
     */
 
     'history' => [
 
-        'encrypt' => (bool) env('INERTIA_ENCRYPT_HISTORY', false),
+        'encrypt' => false,
+
+        'mode' => env('INERTIA_ENCRYPT_HISTORY', 'auto'),
 
     ],
 

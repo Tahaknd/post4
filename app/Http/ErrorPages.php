@@ -65,8 +65,9 @@ final class ErrorPages
             : self::PAGE_STATUSES[$status];
 
         if ($request->user() !== null) {
-            // Signed-in pages are served with encrypted history; their error pages must not be the exception.
-            Inertia::encryptHistory();
+            // Signed-in pages are served with encrypted history (where the browser can do it); their error pages must
+            // not be the exception, nor may they encrypt where the other pages do not.
+            Inertia::encryptHistory(HistoryEncryption::enabled($request));
         }
 
         $page = (new ExceptionResponse($exception, $request, $response, $this->router, $this->kernel))
