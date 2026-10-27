@@ -26,6 +26,11 @@ export default defineConfig({
             '@': fileURLToPath(new URL('./resources/js', import.meta.url)),
         },
     },
+    build: {
+        // The lazily loaded chart chunk (ECharts core + line/bar + grid, tooltip, legend, aria + the SVG renderer, about 550 kB
+        // minified) is bigger than Vite's default 500 kB warning on purpose: it is not part of the entry bundle.
+        chunkSizeWarningLimit: 700,
+    },
     server: {
         watch: {
             ignored: ['**/storage/framework/views/**'],
