@@ -1,7 +1,7 @@
 <?php
 
 use App\Domain\Insights\Events\EventNames;
-use App\Domain\Insights\Events\EventNamesQuery;
+use App\Domain\Insights\Events\EventNamesSqlBuilder;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Http\ApiErrors;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
@@ -19,6 +19,7 @@ use Illuminate\Testing\TestResponse;
 use Tests\Support\FailingCacheStore;
 use Tests\Support\ProjectCache;
 use Tests\Support\ScriptedReads;
+use Tests\Support\SlowReads;
 
 /*
  * The event-name list of the picker (GET /api/projects/{project}/insights/events): authorisation matrix,
@@ -30,8 +31,11 @@ beforeEach(function () {
     config([
         'insights.cache_store' => 'array',
         'insights.events_cache_ttl_seconds' => 120,
-        'insights.events_max_execution_time' => 5,
+        'insights.events_empty_search_cache_ttl_seconds' => 300,
+        'insights.events_max_execution_seconds' => 5,
         'insights.events_lock_ttl_seconds' => 15,
+        'insights.events_wait_ms' => 0,
+        'insights.events_project_budget_ms' => 10000,
     ]);
     Cache::store('array')->flush();
     LimiterOutage::reset();
@@ -47,7 +51,7 @@ afterEach(fn () => Carbon::setTestNow());
 function scriptEvents(array $answers): ScriptedReads
 {
     $reads = new ScriptedReads($answers);
-    app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesQuery, app(InsightGate::class), Cache::store('array')));
+    app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesSqlBuilder, app(InsightGate::class), Cache::store('array')));
 
     return $reads;
 }
@@ -178,7 +182,7 @@ describe('answer', function () {
     });
 
     it('takes the limits of a config override and never a value from the request', function () {
-        config(['insights.events_max_execution_time' => 2]);
+        config(['insights.events_max_execution_seconds' => 2]);
         $reads = scriptEvents([[]]);
 
         eventsGet($this->member, $this->project, 'max_execution_time=99&settings=1&limit=5000')->assertOk();
@@ -286,12 +290,25 @@ describe('cache', function () {
 
     it('stores the entry with the configured TTL and it expires', function () {
         $reads = scriptEvents([namesRows(['a' => 1]), namesRows(['a' => 2])]);
-        $key = EventNames::cacheKey($this->project->id, null);
+        $key = EventNames::cacheKey($this->project->id, 'a');
 
-        eventsGet($this->member, $this->project)->assertOk();
+        eventsGet($this->member, $this->project, 'q=a')->assertOk();
         expect(Cache::store('array')->has($key))->toBeTrue();
 
         Carbon::setTestNow(now()->addSeconds(119));
+        eventsGet($this->member, $this->project, 'q=a')->assertOk();
+        expect($reads->calls)->toHaveCount(1);
+
+        Carbon::setTestNow(now()->addSeconds(2));
+        eventsGet($this->member, $this->project, 'q=a')->assertOk()->assertJsonPath('events.0.count', 2);
+        expect($reads->calls)->toHaveCount(2);
+    });
+
+    it('keeps the list without a search text longer (300 s), since every picker asks for it first', function () {
+        $reads = scriptEvents([namesRows(['a' => 1]), namesRows(['a' => 2])]);
+
+        eventsGet($this->member, $this->project)->assertOk();
+        Carbon::setTestNow(now()->addSeconds(299));
         eventsGet($this->member, $this->project)->assertOk();
         expect($reads->calls)->toHaveCount(1);
 
@@ -311,7 +328,7 @@ describe('cache', function () {
     });
 
     it('does not cache at all with a TTL of 0', function () {
-        config(['insights.events_cache_ttl_seconds' => 0]);
+        config(['insights.events_cache_ttl_seconds' => 0, 'insights.events_empty_search_cache_ttl_seconds' => 0]);
         $reads = scriptEvents([[], []]);
 
         eventsGet($this->member, $this->project)->assertOk();
@@ -328,14 +345,35 @@ describe('cache', function () {
         expect($reads->calls)->toHaveCount(1);
     });
 
-    it('has a default TTL between 60 and 300 seconds and a time limit below the profile maximum', function () {
+    it('has sensible defaults: a 60-300 s cache, a 3 s ClickHouse limit below the profile maximum, locks that outlive the query', function () {
         $config = require base_path('config/insights.php');
 
         expect($config['events_cache_ttl_seconds'])->toBeBetween(60, 300)
-            ->and($config['events_max_execution_time'])->toBeBetween(1, 22)->toBeLessThan(20)
-            ->and($config['events_lock_ttl_seconds'])->toBeGreaterThan($config['events_max_execution_time'] + 3)
-            ->and(file_get_contents(base_path('config/insights.php')))->toContain("env('INSIGHTS_EVENTS_CACHE_TTL_SECONDS', 120)")->toContain("env('INSIGHTS_EVENTS_MAX_EXECUTION_TIME', 5)")->toContain("env('INSIGHTS_EVENTS_LOCK_TTL_SECONDS', 15)")
-            ->and(file_get_contents(base_path('.env.example')))->toContain('INSIGHTS_EVENTS_CACHE_TTL_SECONDS')->toContain('INSIGHTS_EVENTS_MAX_EXECUTION_TIME');
+            ->and($config['events_empty_search_cache_ttl_seconds'])->toBe(300)
+            ->and($config['events_max_execution_seconds'])->toBe(3)->toBeBetween(1, 22)
+            ->and($config['events_lock_ttl_seconds'])->toBeGreaterThan($config['events_max_execution_seconds'] + 3)
+            ->and($config['events_wait_ms'])->toBe(1200)
+            ->and($config['events_project_budget_ms'])->toBe(10000);
+
+        $source = file_get_contents(base_path('config/insights.php'));
+        foreach (["'INSIGHTS_EVENTS_CACHE_TTL_SECONDS', 120", "'INSIGHTS_EVENTS_EMPTY_SEARCH_CACHE_TTL_SECONDS', 300", "'INSIGHTS_EVENTS_MAX_EXECUTION_SECONDS', 3", "'INSIGHTS_EVENTS_LOCK_TTL_SECONDS', 15", "'INSIGHTS_EVENTS_WAIT_MS', 1200", "'INSIGHTS_EVENTS_PROJECT_BUDGET_MS', 10000"] as $needle) {
+            expect($source)->toContain($needle);
+        }
+        $env = file_get_contents(base_path('.env.example'));
+        foreach (['INSIGHTS_EVENTS_CACHE_TTL_SECONDS', 'INSIGHTS_EVENTS_EMPTY_SEARCH_CACHE_TTL_SECONDS', 'INSIGHTS_EVENTS_MAX_EXECUTION_SECONDS', 'INSIGHTS_EVENTS_LOCK_TTL_SECONDS', 'INSIGHTS_EVENTS_WAIT_MS', 'INSIGHTS_EVENTS_PROJECT_BUDGET_MS'] as $name) {
+            expect($env)->toContain($name);
+        }
+        // one variable per line: no second variable hidden in a comment
+        expect($env)->not->toContain('INSIGHTS_EVENTS_MAX_EXECUTION_SECONDS=3  # ClickHouse seconds for that list (the profile allows 1-22); INSIGHTS_');
+    });
+
+    it('raises the lock TTL above the query limit when it is configured too low', function () {
+        config(['insights.events_max_execution_seconds' => 10, 'insights.events_lock_ttl_seconds' => 5]);
+
+        expect(InsightGate::eventLockSeconds())->toBe(15);
+
+        config(['insights.events_max_execution_seconds' => 3, 'insights.events_lock_ttl_seconds' => 15]);
+        expect(InsightGate::eventLockSeconds())->toBe(15);
     });
 });
 
@@ -386,7 +424,7 @@ describe('the single slot', function () {
     it('fails OPEN when the slot store is down: the list is still answered', function () {
         app()->instance(EventNames::class, new EventNames(
             new ProjectScopedReader(new ScriptedReads([namesRows(['a' => 1])])),
-            new EventNamesQuery,
+            new EventNamesSqlBuilder,
             // the real gate over a store that throws on every call
             new InsightGate(new Repository(new FailingCacheStore)),
             Cache::store('array'),
@@ -404,6 +442,143 @@ describe('the single slot', function () {
 
         $permit->release();
         expect($gate->acquireEventNames())->not->toBeNull();
+    });
+});
+
+describe('fairness: one tenant cannot hold the shared slot', function () {
+    /** Rebinds the service over reads that take `$ms` each and always answer one name. */
+    function slowEvents(int $ms): SlowReads
+    {
+        $reads = new SlowReads($ms);
+        app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesSqlBuilder, app(InsightGate::class), Cache::store('array')));
+
+        return $reads;
+    }
+
+    beforeEach(function () {
+        $this->other = Project::factory()->create(['timezone' => 'UTC']);
+        $this->otherMember = User::factory()->create();
+        $this->other->users()->attach($this->otherMember);
+    });
+
+    it('stops a tenant that hammers distinct search texts once its minute budget is spent, and never touches the other tenant', function () {
+        config(['insights.events_project_budget_ms' => 150]);
+        $reads = slowEvents(60);
+
+        $codes = [];
+        foreach (range(1, 8) as $i) {
+            $codes[] = eventsGet($this->member, $this->project, "q=hammer{$i}")->getStatusCode();
+        }
+
+        // 60 ms per query: the budget of 150 ms is spent after the third, the rest never reach ClickHouse
+        expect($codes)->toBe([200, 200, 200, 429, 429, 429, 429, 429])->and($reads->calls)->toBe(3);
+
+        // the other tenant is served at once, as often as it likes within ITS budget
+        eventsGet($this->otherMember, $this->other, 'q=mine1')->assertOk();
+        eventsGet($this->otherMember, $this->other, 'q=mine2')->assertOk();
+        expect($reads->calls)->toBe(5);
+
+        // answers the hammering tenant already has stay available from the cache
+        eventsGet($this->member, $this->project, 'q=hammer1')->assertOk();
+        expect($reads->calls)->toBe(5);
+    });
+
+    it('answers the exhausted tenant with 429 busy and a Retry-After up to the next minute (at most 10 s), and serves it again then', function () {
+        config(['insights.events_project_budget_ms' => 50]);
+        Carbon::setTestNow('2026-03-15 10:00:41 UTC');
+        slowEvents(60);
+
+        eventsGet($this->member, $this->project, 'q=a')->assertOk();
+        $response = eventsGet($this->member, $this->project, 'q=b')->assertStatus(429)->assertHeader('Retry-After', '10');
+        expect($response->json('error.kind'))->toBe('busy')->and($response->json('error.retry_after_seconds'))->toBe(10);
+
+        Carbon::setTestNow('2026-03-15 10:00:55 UTC');
+        eventsGet($this->member, $this->project, 'q=b')->assertStatus(429)->assertHeader('Retry-After', '5');
+
+        Carbon::setTestNow('2026-03-15 10:01:00 UTC');
+        eventsGet($this->member, $this->project, 'q=b')->assertOk();
+    });
+
+    it('keeps the minute budget with a TTL and charges at least a millisecond per query', function () {
+        slowEvents(0);
+        eventsGet($this->member, $this->project, 'q=a')->assertOk();
+
+        $key = InsightGate::eventBudgetKey($this->project->id, intdiv(now()->timestamp, 60));
+        expect((int) Cache::store('array')->get($key))->toBeGreaterThanOrEqual(1)
+            ->and(app(InsightGate::class)->eventNamesUsedMs($this->project->id))->toBeGreaterThanOrEqual(1);
+    });
+
+    it('lets one project have only one event query in flight: a second search text is answered 429, another project is not affected', function () {
+        $reads = slowEvents(0);
+        $held = app(InsightGate::class)->acquireEventNamesProject($this->project->id);
+        expect($held)->not->toBeNull();
+
+        eventsGet($this->member, $this->project, 'q=second')->assertStatus(429)->assertHeader('Retry-After', '2');
+        expect($reads->calls)->toBe(0);
+
+        eventsGet($this->otherMember, $this->other, 'q=second')->assertOk();
+
+        $held->release();
+        eventsGet($this->member, $this->project, 'q=second')->assertOk();
+    });
+
+    it('does not run an identical search twice at once: while one request asks ClickHouse the others wait for its answer, not for a slot', function () {
+        $reads = slowEvents(0);
+        $flight = app(InsightGate::class)->acquireEventNamesFlight($this->project->id, hash('sha256', 'same'));
+        expect($flight)->not->toBeNull();
+
+        // no wait budget: the follower answers busy, and has not asked ClickHouse
+        eventsGet($this->member, $this->project, 'q=same')->assertStatus(429);
+        expect($reads->calls)->toBe(0);
+
+        // the holder's answer shows up in the cache: the follower serves it without querying
+        Cache::store('array')->put(EventNames::cacheKey($this->project->id, 'same'), ['events' => [['name' => 'same', 'count' => 3]], 'truncated' => false], 60);
+        eventsGet($this->member, $this->project, 'q=same')->assertOk()->assertJsonPath('events.0.count', 3);
+        expect($reads->calls)->toBe(0);
+        $flight->release();
+    });
+
+    it('waits a short bounded time for the global slot before it answers 429', function () {
+        config(['insights.events_wait_ms' => 250]);
+        $reads = slowEvents(0);
+        $held = app(InsightGate::class)->acquireEventNames();
+
+        $start = hrtime(true);
+        eventsGet($this->member, $this->project, 'q=x')->assertStatus(429)->assertHeader('Retry-After', '2');
+        $waited = (hrtime(true) - $start) / 1e6;
+
+        expect($waited)->toBeGreaterThanOrEqual(200)->toBeLessThan(1500)->and($reads->calls)->toBe(0);
+        $held->release();
+    });
+
+    it('never waits when the wait budget is 0 and does not leave any lock behind after a failure', function () {
+        $reads = new ScriptedReads([new ClickHouseException('Code: 241. raw', 241, ClickHouseErrorKind::MemoryLimit)]);
+        app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesSqlBuilder, app(InsightGate::class), Cache::store('array')));
+
+        eventsGet($this->member, $this->project, 'q=a')->assertStatus(503);
+
+        $gate = app(InsightGate::class);
+        expect($gate->acquireEventNames())->not->toBeNull()
+            ->and($gate->acquireEventNamesProject($this->project->id))->not->toBeNull()
+            ->and($gate->acquireEventNamesFlight($this->project->id, hash('sha256', 'a')))->not->toBeNull();
+    });
+
+    it('charges a failed query too (a tenant cannot dodge the budget by failing)', function () {
+        $reads = new ScriptedReads([new ClickHouseException('Code: 159. raw', 159, ClickHouseErrorKind::Timeout)]);
+        app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesSqlBuilder, app(InsightGate::class), Cache::store('array')));
+
+        eventsGet($this->member, $this->project, 'q=a')->assertStatus(503);
+
+        expect(app(InsightGate::class)->eventNamesUsedMs($this->project->id))->toBeGreaterThanOrEqual(1);
+    });
+
+    it('runs live and without any gate when the store is down (nothing to coordinate with), and caches nothing', function () {
+        $reads = new ScriptedReads([namesRows(['a' => 1])]);
+        $broken = new Repository(new FailingCacheStore);
+        app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesSqlBuilder, new InsightGate($broken), $broken));
+
+        eventsGet($this->member, $this->project, 'q=a')->assertOk()->assertJsonPath('events.0.name', 'a');
+        expect($reads->calls)->toHaveCount(1);
     });
 });
 
@@ -444,7 +619,7 @@ describe('failures', function () {
     it('answers a dead cache store by running the query live and caches nothing', function () {
         $reads = new ScriptedReads([namesRows(['a' => 1]), namesRows(['a' => 1])]);
         ProjectCache::breakStore();
-        app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesQuery, app(InsightGate::class), Cache::store('failing')));
+        app()->instance(EventNames::class, new EventNames(new ProjectScopedReader($reads), new EventNamesSqlBuilder, app(InsightGate::class), Cache::store('failing')));
 
         eventsGet($this->member, $this->project)->assertOk()->assertJsonPath('events.0.name', 'a');
         eventsGet($this->member, $this->project)->assertOk();

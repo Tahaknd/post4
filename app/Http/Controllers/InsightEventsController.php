@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use App\Domain\Insights\Events\EventNames;
 use App\Domain\Insights\Events\EventNamesBusy;
 use App\Domain\Insights\InsightFailed;
-use App\Http\ApiErrors;
+use App\Http\InsightErrorResponse;
 use App\Http\Requests\Insights\EventNamesRequest;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Models\Project;
@@ -19,7 +19,7 @@ use Illuminate\Http\JsonResponse;
  *   422 validation (q longer than 100 characters or with control characters), 429 busy / throttled, 503 unavailable
  *
  * `{project}` is bound through Project::visibleTo(user): a project the user cannot open is a 404. Every error has the
- * shape of {@see ApiErrors::body()}; messages are fixed sentences, never server text. The list is a convenience: the
+ * shape of {@see InsightErrorResponse}; messages are fixed sentences, never server text. The list is a convenience: the
  * picker also takes a name typed by hand, so a failure here never blocks a chart.
  */
 class InsightEventsController extends Controller
@@ -28,8 +28,8 @@ class InsightEventsController extends Controller
     {
         try {
             $answer = $names->list($project->id, $request->search());
-        } catch (EventNamesBusy) {
-            return $this->error(429, ClickHouseErrorKind::Busy, 'The event list is busy right now. Try again in a moment.', EventNamesBusy::RETRY_AFTER_SECONDS);
+        } catch (EventNamesBusy $e) {
+            return InsightErrorResponse::make(429, ClickHouseErrorKind::Busy->value, 'The event list is busy right now. Try again in a moment.', true, $e->retryAfterSeconds);
         } catch (InsightFailed $e) {
             return $this->failed($e);
         }
@@ -40,17 +40,10 @@ class InsightEventsController extends Controller
     private function failed(InsightFailed $e): JsonResponse
     {
         return match ($e->kind) {
-            ClickHouseErrorKind::Busy => $this->error(429, $e->kind, 'The analytics database is busy right now. Try again in a few seconds.', $e->retryAfterSeconds()),
-            ClickHouseErrorKind::Unavailable => $this->error(503, $e->kind, 'The analytics database is not reachable right now. Try again in a moment.', (int) config('insights.unavailable_retry_after_seconds')),
-            ClickHouseErrorKind::Timeout, ClickHouseErrorKind::MemoryLimit, ClickHouseErrorKind::TooManyRows => $this->error(503, $e->kind, 'The event list could not be loaded in time. Type to narrow it down, or enter an event name by hand.', null),
-            default => $this->error(500, $e->kind, 'The event list could not be loaded. Enter an event name by hand, or try again later.', null),
+            ClickHouseErrorKind::Busy => InsightErrorResponse::forKind(429, $e->kind, 'The analytics database is busy right now. Try again in a few seconds.'),
+            ClickHouseErrorKind::Unavailable => InsightErrorResponse::forKind(503, $e->kind, 'The analytics database is not reachable right now. Try again in a moment.'),
+            ClickHouseErrorKind::Timeout, ClickHouseErrorKind::MemoryLimit, ClickHouseErrorKind::TooManyRows => InsightErrorResponse::forKind(503, $e->kind, 'The event list could not be loaded in time. Type to narrow it down, or enter an event name by hand.'),
+            default => InsightErrorResponse::forKind(500, $e->kind, 'The event list could not be loaded. Enter an event name by hand, or try again later.'),
         };
-    }
-
-    private function error(int $status, ClickHouseErrorKind $kind, string $message, ?int $retryAfter): JsonResponse
-    {
-        $response = response()->json(ApiErrors::body($kind->value, $message, $retryAfter !== null || $kind->isRetryable(), $retryAfter), $status);
-
-        return $retryAfter === null ? $response : $response->header('Retry-After', (string) $retryAfter);
     }
 }

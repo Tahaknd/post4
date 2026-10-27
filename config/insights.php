@@ -59,11 +59,21 @@ return [
     'poll_interval_seconds' => (int) env('INSIGHTS_POLL_INTERVAL_SECONDS', 1),
     'unavailable_retry_after_seconds' => (int) env('INSIGHTS_UNAVAILABLE_RETRY_AFTER_SECONDS', 5),
 
-    // The event-name list of the picker (Task 3.7, App\Domain\Insights\Events\EventNames): answers are cached per
-    // project and normalised search text for this many seconds (60-300 is the sensible range; 0 switches the cache
-    // off), the ClickHouse time limit of that query (a LOWER value than the profile's 20 s; the profile allows 1-22)
-    // and the TTL of its single global slot (above the HTTP timeout, limit + 3 s, so a killed request frees it).
+    // The event-name list of the picker (Task 3.7, App\Domain\Insights\Events\EventNames). It is interactive, answered
+    // from a per-project cache, and shares ONE ClickHouse slot of the read-only user between all tenants, so it has
+    // its own limits:
+    //  - cache TTL of an answer per project and normalised search text (0 switches the cache off); the list WITHOUT a
+    //    search text, which every picker asks for first, lives longer;
+    //  - the ClickHouse time limit of the query, in seconds (a LOWER value than the profile's 20 s; the profile allows 1-22);
+    //  - the TTL of its locks (the slot, the per-project lock, single flight); the effective TTL is never below
+    //    max_execution_seconds + 5 so a killed request always outlives its own query before it frees them;
+    //  - how long a request may wait for the locks before it is answered 429 busy (milliseconds; 0 = never wait);
+    //  - how much ClickHouse time one project's event lists may use per minute (milliseconds): past it the project is
+    //    answered 429 busy until the minute rolls over, so one tenant typing or scripting cannot hold the slot.
     'events_cache_ttl_seconds' => (int) env('INSIGHTS_EVENTS_CACHE_TTL_SECONDS', 120),
-    'events_max_execution_time' => (int) env('INSIGHTS_EVENTS_MAX_EXECUTION_TIME', 5),
+    'events_empty_search_cache_ttl_seconds' => (int) env('INSIGHTS_EVENTS_EMPTY_SEARCH_CACHE_TTL_SECONDS', 300),
+    'events_max_execution_seconds' => (int) env('INSIGHTS_EVENTS_MAX_EXECUTION_SECONDS', 3),
     'events_lock_ttl_seconds' => (int) env('INSIGHTS_EVENTS_LOCK_TTL_SECONDS', 15),
+    'events_wait_ms' => (int) env('INSIGHTS_EVENTS_WAIT_MS', 1200),
+    'events_project_budget_ms' => (int) env('INSIGHTS_EVENTS_PROJECT_BUDGET_MS', 10000),
 ];

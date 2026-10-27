@@ -1,7 +1,7 @@
 <?php
 
 use App\Domain\Insights\Events\EventNames;
-use App\Domain\Insights\Events\EventNamesQuery;
+use App\Domain\Insights\Events\EventNamesSqlBuilder;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Models\Project;
 use App\Models\User;
@@ -27,17 +27,18 @@ beforeEach(function () {
     config([
         'insights.cache_store' => 'array',
         'insights.events_cache_ttl_seconds' => 120,
-        'insights.events_max_execution_time' => 5,
+        'insights.events_max_execution_seconds' => 5,
+        'insights.events_wait_ms' => 0,
     ]);
     Cache::store('array')->flush();
     Carbon::setTestNow('2026-03-20 08:00:00 UTC');
 
     $this->ch = CH::connect();
     $this->ch->seedEventNamesOnce();
-    app()->instance(EventNames::class, new EventNames($this->ch->reader, new EventNamesQuery, app(InsightGate::class), Cache::store('array')));
+    app()->instance(EventNames::class, new EventNames($this->ch->reader, new EventNamesSqlBuilder, app(InsightGate::class), Cache::store('array')));
 
     $this->projects = [];
-    foreach (['a' => CH::EVENTS_A, 'b' => CH::EVENTS_B, 'c' => CH::EVENTS_C, 'd' => CH::EVENTS_D] as $key => $id) {
+    foreach (['a' => CH::EVENTS_A, 'b' => CH::EVENTS_B, 'c' => CH::EVENTS_C, 'd' => CH::EVENTS_D, 'e' => CH::EVENTS_E] as $key => $id) {
         $this->projects[$key] = Project::factory()->create(['id' => $id, 'timezone' => 'UTC']);
         $this->{'member'.strtoupper($key)} = User::factory()->create();
         $this->projects[$key]->users()->attach($this->{'member'.strtoupper($key)});
@@ -191,7 +192,30 @@ it('answers 429 busy while the one slot is held and works again after it is rele
 });
 
 it('runs with the short time limit under the real read-only profile (the constraint allows it)', function () {
-    config(['insights.events_max_execution_time' => 1]);
+    config(['insights.events_max_execution_seconds' => 1]);
 
     chNames($this->memberA, $this->projects['a'])->assertOk();
+});
+
+it('finds names with accents, symbols and non-Latin letters by their text, whatever bytes they end or begin with', function (string $q, array $expected) {
+    expect(array_keys(chMap(chNames($this->memberE, $this->projects['e'], $q))))->toEqualCanonicalizing($expected);
+})->with([
+    'a grave at the end' => ['voilà', ['voilà']],
+    'the same, upper case' => ['VOILÀ', ['voilà']],
+    'padded with spaces' => ['  voilà  ', ['voilà']],
+    'padded with a no-break space and a zero-width space' => ["\u{00A0}voilà\u{200B}", ['voilà']],
+    'S caron' => ['Š', ['Š']],
+    's caron, lower case' => ['š', ['Š']],
+    'pound sign first' => ['£', ['£x']],
+    'c cedilla' => ['ç', ['ç']],
+    'copyright sign first' => ['©copy', ['©copy']],
+    'degree sign first' => ['°c', ['°C temp']],
+    'degree sign and the rest' => ['°C temp', ['°C temp']],
+    'several capital accents' => ['àéî', ['ÀÉÎ']],
+    'a lone accent matches every name that has it' => ['à', ['voilà', 'ÀÉÎ']],
+    'nothing' => ['ß', []],
+]);
+
+it('lists the accent names unfiltered, all of them', function () {
+    expect(array_keys(chMap(chNames($this->memberE, $this->projects['e']))))->toEqualCanonicalizing(['voilà', 'Š', '£x', 'ç', '©copy', '°C temp', 'ÀÉÎ']);
 });

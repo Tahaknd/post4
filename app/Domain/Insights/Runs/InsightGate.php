@@ -85,15 +85,70 @@ final class InsightGate
     /**
      * The one slot of the interactive event-name list (Task 3.7): GLOBAL, not per project, because what it protects is
      * the single ClickHouse query slot the two insight workers leave free (max_concurrent_queries_for_user = 3 for all
-     * tenants together). An owner-checked lock with a TTL (`insights.events_lock_ttl_seconds`, above the query's own
-     * time limit so a killed request frees it by itself); null means the slot is taken. FAILS OPEN like the other
-     * gates: with the store down the permit is the open one and the profile's own limit (a ClickHouse `busy`) is the
-     * backstop.
+     * tenants together). An owner-checked lock with a TTL ({@see self::eventLockSeconds()}, above the query's own time
+     * limit so a killed request frees it by itself); null means the slot is taken. FAILS OPEN like the other gates:
+     * with the store down the permit is the open one and the profile's own limit (a ClickHouse `busy`) is the backstop.
      */
     public function acquireEventNames(): ?Permit
     {
-        return LimiterOutage::guard(function (): ?Permit {
-            $lock = $this->cache->lock(self::EVENT_NAMES_KEY, max(1, (int) config('insights.events_lock_ttl_seconds')), Str::random(32));
+        return $this->eventLock(self::EVENT_NAMES_KEY);
+    }
+
+    /** At most ONE event-name query of a project is in flight (the fairness layer in front of the global slot). */
+    public function acquireEventNamesProject(int $projectId): ?Permit
+    {
+        return $this->eventLock("insights:events:project:{$projectId}");
+    }
+
+    /** Single flight of an identical (project, search text) miss: the others wait for the answer in the cache. */
+    public function acquireEventNamesFlight(int $projectId, string $searchHash): ?Permit
+    {
+        return $this->eventLock("insights:events:flight:{$projectId}:{$searchHash}");
+    }
+
+    /** Milliseconds of ClickHouse time the event lists of a project have used in the current minute (0 when unknown). */
+    public function eventNamesUsedMs(int $projectId): int
+    {
+        return (int) LimiterOutage::guard(fn () => $this->cache->get(self::eventBudgetKey($projectId, $this->minute())), 0, self::LIMITER);
+    }
+
+    /** Adds the time a query took to the minute's account of the project (always with a TTL, fail-open). */
+    public function chargeEventNames(int $projectId, int $milliseconds): void
+    {
+        LimiterOutage::guard(function () use ($projectId, $milliseconds): void {
+            $key = self::eventBudgetKey($projectId, $this->minute());
+            // `increment` on a missing key would create it WITHOUT an expiry: add it with one first.
+            $this->cache->add($key, 0, 120);
+            $this->cache->increment($key, max(1, $milliseconds));
+        }, limiter: self::LIMITER);
+    }
+
+    /** Seconds until the minute of the budget rolls over (1 to 60). */
+    public function secondsToNextMinute(): int
+    {
+        return 60 - (now()->timestamp % 60);
+    }
+
+    /** Lock TTL of the event-name locks: the configured value, but always above the query's time limit plus the HTTP margin. */
+    public static function eventLockSeconds(): int
+    {
+        return max((int) config('insights.events_lock_ttl_seconds'), (int) config('insights.events_max_execution_seconds') + 5);
+    }
+
+    public static function eventBudgetKey(int $projectId, int $minute): string
+    {
+        return "insights:events:budget:{$projectId}:{$minute}";
+    }
+
+    private function minute(): int
+    {
+        return intdiv(now()->timestamp, 60);
+    }
+
+    private function eventLock(string $key): ?Permit
+    {
+        return LimiterOutage::guard(function () use ($key): ?Permit {
+            $lock = $this->cache->lock($key, self::eventLockSeconds(), Str::random(32));
 
             return $lock->get() ? new Permit($lock) : null;
         }, fallback: Permit::open(), limiter: self::LIMITER);

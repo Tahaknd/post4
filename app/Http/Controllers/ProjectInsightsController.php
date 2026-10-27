@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Domain\Insights\Events\EventNamesQuery;
+use App\Domain\Insights\Events\EventNamesSqlBuilder;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\DatePreset;
@@ -62,8 +62,8 @@ class ProjectInsightsController extends Controller
                 'max_top_n' => Breakdown::MAX_TOP_N,
                 'max_range_days' => DateRange::MAX_DAYS,
                 'max_rows' => TrendsQuery::MAX_ROWS,
-                'max_search_length' => EventNamesQuery::MAX_SEARCH_LENGTH,
-                'event_window_days' => EventNamesQuery::WINDOW_DAYS,
+                'max_search_length' => EventNamesSqlBuilder::MAX_SEARCH_LENGTH,
+                'event_window_days' => EventNamesSqlBuilder::WINDOW_DAYS,
             ],
             'urls' => [
                 'trends' => route('api.insights.trends', $project, absolute: false),

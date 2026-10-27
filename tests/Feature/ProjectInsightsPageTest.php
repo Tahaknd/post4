@@ -1,6 +1,6 @@
 <?php
 
-use App\Domain\Insights\Events\EventNamesQuery;
+use App\Domain\Insights\Events\EventNamesSqlBuilder;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\DatePreset;
@@ -116,8 +116,8 @@ it('takes the limits from the domain constants and the defaults from the API def
         'max_top_n' => Breakdown::MAX_TOP_N,
         'max_range_days' => DateRange::MAX_DAYS,
         'max_rows' => TrendsQuery::MAX_ROWS,
-        'max_search_length' => EventNamesQuery::MAX_SEARCH_LENGTH,
-        'event_window_days' => EventNamesQuery::WINDOW_DAYS,
+        'max_search_length' => EventNamesSqlBuilder::MAX_SEARCH_LENGTH,
+        'event_window_days' => EventNamesSqlBuilder::WINDOW_DAYS,
     ])->and($props['limits'])->toMatchArray(['max_events' => 10, 'max_filters' => 10, 'max_top_n' => 25])
         ->and($props['defaults'])->toBe(['date_preset' => 'last_30_days', 'interval' => 'day', 'metric' => 'total_events', 'top_n' => 10]);
 });

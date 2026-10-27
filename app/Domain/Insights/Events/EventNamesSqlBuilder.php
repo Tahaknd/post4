@@ -26,7 +26,7 @@ use DateTimeZone;
  * than a trend definition accepts (TrendsQuery::MAX_EVENT_LENGTH) are left out: the picker could never use them.
  * The query asks for one row more than {@see self::MAX_NAMES}; a result with that extra row is `truncated`.
  */
-final class EventNamesQuery
+final class EventNamesSqlBuilder
 {
     /** Names the picker is shown (and the API returns). */
     public const MAX_NAMES = 100;

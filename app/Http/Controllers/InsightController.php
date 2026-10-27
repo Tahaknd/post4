@@ -6,6 +6,7 @@ use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
 use App\Http\ApiErrors;
+use App\Http\InsightErrorResponse;
 use App\Http\Requests\Insights\TrendsInsightRequest;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Jobs\RunTrendsInsight;
@@ -114,7 +115,7 @@ class InsightController extends Controller
 
         return match ($record['status']) {
             InsightRunStore::DONE => response()->json(['status' => 'done', 'run_id' => $run, 'result' => $record['result']]),
-            InsightRunStore::FAILED => response()->json(['status' => 'failed', 'run_id' => $run, 'error' => $this->error(ClickHouseErrorKind::tryFrom((string) $record['error']) ?? ClickHouseErrorKind::Unknown)]),
+            InsightRunStore::FAILED => response()->json(['status' => 'failed', 'run_id' => $run, 'error' => InsightErrorResponse::payload(ClickHouseErrorKind::tryFrom((string) $record['error']) ?? ClickHouseErrorKind::Unknown)]),
             InsightRunStore::CANCELLED => response()->json(['status' => 'cancelled', 'run_id' => $run]),
             default => response()->json(['status' => $record['status'], 'run_id' => $run])->header('Retry-After', (string) config('insights.poll_interval_seconds')),
         };
@@ -209,37 +210,12 @@ class InsightController extends Controller
 
     private function busy(string $message): JsonResponse
     {
-        return $this->errorResponse(429, ClickHouseErrorKind::Busy, $message);
+        return InsightErrorResponse::forKind(429, ClickHouseErrorKind::Busy, $message);
     }
 
     private function unavailable(): JsonResponse
     {
-        return $this->errorResponse(503, ClickHouseErrorKind::Unavailable, 'Insights are temporarily unavailable. Try again in a moment.');
-    }
-
-    private function errorResponse(int $status, ClickHouseErrorKind $kind, string $message): JsonResponse
-    {
-        $error = $this->error($kind, $message);
-        $response = response()->json(ApiErrors::body($error['kind'], $error['message'], $error['retryable'], $error['retry_after_seconds']), $status);
-
-        return $error['retry_after_seconds'] === null ? $response : $response->header('Retry-After', (string) $error['retry_after_seconds']);
-    }
-
-    /** @return array{kind: string, message: string, retryable: bool, retry_after_seconds: ?int} */
-    private function error(ClickHouseErrorKind $kind, ?string $message = null): array
-    {
-        return [
-            'kind' => $kind->value,
-            'message' => $message ?? $kind->userMessage(),
-            'retryable' => $kind->isRetryable(),
-            'retry_after_seconds' => $this->retryAfterSeconds($kind),
-        ];
-    }
-
-    /** Busy has its own wait (ClickHouseErrorKind), the other retryable kind (unavailable) the configured one, the rest none. */
-    private function retryAfterSeconds(ClickHouseErrorKind $kind): ?int
-    {
-        return $kind->retryAfterSeconds() ?? ($kind->isRetryable() ? (int) config('insights.unavailable_retry_after_seconds') : null);
+        return InsightErrorResponse::forKind(503, ClickHouseErrorKind::Unavailable, 'Insights are temporarily unavailable. Try again in a moment.');
     }
 
     /**

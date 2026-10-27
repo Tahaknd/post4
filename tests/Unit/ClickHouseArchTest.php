@@ -64,12 +64,11 @@ arch('only the insight runner, the event-name list, the ClickHouse infrastructur
         'App\Providers\AppServiceProvider',
     ]);
 
-it('creates a BuiltQuery only inside classes named *SqlBuilder and the event-name query', function () {
-    // SQL text for the reader is produced by the constants-only builders (EventNamesQuery is the one small builder that
-    // is also its own definition); nothing else may hand it one.
+it('creates a BuiltQuery only inside classes named *SqlBuilder', function () {
+    // SQL text for the reader is produced by the constants-only builders; nothing else may hand it one.
     $offenders = [];
     foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(app_path(), FilesystemIterator::SKIP_DOTS)) as $file) {
-        if ($file->getExtension() === 'php' && ! str_ends_with($file->getBasename('.php'), 'SqlBuilder') && $file->getBasename('.php') !== 'EventNamesQuery'
+        if ($file->getExtension() === 'php' && ! str_ends_with($file->getBasename('.php'), 'SqlBuilder')
             && preg_match('/new\s+\\\\?(?:[A-Za-z\\\\]+\\\\)?BuiltQuery\b/', (string) file_get_contents($file->getPathname())) === 1) {
             $offenders[] = str_replace(app_path().'/', '', $file->getPathname());
         }
