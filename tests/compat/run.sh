@@ -443,6 +443,13 @@ check_delivery() {
   if chv "SELECT JSONExtractString(properties, 'alias') FROM posthog.events WHERE project_id = $PROJECT_ID AND event = '\$create_alias' LIMIT 1 FORMAT TSVRaw"; then
     if [[ "$CH_OUT" == compat-alias-* ]]; then pass "\$create_alias keeps properties.alias"; else fail "\$create_alias properties.alias unexpected: '$CH_OUT'"; fi
   fi
+
+  # --- (4) enrichment leaves a server SDK alone ----------------------------------------------------
+  # posthog-node sends `posthog-node/<version>` as its User-Agent: not a browser, so the Enricher must not
+  # invent a browser, os or device (and it drops the raw ip by default, CAPTURE_STORE_IP=false).
+  if chv "SELECT countIf(browser != '' OR os != '' OR device_type != '') FROM posthog.events WHERE project_id = $PROJECT_ID"; then
+    if [[ "$CH_OUT" == "0" ]]; then pass "no browser/os/device invented for the server SDK's User-Agent"; else fail "$CH_OUT SDK events got a browser, os or device_type from the Enricher"; fi
+  fi
 }
 
 ARRIVED=0
