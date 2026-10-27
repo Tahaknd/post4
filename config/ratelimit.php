@@ -20,5 +20,8 @@ return [
         'insights.run' => ['limit' => 60, 'window_seconds' => 60],
         'insights.poll' => ['limit' => 600, 'window_seconds' => 60],
         'insights.cancel' => ['limit' => 120, 'window_seconds' => 60],
+        // The event picker asks while someone types (debounced, answered from a per-project cache): generous, but a
+        // script cannot hammer ClickHouse's one spare slot.
+        'insights.events' => ['limit' => 120, 'window_seconds' => 60],
     ],
 ];

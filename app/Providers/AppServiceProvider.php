@@ -5,6 +5,7 @@ namespace App\Providers;
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\PayloadDecoder;
+use App\Domain\Insights\Events\EventNames;
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
@@ -59,7 +60,7 @@ class AppServiceProvider extends ServiceProvider
 
         // The insight classes keep their state on the insight store (config('insights.cache_store'), Redis), never on the
         // DEFAULT cache store (CACHE_STORE), which the container would otherwise inject for a Repository argument.
-        $this->app->when([InsightRunner::class, InsightGate::class, InsightRunStore::class])
+        $this->app->when([InsightRunner::class, InsightGate::class, InsightRunStore::class, EventNames::class])
             ->needs(CacheRepository::class)
             ->give(fn () => Cache::store((string) config('insights.cache_store')));
         $this->app->singleton(InsightRunner::class);

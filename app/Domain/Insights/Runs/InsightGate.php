@@ -5,6 +5,7 @@ namespace App\Domain\Insights\Runs;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Support\RateLimit\LimiterOutage;
 use Illuminate\Contracts\Cache\Repository as Cache;
+use Illuminate\Support\Str;
 
 /**
  * The small gates around asynchronous insight runs. All of them are cache locks with an owner and a TTL (atomic
@@ -35,6 +36,8 @@ use Illuminate\Contracts\Cache\Repository as Cache;
 final class InsightGate
 {
     private const string LIMITER = 'insights';
+
+    public const string EVENT_NAMES_KEY = 'insights:events:slot';
 
     public function __construct(private readonly Cache $cache) {}
 
@@ -76,6 +79,23 @@ final class InsightGate
             }
 
             return null;
+        }, fallback: Permit::open(), limiter: self::LIMITER);
+    }
+
+    /**
+     * The one slot of the interactive event-name list (Task 3.7): GLOBAL, not per project, because what it protects is
+     * the single ClickHouse query slot the two insight workers leave free (max_concurrent_queries_for_user = 3 for all
+     * tenants together). An owner-checked lock with a TTL (`insights.events_lock_ttl_seconds`, above the query's own
+     * time limit so a killed request frees it by itself); null means the slot is taken. FAILS OPEN like the other
+     * gates: with the store down the permit is the open one and the profile's own limit (a ClickHouse `busy`) is the
+     * backstop.
+     */
+    public function acquireEventNames(): ?Permit
+    {
+        return LimiterOutage::guard(function (): ?Permit {
+            $lock = $this->cache->lock(self::EVENT_NAMES_KEY, max(1, (int) config('insights.events_lock_ttl_seconds')), Str::random(32));
+
+            return $lock->get() ? new Permit($lock) : null;
         }, fallback: Permit::open(), limiter: self::LIMITER);
     }
 

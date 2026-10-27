@@ -58,4 +58,12 @@ return [
     // the Retry-After of a 503 `unavailable`.
     'poll_interval_seconds' => (int) env('INSIGHTS_POLL_INTERVAL_SECONDS', 1),
     'unavailable_retry_after_seconds' => (int) env('INSIGHTS_UNAVAILABLE_RETRY_AFTER_SECONDS', 5),
+
+    // The event-name list of the picker (Task 3.7, App\Domain\Insights\Events\EventNames): answers are cached per
+    // project and normalised search text for this many seconds (60-300 is the sensible range; 0 switches the cache
+    // off), the ClickHouse time limit of that query (a LOWER value than the profile's 20 s; the profile allows 1-22)
+    // and the TTL of its single global slot (above the HTTP timeout, limit + 3 s, so a killed request frees it).
+    'events_cache_ttl_seconds' => (int) env('INSIGHTS_EVENTS_CACHE_TTL_SECONDS', 120),
+    'events_max_execution_time' => (int) env('INSIGHTS_EVENTS_MAX_EXECUTION_TIME', 5),
+    'events_lock_ttl_seconds' => (int) env('INSIGHTS_EVENTS_LOCK_TTL_SECONDS', 15),
 ];

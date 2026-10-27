@@ -178,7 +178,7 @@ it('detects a web route that takes an app-owned name', function (string $uri) {
 it('registers the insight API routes under api/projects/{project}/ with api.* names and nothing else under api', function () {
     $api = array_values(array_filter(webGroupRoutes(), fn (RoutingRoute $route) => str_starts_with($route->uri(), 'api/')));
 
-    expect(array_map(fn (RoutingRoute $r) => $r->getName(), $api))->toContain('api.insights.trends', 'api.insights.runs.show', 'api.insights.runs.cancel', 'api.fallback');
+    expect(array_map(fn (RoutingRoute $r) => $r->getName(), $api))->toContain('api.insights.trends', 'api.insights.events', 'api.insights.runs.show', 'api.insights.runs.cancel', 'api.fallback');
     foreach ($api as $route) {
         expect(isAllowedApiRoute($route))->toBeTrue("{$route->uri()} is outside api/projects/{project}/ or not named api.*");
         // everything except the 404 catch-all requires a signed-in user
