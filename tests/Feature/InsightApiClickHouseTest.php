@@ -199,7 +199,7 @@ it('treats hostile event names and filter values as data against the real databa
 
 it('rebuilds the same definition the runner would run for the posted body', function () {
     $post = chPost($this->memberA, $this->a, chBody(['interval' => 'day']))->assertStatus(202);
-    $record = (new InsightRunStore)->find($post->json('run_id'));
+    $record = app(InsightRunStore::class)->find($post->json('run_id'));
 
     expect($record['status'])->toBe('done')
         ->and($record['hash'])->toBe(TrendsQuery::fromCanonical([

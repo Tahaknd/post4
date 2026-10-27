@@ -145,13 +145,10 @@ final class ClickHouseIntegration
     {
         $this->deleteRowsOf([self::API_A, self::API_B, self::API_C]);
 
-        $n = 0;
-        $row = function (int $project, string $event, string $distinct, string $ts, array $props = []) use (&$n): void {
-            $this->admin->execute(
-                'INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '
-                ."SELECT {uuid:UUID}, {p:UInt32}, {e:String}, {d:String}, {props:String}, parseDateTime64BestEffort({ts:String}, 3, 'UTC')",
-                ['uuid' => sprintf('00000000-0000-4000-8000-%012d', 600000 + ++$n), 'p' => $project, 'e' => $event, 'd' => $distinct, 'props' => json_encode($props, JSON_THROW_ON_ERROR), 'ts' => $ts],
-            );
+        // ONE multi-row INSERT (one HTTP round trip instead of fourteen): a UNION ALL of typed SELECTs.
+        $rows = [];
+        $row = function (int $project, string $event, string $distinct, string $ts, array $props = []) use (&$rows): void {
+            $rows[] = [600000 + count($rows) + 1, $project, $event, $distinct, json_encode($props, JSON_THROW_ON_ERROR), $ts];
         };
 
         $a = self::API_A;
@@ -170,6 +167,14 @@ final class ClickHouseIntegration
             $row($b, 'signup', 'b1', "2026-03-16 {$time}:00", ['plan' => 'enterprise']);
         }
         $row($b, 'purchase', 'b1', '2026-03-15 13:00:00');
+
+        $selects = [];
+        $params = [];
+        foreach ($rows as $i => [$uuidNumber, $project, $event, $distinct, $props, $ts]) {
+            $selects[] = "SELECT {u{$i}:UUID}, {p{$i}:UInt32}, {e{$i}:String}, {d{$i}:String}, {props{$i}:String}, parseDateTime64BestEffort({ts{$i}:String}, 3, 'UTC')";
+            $params += ["u{$i}" => sprintf('00000000-0000-4000-8000-%012d', $uuidNumber), "p{$i}" => $project, "e{$i}" => $event, "d{$i}" => $distinct, "props{$i}" => $props, "ts{$i}" => $ts];
+        }
+        $this->admin->execute('INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '.implode(' UNION ALL ', $selects), $params);
 
         Assert::assertSame(6 + 8, (int) $this->admin->select('SELECT count() AS n FROM posthog.events WHERE project_id IN ('.self::API_A.', '.self::API_B.', '.self::API_C.')')[0]['n']);
     }
