@@ -308,7 +308,16 @@ it('accepts requests spanning exactly the allowed number of months', function ()
     expect($this->producer->messages)->toHaveCount(24);
 });
 
-it('omits $ip when ip=0 and records it by default', function () {
+it('stores no $ip by default, even one the SDK sent', function () {
+    $this->postJson('/e/', captureEvent($this->key))->assertOk();
+    $this->postJson('/e/', captureEvent($this->key, ['properties' => ['$ip' => '9.9.9.9', 'plan' => 'pro']]))->assertOk();
+
+    expect(json_decode($this->producer->messages[0]['properties'], true))->not->toHaveKey('$ip')
+        ->and(json_decode($this->producer->messages[1]['properties'], true))->toBe(['plan' => 'pro']);
+});
+
+it('omits $ip when ip=0 and records it when CAPTURE_STORE_IP is on', function () {
+    config(['capture.store_ip' => true]);
     $this->postJson('/e/?ip=0', captureEvent($this->key))->assertOk();
     $this->postJson('/e/', captureEvent($this->key))->assertOk();
 
@@ -377,6 +386,7 @@ it('answers 400 for a gzip body of many tiny containers', function () {
 });
 
 it('records the forwarded client ip and limits per client when proxies are trusted', function () {
+    config(['capture.store_ip' => true]);
     bootTrustedProxies('*');
     $server = ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'];
 
@@ -389,6 +399,7 @@ it('records the forwarded client ip and limits per client when proxies are trust
 });
 
 it('ignores X-Forwarded-For when no proxy is trusted', function () {
+    config(['capture.store_ip' => true]);
     bootTrustedProxies(null);
     $server = ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'];
 
@@ -401,6 +412,7 @@ it('ignores X-Forwarded-For when no proxy is trusted', function () {
 });
 
 it('only trusts X-Forwarded-For from the listed proxies', function () {
+    config(['capture.store_ip' => true]);
     bootTrustedProxies(['10.0.0.0/8']);
 
     $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '10.0.0.1', 'HTTP_X_FORWARDED_FOR' => '1.2.3.4'], json_encode(captureEvent($this->key)))->assertOk();
@@ -513,12 +525,14 @@ it('warns when every event of a request was dropped but only debugs partial drop
 });
 
 it('treats ip=false and ip=0 alike, case-insensitively', function (string $value) {
+    config(['capture.store_ip' => true]);
     $this->postJson("/e/?ip=$value", captureEvent($this->key))->assertOk();
 
     expect(json_decode($this->producer->messages[0]['properties'], true))->not->toHaveKey('$ip');
 })->with(['0', 'false', 'FALSE', 'False']);
 
 it('keeps the ip for other ip values and array-valued ip', function (string $query) {
+    config(['capture.store_ip' => true]);
     $this->postJson("/e/?$query", captureEvent($this->key))->assertOk();
 
     expect(json_decode($this->producer->messages[0]['properties'], true))->toHaveKey('$ip');

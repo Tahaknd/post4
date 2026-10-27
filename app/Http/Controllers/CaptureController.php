@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Domain\Capture\Enricher;
 use App\Domain\Capture\EventNormalizer;
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\FailureLimiter;
@@ -34,6 +35,7 @@ final class CaptureController extends Controller
         PayloadDecoder $decoder,
         ProjectResolver $projects,
         EventNormalizer $normalizer,
+        Enricher $enricher,
         EventProducer $producer,
         FailureLimiter $failures,
         ProjectRateLimiter $projectLimiter,
@@ -90,10 +92,15 @@ final class CaptureController extends Controller
             $sentAt = $this->parseSentAt($payload->sentAt);
             $ip = $this->ipDisabled($request->query('ip')) ? null : $request->ip();
 
+            // The ip is the trusted proxy aware one (`$request->ip()`), never a raw X-Forwarded-For. It feeds the
+            // GeoIP lookup and is stored as `$ip` only when CAPTURE_STORE_IP is on.
+            $storeIp = (bool) config('capture.store_ip');
+            $enrichment = $enricher->forRequest($request->userAgent(), $ip, $storeIp);
+
             $messages = [];
             $months = [];
             foreach ($payload->events as $raw) {
-                $message = $normalizer->normalize($raw, $projectId, $now, $sentAt, $ip);
+                $message = $normalizer->normalize($enrichment->apply($raw), $projectId, $now, $sentAt, $storeIp ? $ip : null);
                 if ($message !== null) {
                     $messages[] = $message;
                     $months[substr($message['timestamp'], 0, 7)] = true;

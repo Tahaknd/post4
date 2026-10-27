@@ -2,6 +2,9 @@
 
 namespace App\Providers;
 
+use App\Domain\Capture\Enricher;
+use App\Domain\Capture\Enrichment\MmdbGeoLookup;
+use App\Domain\Capture\Enrichment\UserAgentParser;
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\PayloadDecoder;
@@ -87,6 +90,20 @@ class AppServiceProvider extends ServiceProvider
             config('capture.events_topic'),
             config('capture.status.kafka_group'),
             (int) config('capture.status.kafka_timeout_ms'),
+        ));
+
+        // One Enricher per Octane worker (listed in config/octane.php `warm`): it owns the User-Agent memo and the
+        // GeoIP reader, which only pay off when they outlive a request.
+        $this->app->singleton(Enricher::class, fn () => new Enricher(
+            new UserAgentParser(
+                (int) config('capture.enrichment.ua_cache_entries'),
+                (int) config('capture.enrichment.ua_cache_max_bytes'),
+            ),
+            new MmdbGeoLookup(
+                (string) config('capture.enrichment.geoip_path'),
+                (int) config('capture.enrichment.geoip_retry_seconds'),
+            ),
+            (bool) config('capture.enrichment.enabled'),
         ));
 
         $this->app->singleton(PayloadDecoder::class, fn () => new PayloadDecoder(

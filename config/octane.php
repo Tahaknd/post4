@@ -1,5 +1,6 @@
 <?php
 
+use App\Domain\Capture\Enricher;
 use App\Domain\Capture\EventProducer;
 use Laravel\Octane\Contracts\OperationTerminated;
 use Laravel\Octane\Events\RequestHandled;
@@ -134,6 +135,8 @@ return [
     'warm' => [
         ...Octane::defaultServicesToWarm(),
         EventProducer::class,
+        // Owns the per worker User-Agent memo and the GeoIP reader: resolved once at worker start, not per request.
+        Enricher::class,
     ],
 
     'flush' => [

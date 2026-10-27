@@ -99,7 +99,7 @@ it('memoises per user agent and parses a repeated string once', function () {
         expect($parser->parse($ua))->toBe($first);
     }
 
-    expect($parser->cacheEntries())->toBe(1);
+    expect($parser->cacheEntries())->toBe(1)->and($parser->libraryParses())->toBe(1);
 });
 
 it('bounds the memo by entries and by bytes', function () {

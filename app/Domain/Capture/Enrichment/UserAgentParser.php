@@ -27,6 +27,8 @@ final class UserAgentParser
 
     private readonly BoundedLru $cache;
 
+    private int $libraryParses = 0;
+
     public function __construct(
         int $cacheEntries = 2000,
         int $cacheBytes = 2 * 1024 * 1024,
@@ -53,6 +55,8 @@ final class UserAgentParser
             return $cached;
         }
 
+        $this->libraryParses++;
+
         try {
             $properties = $this->detect($userAgent);
         } catch (\Throwable) {
@@ -63,6 +67,12 @@ final class UserAgentParser
         $this->cache->put($key, $properties, $this->estimateBytes($properties));
 
         return $properties;
+    }
+
+    /** How many times the library actually ran (cache misses); tests and diagnostics. */
+    public function libraryParses(): int
+    {
+        return $this->libraryParses;
     }
 
     public function cacheEntries(): int
