@@ -6,14 +6,16 @@ it('refuses to run when the config is not isolated', function () {
     // Bare phpunit config: no <php> pins, so the app resolves whatever the env says.
     $config = tempnam(sys_get_temp_dir(), 'bare-phpunit-').'.xml';
     $autoload = base_path('vendor/autoload.php');
-    $features = base_path('tests/Feature');
+    // One small file is enough: the guard fires in the first test's setUp. Pointing the child at the whole
+    // directory made it run (and refuse) every Feature test, which took minutes and could hit the timeout.
+    $features = base_path('tests/Feature/HealthTest.php');
 
     file_put_contents($config, <<<XML
         <?xml version="1.0" encoding="UTF-8"?>
         <phpunit bootstrap="{$autoload}" colors="false">
             <testsuites>
                 <testsuite name="Feature">
-                    <directory>{$features}</directory>
+                    <file>{$features}</file>
                 </testsuite>
             </testsuites>
         </phpunit>
