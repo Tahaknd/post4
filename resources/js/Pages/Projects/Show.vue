@@ -87,6 +87,17 @@ function destroy() {
             <p class="text-sm text-muted">Timezone {{ project.timezone }} · created {{ createdAt }}</p>
         </header>
 
+        <section aria-labelledby="insights-heading" class="space-y-3">
+            <h2 id="insights-heading" class="text-lg font-semibold tracking-tight">Insights</h2>
+            <p class="text-sm text-muted">See how often your events happen over time.</p>
+            <Link
+                :href="urls.trends"
+                class="inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 font-medium text-accent-fg hover:bg-accent-hover"
+            >
+                Open Trends
+            </Link>
+        </section>
+
         <section aria-labelledby="key-heading" class="space-y-3">
             <h2 id="key-heading" class="text-lg font-semibold tracking-tight">API key</h2>
             <p class="text-sm text-muted">Events must carry this key. Keep it out of public repositories.</p>
