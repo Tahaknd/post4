@@ -59,6 +59,7 @@ const keyError = computed(() => props.errors.property);
                 <select
                     :id="`${id}-column`"
                     name="breakdown_column"
+                    data-field="breakdown.column"
                     :value="model.column"
                     :aria-invalid="errors.column ? 'true' : undefined"
                     :aria-describedby="errors.column ? `${id}-column-error` : undefined"
@@ -76,6 +77,7 @@ const keyError = computed(() => props.errors.property);
                     :id="`${id}-property`"
                     type="text"
                     name="breakdown_property"
+                    data-field="breakdown.property"
                     autocomplete="off"
                     spellcheck="false"
                     placeholder="e.g. plan or $browser"
@@ -95,6 +97,7 @@ const keyError = computed(() => props.errors.property);
                     :id="`${id}-top`"
                     type="number"
                     name="breakdown_top_n"
+                    data-field="breakdown.top_n"
                     inputmode="numeric"
                     min="1"
                     :max="limits.max_top_n"

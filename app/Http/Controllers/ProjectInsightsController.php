@@ -25,7 +25,8 @@ use Inertia\Response;
  * the allowed values (straight from the domain enums, so a new case shows up here without a UI change), the limits
  * (domain constants, mirrored by the client only for instant feedback; the API stays the source of truth), the
  * defaults, and the API URLs built here with route(). There is no API key: the page talks to the API with the
- * session cookie. The run URL (poll and cancel) comes from the `poll_url` of the 202 answer, not from a template.
+ * session cookie. The run URL (poll and cancel) comes from the `poll_url` of the 202 answer; `urls.runs` is the base the client
+ * checks it against.
  */
 class ProjectInsightsController extends Controller
 {
@@ -67,10 +68,20 @@ class ProjectInsightsController extends Controller
             ],
             'urls' => [
                 'trends' => route('api.insights.trends', $project, absolute: false),
+                // The base of every run URL (`…/runs/`): the client accepts a poll URL only when it is this plus a run id.
+                'runs' => self::runsBase($project),
                 'events' => route('api.insights.events', $project, absolute: false),
                 'project' => route('projects.show', $project, absolute: false),
             ],
         ]);
+    }
+
+    /** `/api/projects/{id}/insights/runs/`, taken from the route itself (a run id placeholder is cut off again). */
+    private static function runsBase(Project $project): string
+    {
+        $placeholder = str_repeat('0', 32);
+
+        return str_replace($placeholder, '', route('api.insights.runs.show', ['project' => $project, 'run' => $placeholder], absolute: false));
     }
 
     private static function presetLabel(DatePreset $preset): string

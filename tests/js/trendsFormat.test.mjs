@@ -3,9 +3,12 @@ import test from 'node:test';
 
 import { buildChartOption } from '../../resources/js/lib/chartOption.js';
 import {
+    DEFAULT_LOCALE,
     MAX_CHART_SERIES,
     abbreviate,
     bucketLabels,
+    codePoints,
+    formatNumber,
     describeResult,
     isEmptyResult,
     selectChartSeries,
@@ -66,15 +69,15 @@ test('an unknown zone falls back to UTC instead of throwing', () => {
 test('series names: sentinels become words, the event joins the name only when there are several events', () => {
     const one = [serie('signup', null, [1]), serie('signup', 'Chrome', [1]), serie('signup', '$$_post4_breakdown_other_$$', [1], { is_other: true }), serie('signup', '$$_post4_breakdown_none_$$', [1], { is_none: true })];
     assert.deepEqual(seriesNames([one[0]]), ['signup']);
-    assert.deepEqual(seriesNames(one.slice(1)), ['Chrome', 'Other', 'None']);
+    assert.deepEqual(seriesNames(one.slice(1)), ['Chrome', 'Other (rest)', 'No value']);
     assert.ok(!seriesNames(one.slice(1)).join().includes('post4'));
 
     const two = [serie('signup', 'Chrome', [1]), serie('purchase', null, [1]), serie('purchase', '$$_post4_breakdown_none_$$', [1], { is_none: true })];
-    assert.deepEqual(seriesNames(two), ['signup · Chrome', 'purchase', 'purchase · None']);
+    assert.deepEqual(seriesNames(two), ['signup · Chrome', 'purchase', 'purchase · No value']);
 });
 
-test('a breakdown value that happens to read like a sentinel is only a sentinel with the flag', () => {
-    assert.deepEqual(seriesNames([serie('e', 'Other', [1]), serie('e', 'None', [1], { is_none: true })]), ['Other', 'None']);
+test('a REAL value called Other or None is shown as written and never collides with the sentinel names', () => {
+    assert.deepEqual(seriesNames([serie('e', 'Other', [1]), serie('e', 'None', [1]), serie('e', '$$_x', [1], { is_other: true }), serie('e', '$$_y', [1], { is_none: true })]), ['Other', 'None', 'Other (rest)', 'No value']);
 });
 
 test('the chart draws at most 10 series, the biggest ones in their original order, and counts what is hidden', () => {
@@ -141,4 +144,33 @@ test('builds an option with a category axis from the labels, aligned data, theme
     assert.equal(bar.series[0].type, 'bar');
     assert.equal(bar.xAxis.boundaryGap, true);
     assert.equal(bar.legend.show, false);
+});
+
+test('formats with an explicit locale, whatever the process language is, and reuses the formatters', () => {
+    assert.equal(DEFAULT_LOCALE, 'en');
+    assert.equal(formatNumber(1234567), '1,234,567');
+    assert.equal(formatNumber(1234567, 'de'), '1.234.567');
+    assert.equal(abbreviate(1200), '1.2K');
+    assert.match(bucketLabels([utc('2026-03-14T22:00:00Z')], 'day', 'UTC')[0], /Mar/);
+    assert.match(bucketLabels([utc('2026-03-14T22:00:00Z')], 'day', 'UTC', 'short', 'de')[0], /M\u00e4r/);
+
+    // one instance per locale and options
+    const first = Intl.DateTimeFormat;
+    let built = 0;
+    Intl.DateTimeFormat = new Proxy(first, { construct(target, args) { built++; return new target(...args); } });
+    try {
+        bucketLabels([utc('2026-03-14T22:00:00Z')], 'day', 'Asia/Tokyo');
+        const afterFirst = built;
+        bucketLabels([utc('2026-03-15T22:00:00Z')], 'day', 'Asia/Tokyo');
+        assert.equal(built, afterFirst, 'the second call built no new formatter');
+    } finally {
+        Intl.DateTimeFormat = first;
+    }
+});
+
+test('counts code points like mb_strlen', () => {
+    assert.equal(codePoints('abc'), 3);
+    assert.equal(codePoints('😀'), 1);
+    assert.equal(codePoints('é'), 1);
+    assert.equal('😀'.length, 2);
 });

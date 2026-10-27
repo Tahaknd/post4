@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, useId, watch } from 'vue';
 
 import { useEventNames } from '@/composables/useEventNames';
-import { formatNumber } from '@/lib/trendsFormat';
+import { codePoints, formatNumber } from '@/lib/trendsFormat';
 
 // Multi-select event picker: the WAI-ARIA 1.2 combobox pattern (an input with role="combobox" that controls a listbox
 // of options, focus staying in the input, the highlighted option named by aria-activedescendant), with the picked
@@ -36,10 +36,14 @@ const text = ref('');
 const open = ref(false);
 const active = ref(-1);
 const announcement = ref('');
+// An input method (IME) composition is in progress: the half-typed text is not a search and Enter belongs to the IME.
+const composing = ref(false);
+// The highlighted option changed through the keyboard (scroll to it); a mouse hover must not scroll the list.
+let keyboardNav = false;
 // After a pick the list reloads; its "N events available" must not replace the "added" announcement.
 let quietReload = false;
 
-const names = useEventNames(props.eventsUrl);
+const names = useEventNames(props.eventsUrl, props.limits.max_search_length);
 
 const trimmed = computed(() => text.value.trim());
 const atLimit = computed(() => selected.value.length >= props.limits.max_events);
@@ -49,7 +53,7 @@ const options = computed(() => {
     const list = names.events.value.map((event) => ({ name: event.name, count: event.count, custom: false }));
     const typed = trimmed.value;
 
-    if (typed !== '' && typed.length <= props.limits.max_event_length && !list.some((option) => option.name === typed)) {
+    if (typed !== '' && codePoints(typed) <= props.limits.max_event_length && !list.some((option) => option.name === typed)) {
         list.push({ name: typed, count: null, custom: true });
     }
 
@@ -111,7 +115,7 @@ function add(name) {
 
         return false;
     }
-    if (name.length < 1 || name.length > props.limits.max_event_length) {
+    if (codePoints(name) < 1 || codePoints(name) > props.limits.max_event_length) {
         announce(`Event names are 1 to ${props.limits.max_event_length} characters.`);
 
         return false;
@@ -156,6 +160,25 @@ function removeChip(name) {
 function onInput(event) {
     quietReload = false;
     text.value = event.target.value;
+
+    // While an input method composes, the text is not final: searching starts when the composition ends.
+    if (event.isComposing || composing.value) {
+        return;
+    }
+
+    open.value = true;
+    active.value = -1;
+    names.search(text.value);
+}
+
+function hover(index) {
+    keyboardNav = false;
+    active.value = index;
+}
+
+function onCompositionEnd(event) {
+    composing.value = false;
+    text.value = event.target.value;
     open.value = true;
     active.value = -1;
     names.search(text.value);
@@ -166,10 +189,16 @@ function move(delta, count) {
         return;
     }
 
+    keyboardNav = true;
     active.value = active.value === -1 ? (delta > 0 ? 0 : count - 1) : (active.value + delta + count) % count;
 }
 
 function onKeydown(event) {
+    // Enter, arrows and Escape belong to the input method while it composes (keyCode 229 is how older browsers say so).
+    if (event.isComposing || event.keyCode === 229) {
+        return;
+    }
+
     const count = options.value.length;
 
     switch (event.key) {
@@ -187,6 +216,7 @@ function onKeydown(event) {
         case 'End':
             if (open.value && count > 0 && (text.value === '' || active.value >= 0)) {
                 event.preventDefault();
+                keyboardNav = true;
                 active.value = event.key === 'Home' ? 0 : count - 1;
             }
             break;
@@ -213,7 +243,8 @@ function onKeydown(event) {
             }
             break;
         case 'Backspace':
-            if (text.value === '' && selected.value.length > 0) {
+            // `repeat`: holding the key down must not eat every chip.
+            if (text.value === '' && selected.value.length > 0 && !event.repeat) {
                 remove(selected.value[selected.value.length - 1]);
             }
             break;
@@ -230,13 +261,23 @@ function onFocusOut(event) {
 
 // Keep the highlighted option visible.
 watch(active, async (index) => {
-    if (index < 0) {
+    if (index < 0 || !keyboardNav) {
         return;
     }
 
     await nextTick();
     document.getElementById(optionId(index))?.scrollIntoView({ block: 'nearest' });
 });
+
+// The list got shorter (a new answer): the highlight must not point past its end.
+watch(
+    () => options.value.length,
+    (count) => {
+        if (active.value >= count) {
+            active.value = count - 1;
+        }
+    },
+);
 
 // Announce what arrived while the list is open.
 watch(
@@ -292,7 +333,7 @@ const describedBy = computed(() => [hintId, props.error && errorId].filter(Boole
                 <input
                     :id="inputId"
                     ref="input"
-                    v-model="text"
+                    :value="text"
                     type="text"
                     role="combobox"
                     autocomplete="off"
@@ -305,9 +346,11 @@ const describedBy = computed(() => [hintId, props.error && errorId].filter(Boole
                     :aria-activedescendant="expanded && active >= 0 ? optionId(active) : undefined"
                     :aria-describedby="describedBy"
                     :aria-invalid="error ? 'true' : undefined"
-                    :maxlength="limits.max_search_length"
+                    :maxlength="limits.max_event_length"
                     class="min-w-[10rem] flex-1 bg-transparent px-1 py-1 text-fg placeholder:text-muted focus-visible:outline-none"
                     @input="onInput"
+                    @compositionstart="composing = true"
+                    @compositionend="onCompositionEnd"
                     @focus="openList"
                     @click="openList"
                     @keydown="onKeydown"
@@ -338,7 +381,7 @@ const describedBy = computed(() => [hintId, props.error && errorId].filter(Boole
                         class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2"
                         :class="index === active ? 'bg-accent text-accent-fg' : 'hover:bg-canvas'"
                         @click="toggle(option)"
-                        @mousemove="active = index"
+                        @mousemove="hover(index)"
                     >
                         <span class="flex min-w-0 items-center gap-2">
                             <span class="w-4 shrink-0" aria-hidden="true">{{ isSelected(option.name) ? '✓' : '' }}</span>

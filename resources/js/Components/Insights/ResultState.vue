@@ -1,14 +1,15 @@
 <script setup>
 import { SecondaryButtonClass } from '@/Components/Insights/classes';
 
-// The non-chart states of the results area. `kind` is one of: idle (no event chosen), loading (no earlier result to
+// The non-chart states of the results area. `kind` is one of: idle (nothing chosen yet), loading (no earlier result to
 // show), empty (every value is zero), failed (a server or client error: `error` has {kind, message, retryable}),
-// expired (the run is gone: run again), blocked (the form has errors, nothing was sent).
+// expired (the run is gone: run again), blocked (the form has errors, nothing was sent). `noun` names what the page
+// shows ("trend", later "funnel"), so the copy is not tied to one insight.
 // Messages from the server are fixed sentences and are shown as text, never as markup.
 defineProps({
     kind: { type: String, required: true },
     error: { type: Object, default: null },
-    notice: { type: String, default: null },
+    noun: { type: String, default: 'result' },
 });
 
 const emit = defineEmits(['retry', 'reload']);
@@ -18,7 +19,7 @@ const RELOAD_KINDS = ['unauthenticated', 'page_expired'];
 
 <template>
     <div v-if="kind === 'idle'" class="rounded-md border border-dashed border-line-strong px-4 py-10 text-center" data-testid="state-idle">
-        <p class="font-medium">Pick an event to see its trend</p>
+        <p class="font-medium">Pick an event to see its {{ noun }}</p>
         <p class="mt-1 text-sm text-muted">Choose one or more events above. The chart appears here.</p>
     </div>
 
@@ -33,7 +34,7 @@ const RELOAD_KINDS = ['unauthenticated', 'page_expired'];
     </div>
 
     <div v-else-if="kind === 'blocked'" class="rounded-md border border-line bg-surface px-4 py-6" data-testid="state-blocked">
-        <p class="font-medium">Fix the highlighted fields to run the query</p>
+        <p class="font-medium">Complete or fix the fields above to run the query</p>
     </div>
 
     <div v-else-if="kind === 'expired'" class="rounded-md border border-line bg-surface px-4 py-6 space-y-3" data-testid="state-expired">

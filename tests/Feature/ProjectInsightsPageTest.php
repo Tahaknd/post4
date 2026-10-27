@@ -70,7 +70,7 @@ it('carries exactly the pinned props, with the project reduced to id, name and t
             'max_events', 'max_event_length', 'max_filters', 'max_filter_key_length', 'max_filter_value_length', 'max_breakdown_key_length',
             'max_top_n', 'max_range_days', 'max_rows', 'max_search_length', 'event_window_days',
         ])
-        ->and(array_keys($props['urls']))->toBe(['trends', 'events', 'project']);
+        ->and(array_keys($props['urls']))->toBe(['trends', 'runs', 'events', 'project']);
 });
 
 it('builds the API urls on the server and never carries a key', function () {
@@ -79,6 +79,7 @@ it('builds the API urls on the server and never carries a key', function () {
 
     expect($props['urls'])->toBe([
         'trends' => "/api/projects/{$this->project->id}/insights/trends",
+        'runs' => "/api/projects/{$this->project->id}/insights/runs/",
         'events' => "/api/projects/{$this->project->id}/insights/events",
         'project' => "/projects/{$this->project->id}",
     ])

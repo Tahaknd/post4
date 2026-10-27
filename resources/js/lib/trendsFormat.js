@@ -7,8 +7,28 @@ export const MAX_CHART_SERIES = 10;
 
 const LABEL_MAX = 40;
 
-export function formatNumber(value) {
-    return new Intl.NumberFormat().format(value);
+/** The language of the interface (all its copy is English): number and date formats do not follow the browser's locale. */
+export const DEFAULT_LOCALE = 'en';
+
+// Intl formatters are expensive to build and a result can have thousands of cells: one instance per locale and options.
+const formatters = new Map();
+
+function numberFormat(locale, options = {}) {
+    const key = `n|${locale}|${JSON.stringify(options)}`;
+    if (!formatters.has(key)) {
+        formatters.set(key, new Intl.NumberFormat(locale, options));
+    }
+
+    return formatters.get(key);
+}
+
+export function formatNumber(value, locale = DEFAULT_LOCALE) {
+    return numberFormat(locale).format(value);
+}
+
+/** Length in code points, like PHP's mb_strlen (not UTF-16 units: an emoji is one). */
+export function codePoints(text) {
+    return [...String(text)].length;
 }
 
 export function truncate(text, max = LABEL_MAX) {
@@ -34,13 +54,19 @@ function dateFormatOptions(interval, style, spansYears) {
     return { month: 'short', day: 'numeric', ...year };
 }
 
-function formatterFor(timeZone, options) {
-    try {
-        return new Intl.DateTimeFormat(undefined, { ...options, timeZone });
-    } catch {
-        // An unknown zone name cannot reach here (the API only returns IANA identifiers); stay readable if it does.
-        return new Intl.DateTimeFormat(undefined, { ...options, timeZone: 'UTC' });
+function formatterFor(timeZone, options, locale = DEFAULT_LOCALE) {
+    const key = `d|${locale}|${timeZone}|${JSON.stringify(options)}`;
+
+    if (!formatters.has(key)) {
+        try {
+            formatters.set(key, new Intl.DateTimeFormat(locale, { ...options, timeZone }));
+        } catch {
+            // An unknown zone name cannot reach here (the API only returns IANA identifiers); stay readable if it does.
+            formatters.set(key, new Intl.DateTimeFormat(locale, { ...options, timeZone: 'UTC' }));
+        }
     }
+
+    return formatters.get(key);
 }
 
 /**
@@ -55,15 +81,15 @@ function formatterFor(timeZone, options) {
  * @param {'short'|'long'} style
  * @returns {string[]}
  */
-export function bucketLabels(buckets, interval, timeZone, style = 'short') {
+export function bucketLabels(buckets, interval, timeZone, style = 'short', locale = DEFAULT_LOCALE) {
     const years = new Set();
-    const yearFormatter = formatterFor(timeZone, { year: 'numeric' });
+    const yearFormatter = formatterFor(timeZone, { year: 'numeric' }, locale);
     for (const bucket of buckets) {
         years.add(yearFormatter.format(new Date(bucket * 1000)));
     }
 
     const options = dateFormatOptions(interval, style, years.size > 1);
-    const formatter = formatterFor(timeZone, options);
+    const formatter = formatterFor(timeZone, options, locale);
     const labels = buckets.map((bucket) => formatter.format(new Date(bucket * 1000)));
 
     const seen = new Map();
@@ -74,19 +100,26 @@ export function bucketLabels(buckets, interval, timeZone, style = 'short') {
         return labels;
     }
 
-    const offset = formatterFor(timeZone, { timeZoneName: 'shortOffset' });
+    const offset = formatterFor(timeZone, { timeZoneName: 'shortOffset' }, locale);
     const offsets = buckets.map((bucket) => offset.formatToParts(new Date(bucket * 1000)).find((part) => part.type === 'timeZoneName')?.value ?? '');
 
     return labels.map((label, index) => (seen.get(label) > 1 ? `${label} (${offsets[index]})` : label));
 }
 
-/** The sentinel series never show the server's sentinel text: `is_other` is "Other", `is_none` is "None". */
+/**
+ * The sentinel series never show the server's sentinel text. Their words are chosen so that they cannot be mistaken for a
+ * REAL value: a property that has the value "Other" or "None" is shown as written, the grouped rest is "Other (rest)"
+ * and events without the property are "No value".
+ */
+export const OTHER_NAME = 'Other (rest)';
+export const NONE_NAME = 'No value';
+
 export function breakdownText(series) {
     if (series.is_other) {
-        return 'Other';
+        return OTHER_NAME;
     }
     if (series.is_none) {
-        return 'None';
+        return NONE_NAME;
     }
 
     return series.breakdown ?? '';
@@ -157,6 +190,6 @@ export function describeResult(result, { chartType, metric, interval }) {
 }
 
 /** Axis tick text for big numbers: 1200 becomes 1.2K. */
-export function abbreviate(value) {
-    return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+export function abbreviate(value, locale = DEFAULT_LOCALE) {
+    return numberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(value);
 }

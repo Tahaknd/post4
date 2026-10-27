@@ -28,7 +28,7 @@ const sums = computed(() => props.series.map((entry) => total(entry.data)));
                     <tr class="border-b border-line-strong">
                         <th scope="col" class="sticky left-0 z-10 bg-surface px-3 py-2 text-left font-medium">{{ periodHeader }}</th>
                         <th v-for="(name, index) in names" :key="index" scope="col" class="whitespace-nowrap px-3 py-2 text-right font-medium" :title="name">
-                            {{ truncate(name) }}
+                            <span aria-hidden="true">{{ truncate(name) }}</span><span class="sr-only">{{ name }}</span>
                         </th>
                     </tr>
                 </thead>

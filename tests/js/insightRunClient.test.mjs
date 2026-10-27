@@ -3,12 +3,13 @@ import test from 'node:test';
 
 import {
     DEBOUNCE_MS,
-    FAST_WINDOW_MS,
+    FAST_POLLS,
     InsightRunClient,
     MAX_BUSY_RETRIES,
     MIN_POST_GAP_MS,
     POLL_FAST_MS,
     POLL_SLOW_MS,
+    REQUEST_TIMEOUT_MS,
     TIMEOUT_MS,
     errorOf,
     readXsrfToken,
@@ -17,6 +18,8 @@ import {
 import { FakeClock, fakeFetch, flush, json } from './helpers.mjs';
 
 const TRENDS = '/api/projects/7/insights/trends';
+const RUNS = '/api/projects/7/insights/runs/';
+const ORIGIN = 'http://localhost:8000';
 const RUN_A = 'a'.repeat(32);
 const RUN_B = 'b'.repeat(32);
 const url = (id) => `/api/projects/7/insights/runs/${id}`;
@@ -32,7 +35,9 @@ function setup(routes, cookie = 'XSRF-TOKEN=tok%3D%3D', fetchOptions = {}) {
     }, fetchOptions);
     const states = [];
     const client = new InsightRunClient({
-        trendsUrl: TRENDS,
+        postUrl: TRENDS,
+        runsUrl: RUNS,
+        origin: ORIGIN,
         onChange: (state) => states.push(state),
         fetch,
         now: clock.now,
@@ -120,19 +125,30 @@ test('a 202 is polled every second, then done; nothing is cancelled', async () =
     assert.equal(polls(calls).length, 3, 'polling stops after done');
 });
 
-test('backs off from 1 s to 2.5 s after 10 s of polling', async () => {
-    const { client, clock, calls } = setup((call) => (call.method === 'POST' ? json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) }) : json(200, { status: 'running', run_id: RUN_A })));
+test('polls every second for the first four polls, then every 2.5 s; a 202 Retry-After sets the first delay', async () => {
+    const { client, clock, calls } = setup((call) => (call.method === 'POST' ? json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) }, { 'Retry-After': '2' }) : json(200, { status: 'running', run_id: RUN_A })));
 
     client.schedule({});
     await clock.advance(DEBOUNCE_MS + 1);
-    const start = clock.time;
-    await clock.advance(FAST_WINDOW_MS);
-    const fast = polls(calls).length;
-    assert.equal(fast, FAST_WINDOW_MS / POLL_FAST_MS);
+    const postAt = posts(calls)[0].at;
+    await clock.advance(30000);
 
-    await clock.advance(POLL_SLOW_MS * 4);
-    assert.equal(polls(calls).length - fast, 4);
-    assert.ok(clock.time - start > FAST_WINDOW_MS);
+    const times = polls(calls).map((call) => call.at);
+    const gaps = times.slice(1).map((at, i) => at - times[i]);
+    assert.equal(times[0] - postAt, 2000, 'the first poll waits the Retry-After of the 202');
+    assert.deepEqual(gaps.slice(0, FAST_POLLS - 1), Array(FAST_POLLS - 1).fill(POLL_FAST_MS));
+    assert.ok(gaps.slice(FAST_POLLS).every((gap) => gap === POLL_SLOW_MS), JSON.stringify(gaps));
+    assert.equal(gaps[FAST_POLLS - 1], POLL_SLOW_MS);
+});
+
+test('a poll answer with Retry-After is a floor for the next poll', async () => {
+    const { client, clock, calls } = setup((call) => (call.method === 'POST' ? json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) }) : json(200, { status: 'queued', run_id: RUN_A }, { 'Retry-After': '4' })));
+
+    client.schedule({});
+    await clock.advance(DEBOUNCE_MS + 30000);
+
+    const times = polls(calls).map((call) => call.at);
+    assert.equal(times[1] - times[0], 4000);
 });
 
 test('a change while a run is queued cancels it with DELETE and only the new run may change the state', async () => {
@@ -185,7 +201,7 @@ test('the 202 of a POST that was superseded while in flight is ignored and its r
         }
 
         return json(204, undefined);
-    }, undefined, { honourAbort: false });
+    });
 
     client.schedule({ events: ['a'] });
     await clock.advance(DEBOUNCE_MS + 1);
@@ -309,17 +325,98 @@ test('401, 419 and 500 show their fixed server sentences; a non-JSON body and a 
     }
 });
 
-test('refuses a poll url that is not a run of this project', async () => {
-    for (const bad of ['https://evil.example/api/projects/7/insights/runs/' + RUN_A, '/api/projects/8/insights/runs/' + RUN_A, '/api/projects/7/insights/runs/xyz', '/api/projects/7/insights/runs/' + RUN_A + '/../x', '//evil.example/x']) {
+test('refuses a poll url that is not a run of this project on this origin', async () => {
+    for (const bad of [
+        'https://evil.example/api/projects/7/insights/runs/' + RUN_A,
+        'http://localhost:9999/api/projects/7/insights/runs/' + RUN_A,
+        '/api/projects/8/insights/runs/' + RUN_A,
+        '/api/projects/7/insights/runs/xyz',
+        '/api/projects/7/insights/runs/' + RUN_A + '/../x',
+        '/api/projects/7/insights/runs/' + RUN_A + '?x=1',
+        '/api/projects/7/insights/runs/' + RUN_A + '#frag',
+        '//evil.example/api/projects/7/insights/runs/' + RUN_A,
+        'http://user:pw@localhost:8000/api/projects/7/insights/runs/' + RUN_A.toUpperCase(),
+        42,
+    ]) {
         const { client, clock, calls, last } = setup((call) => (call.method === 'POST' ? json(202, { status: 'queued', run_id: RUN_A, poll_url: bad }) : json(200, { status: 'running' })));
 
         client.schedule({});
         await clock.advance(DEBOUNCE_MS + POLL_FAST_MS * 3);
 
-        assert.equal(last().phase, 'failed', bad);
-        assert.equal(polls(calls).length, 0, bad);
-        assert.equal(deletes(calls).length, 0, bad);
+        assert.equal(last().phase, 'failed', String(bad));
+        assert.equal(polls(calls).length, 0, String(bad));
+        assert.equal(deletes(calls).length, 0, String(bad));
     }
+});
+
+test('accepts an absolute same-origin poll url and polls its path', async () => {
+    const { client, clock, calls, last } = setup((call) => (call.method === 'POST' ? json(202, { status: 'queued', run_id: RUN_A, poll_url: ORIGIN + url(RUN_A) }) : json(200, { status: 'done', run_id: RUN_A, result: RESULT })));
+
+    client.schedule({});
+    await clock.advance(DEBOUNCE_MS + POLL_FAST_MS + 5);
+
+    assert.equal(last().phase, 'done');
+    assert.equal(polls(calls)[0].url, url(RUN_A));
+});
+
+test('never gives the POST an abort signal from outside: a superseded POST still delivers its answer, and its run is cancelled', async () => {
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    let n = 0;
+    const { client, clock, calls } = setup(async (call) => {
+        if (call.method === 'POST' && ++n === 1) {
+            await gate;
+
+            return json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) });
+        }
+
+        return call.method === 'POST' ? json(200, { status: 'done', run_id: null, result: RESULT }) : json(204, undefined);
+    });
+
+    client.schedule({ events: ['a'] });
+    await clock.advance(DEBOUNCE_MS + 1);
+    const first = posts(calls)[0];
+    client.schedule({ events: ['b'] });
+    await flush();
+
+    assert.equal(first.signal.aborted, false, 'the POST in flight was not aborted by the supersede');
+    release();
+    await flush();
+    assert.deepEqual(deletes(calls).map((call) => call.url), [url(RUN_A)]);
+});
+
+test('a request that never answers ends in client_timeout: the POST after its own limit, nothing hangs', async () => {
+    const { client, clock, calls, last } = setup(() => new Promise(() => {}));
+
+    client.schedule({});
+    await clock.advance(DEBOUNCE_MS + REQUEST_TIMEOUT_MS - 1);
+    assert.equal(last().phase, 'loading');
+    await clock.advance(2);
+
+    assert.equal(last().phase, 'failed');
+    assert.equal(last().error.kind, 'client_timeout');
+    assert.equal(last().error.retryable, true);
+    assert.equal(posts(calls).length, 1);
+});
+
+test('a poll that never answers is retried a bounded number of times, then the run is cancelled and reported as client_timeout', async () => {
+    const { client, clock, calls, last } = setup((call) => (call.method === 'POST' ? json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) }) : call.method === 'DELETE' ? json(204, undefined) : new Promise(() => {})));
+
+    client.schedule({});
+    await clock.advance(DEBOUNCE_MS + TIMEOUT_MS);
+
+    assert.equal(last().phase, 'failed');
+    assert.equal(last().error.kind, 'client_timeout');
+    assert.equal(polls(calls).length, 3);
+    assert.deepEqual(deletes(calls).map((call) => call.url), [url(RUN_A)]);
+});
+
+test('a 200 without a usable result is an error, never a hang', async () => {
+    const { client, clock, last } = setup(() => ({ status: 200, headers: {}, body: undefined }));
+    client.schedule({});
+    await clock.advance(DEBOUNCE_MS + 10);
+
+    assert.equal(last().phase, 'failed');
 });
 
 test('dispose stops polling, cancels the run and never touches the state again', async () => {
@@ -388,4 +485,23 @@ test('helpers: XSRF cookie decoding, Retry-After parsing and error reduction', (
     assert.equal(errorOf({ error: { message: '' } }), null);
     assert.deepEqual(errorOf({ error: { kind: 'busy', message: 'm', retryable: true, retry_after_seconds: 3, extra: '<script>' } }), { kind: 'busy', message: 'm', retryable: true, retry_after_seconds: 3 });
     assert.equal(errorOf({ error: { kind: 'x', message: 'y'.repeat(1000) } }).message.length, 300);
+});
+
+test('hold cancels what runs and keeps the last result (an unfinished edit does not wipe the chart)', async () => {
+    let n = 0;
+    const { client, clock, calls, last } = setup((call) => (call.method === 'POST' ? (++n === 1 ? json(200, { status: 'done', run_id: null, result: RESULT }) : json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) })) : json(200, { status: 'running', run_id: RUN_A })));
+
+    client.schedule({ events: ['a'] });
+    await clock.advance(DEBOUNCE_MS + 1);
+    assert.deepEqual(last().result, RESULT);
+
+    client.schedule({ events: ['b'] });
+    await clock.advance(MIN_POST_GAP_MS + DEBOUNCE_MS + POLL_FAST_MS + 5);
+    client.hold();
+    await clock.advance(10000);
+
+    assert.equal(last().phase, 'held');
+    assert.deepEqual(last().result, RESULT);
+    assert.deepEqual(deletes(calls).map((call) => call.url), [url(RUN_A)]);
+    assert.equal(posts(calls).length, 2);
 });

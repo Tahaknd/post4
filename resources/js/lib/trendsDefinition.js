@@ -7,12 +7,24 @@
 // where a rule depends on something the client cannot know exactly (the number of buckets across DST changes, "today"
 // for this_month), the estimate is a lower bound, so a definition the server would accept is never blocked here.
 
+import { codePoints } from './trendsFormat.js';
+
 export const PRESET_DAYS_MIN = { last_7_days: 7, last_30_days: 30, last_90_days: 90, this_month: 1, last_month: 28 };
 
 let nextFilterId = 1;
 
 export function newFilter(overrides = {}) {
     return { id: nextFilterId++, key: '', operator: 'equals', value: '', ...overrides };
+}
+
+/** A filter row nobody has typed into yet: it is a draft, not part of the definition (no body, no validation). */
+export function isBlankFilter(filter) {
+    return filter.key === '' && filter.value === '';
+}
+
+/** The filters that count: every row that is not blank, in the order of the form (and of the request body). */
+export function activeFilters(definition) {
+    return definition.filters.filter((filter) => !isBlankFilter(filter));
 }
 
 /** The definition a page starts from: no event chosen yet, everything else at the server's defaults. */
@@ -50,7 +62,7 @@ export function toRequestBody(definition, options) {
 
     const needsValue = new Map(options.operators.map((operator) => [operator.value, operator.needs_value]));
 
-    body.filters = definition.filters.map((filter) => ({
+    body.filters = activeFilters(definition).map((filter) => ({
         key: filter.key,
         operator: filter.operator,
         value: needsValue.get(filter.operator) === false ? null : filter.value,
@@ -129,7 +141,7 @@ export function validateDefinition(definition, props) {
     if (breakdown.mode === 'column' && breakdown.column === '') {
         errors.breakdown.column = 'Choose a column to break down by.';
     }
-    if (breakdown.mode === 'property' && (breakdown.property === '' || breakdown.property.length > limits.max_breakdown_key_length)) {
+    if (breakdown.mode === 'property' && (breakdown.property === '' || codePoints(breakdown.property) > limits.max_breakdown_key_length)) {
         errors.breakdown.property = breakdown.property === '' ? 'Enter a property key.' : `The key can be at most ${limits.max_breakdown_key_length} characters.`;
     }
     if (breakdown.mode !== 'none' && !(Number.isInteger(breakdown.topN) && breakdown.topN >= 1 && breakdown.topN <= limits.max_top_n)) {
@@ -140,14 +152,14 @@ export function validateDefinition(definition, props) {
         errors.general = `Use at most ${limits.max_filters} filters.`;
     }
     const needsValue = new Map(props.options.operators.map((operator) => [operator.value, operator.needs_value]));
-    for (const filter of definition.filters) {
+    for (const filter of activeFilters(definition)) {
         const row = {};
         if (filter.key === '') {
             row.key = 'Enter a property key.';
-        } else if (filter.key.length > limits.max_filter_key_length) {
+        } else if (codePoints(filter.key) > limits.max_filter_key_length) {
             row.key = `The key can be at most ${limits.max_filter_key_length} characters.`;
         }
-        if (needsValue.get(filter.operator) !== false && filter.value.length > limits.max_filter_value_length) {
+        if (needsValue.get(filter.operator) !== false && codePoints(filter.value) > limits.max_filter_value_length) {
             row.value = `The value can be at most ${limits.max_filter_value_length} characters.`;
         }
         if (Object.keys(row).length > 0) {
@@ -156,7 +168,7 @@ export function validateDefinition(definition, props) {
     }
 
     for (const event of definition.events) {
-        if (event.length < 1 || event.length > limits.max_event_length) {
+        if (codePoints(event) < 1 || codePoints(event) > limits.max_event_length) {
             errors.events = `Event names must be 1 to ${limits.max_event_length} characters.`;
         }
     }
@@ -212,7 +224,7 @@ export function mapServerErrors(serverErrors, definition) {
                 errors.breakdown[definition.breakdown.mode === 'property' ? 'property' : 'column'] = message;
             }
         } else if (filter) {
-            const target = definition.filters[Number(filter[1])];
+            const target = activeFilters(definition)[Number(filter[1])];
             if (target === undefined) {
                 general.push(message);
             } else {
@@ -262,10 +274,10 @@ export function encodeDefinition(definition, defaults) {
     } else if (definition.breakdown.mode === 'property') {
         params.set('bp', definition.breakdown.property);
     }
-    if (definition.breakdown.mode !== 'none' && definition.breakdown.topN !== defaults.top_n) {
+    if (definition.breakdown.mode !== 'none' && Number.isInteger(definition.breakdown.topN) && definition.breakdown.topN !== defaults.top_n) {
         params.set('bn', String(definition.breakdown.topN));
     }
-    for (const filter of definition.filters) {
+    for (const filter of activeFilters(definition)) {
         params.append('f', JSON.stringify([filter.key, filter.operator, filter.value]));
     }
 
@@ -289,7 +301,7 @@ export function decodeDefinition(search, props) {
 
     const events = [];
     for (const event of params.getAll('e')) {
-        if (event.length >= 1 && event.length <= limits.max_event_length && !events.includes(event) && events.length < limits.max_events) {
+        if (codePoints(event) >= 1 && codePoints(event) <= limits.max_event_length && !events.includes(event) && events.length < limits.max_events) {
             events.push(event);
         }
     }
@@ -318,7 +330,7 @@ export function decodeDefinition(search, props) {
     if (column !== null && allowed(options.breakdown_columns, column)) {
         definition.breakdown.mode = 'column';
         definition.breakdown.column = column;
-    } else if (property !== null && property.length >= 1 && property.length <= limits.max_breakdown_key_length) {
+    } else if (property !== null && codePoints(property) >= 1 && codePoints(property) <= limits.max_breakdown_key_length) {
         definition.breakdown.mode = 'property';
         definition.breakdown.property = property;
     }
@@ -352,10 +364,10 @@ function parseFilter(raw, props) {
     const [key, operator, value] = parsed;
     const known = props.options.operators.find((item) => item.value === operator);
 
-    if (typeof key !== 'string' || key.length < 1 || key.length > props.limits.max_filter_key_length || known === undefined) {
+    if (typeof key !== 'string' || codePoints(key) < 1 || codePoints(key) > props.limits.max_filter_key_length || known === undefined) {
         return null;
     }
-    if (typeof value !== 'string' || value.length > props.limits.max_filter_value_length) {
+    if (typeof value !== 'string' || codePoints(value) > props.limits.max_filter_value_length) {
         return null;
     }
 

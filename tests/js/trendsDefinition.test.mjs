@@ -5,7 +5,9 @@ import {
     decodeDefinition,
     defaultDefinition,
     encodeDefinition,
+    activeFilters,
     inclusiveDays,
+    isBlankFilter,
     mapServerErrors,
     minBuckets,
     newFilter,
@@ -84,7 +86,7 @@ test('validates limits instantly and never blocks an empty event list', () => {
     assert.match(validateDefinition(long, props).errors.events, /1 to 200/);
 
     const filters = base();
-    filters.filters = [newFilter({ key: '' }), newFilter({ key: 'k', value: 'v'.repeat(1001) }), newFilter({ key: 'k2', operator: 'is_set', value: 'v'.repeat(1001) })];
+    filters.filters = [newFilter({ key: '', value: 'x' }), newFilter({ key: 'k', value: 'v'.repeat(1001) }), newFilter({ key: 'k2', operator: 'is_set', value: 'v'.repeat(1001) })];
     const v = validateDefinition(filters, props);
     assert.equal(v.ok, false);
     assert.equal(Object.keys(v.errors.filters).length, 2, 'is_set takes no value, its text is ignored');
@@ -235,4 +237,50 @@ test('never trusts the URL: every bad field is dropped and the rest is kept', ()
     assert.equal(decodeDefinition('from=2026-03-01&e=a', props).range.mode, 'preset');
     assert.equal(decodeDefinition('bp=' + 'k'.repeat(201) + '&e=a', props).breakdown.mode, 'none');
     assert.equal(decodeDefinition('bn=2.5&b=browser&e=a', props).breakdown.topN, 10);
+});
+
+test('a blank filter row is a draft: not in the body, not validated, not in the URL, and server errors count only real rows', () => {
+    const d = base();
+    const blank = newFilter();
+    const typed = newFilter({ key: 'plan', value: 'pro' });
+    d.filters = [blank, typed, newFilter({ key: '', value: 'orphan value' })];
+
+    assert.equal(isBlankFilter(blank), true);
+    assert.equal(isBlankFilter(typed), false);
+    assert.deepEqual(activeFilters(d).map((f) => f.key), ['plan', '']);
+    assert.deepEqual(toRequestBody(d, props.options).filters.map((f) => f.key), ['plan', '']);
+
+    const v = validateDefinition(d, props);
+    assert.equal(blank.id in v.errors.filters, false, 'the blank row has no error');
+    assert.equal(d.filters[2].id in v.errors.filters, true, 'a row with only a value needs its key');
+
+    assert.equal(encodeDefinition(d, props.defaults).split('&f=').length - 1 + (encodeDefinition(d, props.defaults).startsWith('f=') ? 1 : 0), 2);
+
+    // the 422 of the body maps index 1 (the second REAL row) to the row that sent it
+    const errors = mapServerErrors({ 'filters.1.key': ['A filter key must be 1 to 200 characters of text.'] }, d);
+    assert.equal(d.filters[2].id in errors.filters, true);
+    assert.equal(blank.id in errors.filters, false);
+});
+
+test('lengths count code points like the server (mb_strlen): an emoji is one character', () => {
+    const d = base();
+    d.events = ['😀'.repeat(200)];
+    assert.equal(validateDefinition(d, props).errors.events, undefined);
+    d.events = ['😀'.repeat(201)];
+    assert.match(validateDefinition(d, props).errors.events, /1 to 200/);
+
+    d.events = ['a'];
+    d.filters = [newFilter({ key: '😀'.repeat(200), value: '😀'.repeat(1000) })];
+    assert.equal(validateDefinition(d, props).ok, true);
+    d.filters = [newFilter({ key: '😀'.repeat(201), value: 'x' })];
+    assert.equal(validateDefinition(d, props).ok, false);
+    assert.equal(decodeDefinition('e=' + encodeURIComponent('😀'.repeat(200)), props).events.length, 1);
+    assert.equal(decodeDefinition('e=' + encodeURIComponent('😀'.repeat(201)), props).events.length, 0);
+});
+
+test('does not put a NaN top N into the URL', () => {
+    const d = base();
+    d.breakdown = { mode: 'column', column: 'browser', property: '', topN: Number.NaN };
+
+    assert.equal(encodeDefinition(d, props.defaults), 'e=signup&b=browser');
 });

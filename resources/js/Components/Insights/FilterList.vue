@@ -1,4 +1,6 @@
 <script setup>
+import { useId } from 'vue';
+
 import { newFilter } from '@/lib/trendsDefinition';
 
 // Property filters: up to `limits.max_filters` rows of { key, operator, value }. The operators come from the server;
@@ -11,6 +13,11 @@ const props = defineProps({
 });
 
 const filters = defineModel({ type: Array, required: true });
+
+// Element ids come from useId() (unique per component instance and stable across server and client), prefixed with the
+// row's own id: `data-field` marks each input for the page's "was it touched" tracking.
+const uid = useId();
+const rowId = (filter, part) => `${uid}-${filter.id}-${part}`;
 
 function add() {
     if (filters.value.length < props.limits.max_filters) {
@@ -38,9 +45,10 @@ const needsValue = (operator) => props.operators.find((item) => item.value === o
         <ul v-else class="space-y-3">
             <li v-for="(filter, index) in filters" :key="filter.id" class="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_10rem_minmax(0,1fr)_auto] sm:items-start">
                 <div>
-                    <label :for="`f-${filter.id}-key`" class="sr-only">Filter {{ index + 1 }} property key</label>
+                    <label :for="rowId(filter, 'key')" class="sr-only">Filter {{ index + 1 }} property key</label>
                     <input
-                        :id="`f-${filter.id}-key`"
+                        :id="rowId(filter, 'key')"
+                        :data-field="`filter:${filter.id}`"
                         type="text"
                         autocomplete="off"
                         spellcheck="false"
@@ -48,18 +56,18 @@ const needsValue = (operator) => props.operators.find((item) => item.value === o
                         :value="filter.key"
                         :maxlength="limits.max_filter_key_length"
                         :aria-invalid="errors[filter.id]?.key ? 'true' : undefined"
-                        :aria-describedby="errors[filter.id]?.key ? `f-${filter.id}-key-error` : undefined"
+                        :aria-describedby="errors[filter.id]?.key ? rowId(filter, 'key-error') : undefined"
                         class="block w-full rounded-md border bg-surface px-3 py-2 text-fg"
                         :class="errors[filter.id]?.key ? 'border-danger' : 'border-line-strong'"
                         @input="patch(filter.id, { key: $event.target.value })"
                     />
-                    <p v-if="errors[filter.id]?.key" :id="`f-${filter.id}-key-error`" role="alert" class="mt-1 text-sm text-danger">{{ errors[filter.id].key }}</p>
+                    <p v-if="errors[filter.id]?.key" :id="rowId(filter, 'key-error')" role="alert" class="mt-1 text-sm text-danger">{{ errors[filter.id].key }}</p>
                 </div>
 
                 <div>
-                    <label :for="`f-${filter.id}-op`" class="sr-only">Filter {{ index + 1 }} operator</label>
+                    <label :for="rowId(filter, 'op')" class="sr-only">Filter {{ index + 1 }} operator</label>
                     <select
-                        :id="`f-${filter.id}-op`"
+                        :id="rowId(filter, 'op')"
                         :value="filter.operator"
                         class="block w-full rounded-md border border-line-strong bg-surface px-3 py-2 text-fg"
                         @change="patch(filter.id, { operator: $event.target.value })"
@@ -69,9 +77,10 @@ const needsValue = (operator) => props.operators.find((item) => item.value === o
                 </div>
 
                 <div>
-                    <label :for="`f-${filter.id}-value`" class="sr-only">Filter {{ index + 1 }} value</label>
+                    <label :for="rowId(filter, 'value')" class="sr-only">Filter {{ index + 1 }} value</label>
                     <input
-                        :id="`f-${filter.id}-value`"
+                        :id="rowId(filter, 'value')"
+                        :data-field="`filter:${filter.id}`"
                         type="text"
                         autocomplete="off"
                         spellcheck="false"
@@ -80,12 +89,12 @@ const needsValue = (operator) => props.operators.find((item) => item.value === o
                         :disabled="!needsValue(filter.operator)"
                         :maxlength="limits.max_filter_value_length"
                         :aria-invalid="errors[filter.id]?.value ? 'true' : undefined"
-                        :aria-describedby="errors[filter.id]?.value ? `f-${filter.id}-value-error` : undefined"
+                        :aria-describedby="errors[filter.id]?.value ? rowId(filter, 'value-error') : undefined"
                         class="block w-full rounded-md border bg-surface px-3 py-2 text-fg disabled:cursor-not-allowed disabled:opacity-60"
                         :class="errors[filter.id]?.value ? 'border-danger' : 'border-line-strong'"
                         @input="patch(filter.id, { value: $event.target.value })"
                     />
-                    <p v-if="errors[filter.id]?.value" :id="`f-${filter.id}-value-error`" role="alert" class="mt-1 text-sm text-danger">{{ errors[filter.id].value }}</p>
+                    <p v-if="errors[filter.id]?.value" :id="rowId(filter, 'value-error')" role="alert" class="mt-1 text-sm text-danger">{{ errors[filter.id].value }}</p>
                 </div>
 
                 <button

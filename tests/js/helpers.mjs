@@ -61,27 +61,30 @@ export function fakeFetch(routes, { honourAbort = true } = {}) {
     async function fetch(url, init = {}) {
         const call = { url, method: init.method ?? 'GET', headers: init.headers ?? {}, body: init.body === undefined ? undefined : JSON.parse(init.body), credentials: init.credentials, signal: init.signal, at: null };
         calls.push(call);
+        const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
 
         if (init.signal?.aborted) {
-            throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+            throw abortError();
         }
 
-        const answer = await routes(call, calls);
+        // Like fetch, a request whose signal aborts rejects at once, however long the answer would take (a request that
+        // never answers ends here).
+        const aborted = new Promise((_, reject) => init.signal?.addEventListener('abort', () => honourAbort && reject(abortError()), { once: true }));
+        const answer = await Promise.race([Promise.resolve(routes(call, calls)), aborted]);
 
         if (answer instanceof Error) {
             throw answer;
         }
 
-        // an aborted request rejects like fetch does, even when the answer is already known (unless a test models the
-        // race where the answer was already complete when the abort came)
-        if (honourAbort && init.signal?.aborted) {
-            throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-        }
-
         return {
             status: answer.status,
             headers: { get: (name) => answer.headers[name] ?? null },
+            // reading the body is aborted by the signal too, like the real thing
             json: async () => {
+                await Promise.resolve();
+                if (init.signal?.aborted) {
+                    throw abortError();
+                }
                 if (answer.body === undefined) {
                     throw new Error('no body');
                 }

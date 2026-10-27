@@ -34,6 +34,7 @@ const reducedMotion = ref(false);
 let chart = null;
 let resizeObserver = null;
 let themeObserver = null;
+let frame = 0;
 const queries = [];
 
 const option = computed(() =>
@@ -51,8 +52,11 @@ const option = computed(() =>
 
 function resolveTheme() {
     // The new colour scheme is applied to the computed style a frame after the media query changes.
-    requestAnimationFrame(() => (theme.value = readChartTheme()));
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => (theme.value = readChartTheme()));
 }
+
+const setReducedMotion = (event) => (reducedMotion.value = event.matches);
 
 onMounted(() => {
     theme.value = readChartTheme();
@@ -61,8 +65,8 @@ onMounted(() => {
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
     reducedMotion.value = motion.matches;
     dark.addEventListener('change', resolveTheme);
-    motion.addEventListener('change', (event) => (reducedMotion.value = event.matches));
-    queries.push([dark, resolveTheme]);
+    motion.addEventListener('change', setReducedMotion);
+    queries.push([dark, resolveTheme], [motion, setReducedMotion]);
 
     themeObserver = new MutationObserver(resolveTheme);
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
@@ -84,6 +88,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+    cancelAnimationFrame(frame);
     resizeObserver?.disconnect();
     themeObserver?.disconnect();
     for (const [query, listener] of queries) {
