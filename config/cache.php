@@ -78,10 +78,14 @@ return [
             ],
         ],
 
+        // Locks use the BOUNDED `cache` connection too (config/database.php: connect and read timeouts), not `default`: the
+        // default connection has no read timeout (Horizon's blocking pops need that), so a frozen Redis would hang every
+        // request that takes an insight lock (the event-name slot, run transitions, single flight) instead of failing
+        // open. Locks are short-lived and carry TTLs, so moving them to the cache database loses nothing.
         'redis' => [
             'driver' => 'redis',
             'connection' => env('REDIS_CACHE_CONNECTION', 'cache'),
-            'lock_connection' => env('REDIS_CACHE_LOCK_CONNECTION', 'default'),
+            'lock_connection' => env('REDIS_CACHE_LOCK_CONNECTION', 'cache'),
         ],
 
         'dynamodb' => [
