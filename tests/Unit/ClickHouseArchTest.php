@@ -1,5 +1,6 @@
 <?php
 
+use App\Domain\Insights\Events\EventNames;
 use App\Domain\Insights\InsightRunner;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
@@ -54,19 +55,21 @@ it('names the scoped view in no file of app/ except the reader and its docs', fu
     expect($offenders)->toBe([]);
 });
 
-arch('only the insight runner, the ClickHouse infrastructure and the container wiring use the scoped reader')
+arch('only the insight runner, the event-name list, the ClickHouse infrastructure and the container wiring use the scoped reader')
     ->expect(ProjectScopedReader::class)
     ->toOnlyBeUsedIn([
         InsightRunner::class,
+        EventNames::class,
         'App\Infrastructure\ClickHouse',
         'App\Providers\AppServiceProvider',
     ]);
 
-it('creates a BuiltQuery only inside classes named *SqlBuilder', function () {
-    // SQL text for the reader is produced by the constants-only builders; nothing else may hand it one.
+it('creates a BuiltQuery only inside classes named *SqlBuilder and the event-name query', function () {
+    // SQL text for the reader is produced by the constants-only builders (EventNamesQuery is the one small builder that
+    // is also its own definition); nothing else may hand it one.
     $offenders = [];
     foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(app_path(), FilesystemIterator::SKIP_DOTS)) as $file) {
-        if ($file->getExtension() === 'php' && ! str_ends_with($file->getBasename('.php'), 'SqlBuilder')
+        if ($file->getExtension() === 'php' && ! str_ends_with($file->getBasename('.php'), 'SqlBuilder') && $file->getBasename('.php') !== 'EventNamesQuery'
             && preg_match('/new\s+\\\\?(?:[A-Za-z\\\\]+\\\\)?BuiltQuery\b/', (string) file_get_contents($file->getPathname())) === 1) {
             $offenders[] = str_replace(app_path().'/', '', $file->getPathname());
         }
