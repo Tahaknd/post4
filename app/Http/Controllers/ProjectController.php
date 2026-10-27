@@ -89,6 +89,7 @@ class ProjectController extends Controller
             ],
             'urls' => [
                 'index' => route('projects.index', absolute: false),
+                'trends' => route('projects.insights.trends', $project, absolute: false),
                 'rotate_key' => route('projects.rotate-key', $project, absolute: false),
                 'destroy' => route('projects.destroy', $project, absolute: false),
             ],

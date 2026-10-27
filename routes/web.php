@@ -7,6 +7,7 @@ use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InsightController;
 use App\Http\Controllers\InsightEventsController;
 use App\Http\Controllers\ProjectController;
+use App\Http\Controllers\ProjectInsightsController;
 use App\Http\Middleware\EnsureRegistrationOpen;
 use Illuminate\Support\Facades\Route;
 use Inertia\Middleware\EncryptHistory;
@@ -40,6 +41,7 @@ Route::middleware(['auth', 'auth.session', EncryptHistory::class])->group(functi
         Route::get('/create', [ProjectController::class, 'create'])->name('projects.create');
         Route::post('/', [ProjectController::class, 'store'])->name('projects.store')->middleware('throttle.user:projects.create');
         Route::get('/{project}', [ProjectController::class, 'show'])->name('projects.show');
+        Route::get('/{project}/insights/trends', [ProjectInsightsController::class, 'trends'])->name('projects.insights.trends');
         Route::put('/{project}/api-key', [ProjectController::class, 'rotateKey'])->name('projects.rotate-key')->middleware('throttle.user:projects.rotate');
         Route::delete('/{project}', [ProjectController::class, 'destroy'])->name('projects.destroy')->middleware('throttle.user:projects.delete');
     });

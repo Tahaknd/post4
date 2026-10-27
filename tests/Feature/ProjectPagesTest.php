@@ -221,6 +221,7 @@ describe('show', function () {
                 ->where('can', ['rotate_key' => true, 'delete' => false])
                 ->where('urls', [
                     'index' => '/projects',
+                    'trends' => "/projects/{$mine->id}/insights/trends",
                     'rotate_key' => "/projects/{$mine->id}/api-key",
                     'destroy' => "/projects/{$mine->id}",
                 ]));

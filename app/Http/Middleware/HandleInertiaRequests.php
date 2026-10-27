@@ -76,6 +76,12 @@ class HandleInertiaRequests extends Middleware
             // The project being viewed is always in the list; `projectsTruncated` says there are more.
             'projects' => fn () => $this->navProjects($request)['list'],
             'projectsTruncated' => fn () => $this->navProjects($request)['truncated'],
+            // The Trends page of the project on screen (the navigation links to it), null on pages without a project.
+            'trendsUrl' => function () use ($request) {
+                $current = $request->route('project');
+
+                return $current instanceof Project ? route('projects.insights.trends', $current, absolute: false) : null;
+            },
             'flash' => fn () => [
                 // Not every request that renders a page has a session (404 pages of unmatched routes).
                 'status' => $request->hasSession() ? $request->session()->get('status') : null,
