@@ -28,3 +28,9 @@ database/*.sqlite*
 public/frankenphp-worker.php
 .phpunit.cache
 /caddy
+tests/e2e
+tests/js
+playwright.config.js
+test-results
+playwright-report
+scripts/e2e.sh

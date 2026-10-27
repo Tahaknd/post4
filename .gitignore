@@ -36,3 +36,7 @@
 
 # posthog-node compatibility test: installed packages (package.json and package-lock.json ARE committed: the SDK is pinned)
 /tests/compat/node_modules/
+
+# Playwright output
+/test-results/
+/playwright-report/
