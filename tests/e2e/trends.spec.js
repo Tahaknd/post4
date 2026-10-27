@@ -32,7 +32,8 @@ test.beforeAll(async ({ browser }) => {
         }
     });
     page.on('pageerror', (error) => problems.push(`pageerror: ${error.message}`));
-    page.on('requestfailed', (request) => problems.push(`request failed: ${request.method()} ${request.url()}`));
+    // A request the page aborted itself (a superseded search or run) is not a failure.
+    page.on('requestfailed', (request) => request.failure()?.errorText === 'net::ERR_ABORTED' || problems.push(`request failed: ${request.method()} ${request.url()}`));
     page.on('response', (response) => {
         // 429 is a legitimate answer of the busy/throttle paths; everything else >= 400 is a problem.
         if (response.status() >= 400 && response.status() !== 429) {

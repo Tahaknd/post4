@@ -21,7 +21,7 @@ const sums = computed(() => props.series.map((entry) => total(entry.data)));
 <template>
     <div class="space-y-2">
         <p v-if="note" class="text-sm text-muted">{{ note }}</p>
-        <div role="region" :aria-label="caption" tabindex="0" class="max-h-[32rem] overflow-auto rounded-md border border-line">
+        <div role="group" :aria-label="`${caption}, table`" tabindex="0" class="max-h-[32rem] overflow-auto rounded-md border border-line">
             <table class="w-full border-collapse text-sm">
                 <caption class="px-3 py-2 text-left text-muted">{{ caption }}</caption>
                 <thead class="sticky top-0 z-10 bg-surface">
