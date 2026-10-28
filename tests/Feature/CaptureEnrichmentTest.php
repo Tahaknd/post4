@@ -178,7 +178,8 @@ it('strips $ip from $set and $set_once and the raw user agent by default', funct
     $props = enrichedProps($this->producer);
 
     expect($props)->not->toHaveKey('$ip')->and($props)->not->toHaveKey('$raw_user_agent')
-        ->and($props['$set'])->toBe(['plan' => 'pro'])->and($props['$set_once'])->toBe([])
+        ->and($props['$set'])->toBe(['plan' => 'pro'])
+        ->and($this->producer->messages[0]['properties'])->toContain('"$set_once":{}')
         ->and($props)->toHaveKey('$browser', 'Chrome')
         ->and($this->producer->messages[0]['properties'])->not->toContain('8.8.8.8');
 });

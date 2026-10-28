@@ -252,8 +252,10 @@ final class RequestEnrichment
 
         unset($properties['$ip']);
         foreach (['$set', '$set_once'] as $bag) {
-            if (is_array($properties[$bag] ?? null)) {
+            if (is_array($properties[$bag] ?? null) && array_key_exists('$ip', $properties[$bag])) {
                 unset($properties[$bag]['$ip']);
+                // An emptied bag stays a JSON OBJECT ({}), not the list ([]) PHP would encode an empty array as.
+                $properties[$bag] = $properties[$bag] === [] ? new \stdClass : $properties[$bag];
             }
         }
 

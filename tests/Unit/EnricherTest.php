@@ -292,6 +292,12 @@ describe('what is stored of the ip', function () {
         expect($added)->toHaveKey('$ip', '10.0.0.5');
     });
 
+    it('keeps an emptied $set an object when the properties are encoded', function () {
+        $props = enrich(new Enricher(new UserAgentParser), ['$set' => ['$ip' => '8.8.8.8'], '$set_once' => ['$ip' => '8.8.8.8', 'a' => 1]]);
+
+        expect(json_encode($props['$set']))->toBe('{}')->and(json_encode($props['$set_once']))->toBe('{"a":1}');
+    });
+
     it('treats $set and $set_once that are not arrays as they are', function () {
         $props = enrich(new Enricher(new UserAgentParser), ['$set' => 'x', '$set_once' => null]);
 
@@ -302,7 +308,7 @@ describe('what is stored of the ip', function () {
         $geo = recordingGeo();
         $props = enrich(new Enricher(new UserAgentParser, $geo, enabled: false), ['$ip' => '8.8.8.8', '$raw_user_agent' => CHROME_MAC, '$set' => ['$ip' => '8.8.8.8']]);
 
-        expect($props)->toBe(['$set' => []])->and($geo->asked)->toBe([]);
+        expect($props['$set'])->toEqual(new stdClass)->and(array_keys($props))->toBe(['$set'])->and($geo->asked)->toBe([]);
     });
 });
 
