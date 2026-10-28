@@ -5,11 +5,13 @@ use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Tests\Support\MigrationColumns;
 
-// Built from COLUMNS so a new column needs no edit here; the explicit list is pinned by 'has an explicit column list'.
-const SCOPED_PREFIX = 'WITH project_events AS (SELECT '.
-    'uuid, project_id, event, distinct_id, properties, timestamp, created_at, current_url, browser, country_code, os, device_type, utm_source, utm_medium, utm_campaign'.
-    ' FROM posthog.project_events_v) ';
+/** The CTE prefix the reader must send, written out here from COLUMNS (the single source: it is checked against the migrations below). */
+function scopedPrefix(): string
+{
+    return 'WITH project_events AS (SELECT '.implode(', ', ProjectScopedReader::COLUMNS).' FROM posthog.project_events_v) ';
+}
 
 beforeEach(function () {
     $this->reader = new ProjectScopedReader(
@@ -31,7 +33,7 @@ it('prepends the project_events CTE itself and sends the builder sql after it', 
     $rows = $this->reader->select(42, 'SELECT count() AS n FROM project_events');
 
     expect($rows)->toBe([['n' => 3]]);
-    Http::assertSent(fn (Request $r) => $r->body() === SCOPED_PREFIX.'SELECT count() AS n FROM project_events');
+    Http::assertSent(fn (Request $r) => $r->body() === scopedPrefix().'SELECT count() AS n FROM project_events');
 });
 
 it('injects the project id only as the SQL_project_id setting (the view filters, no bound param)', function () {
@@ -51,7 +53,7 @@ it('accepts leading whitespace and any case for SELECT', function (string $sql) 
 
     $this->reader->select(1, $sql);
 
-    Http::assertSent(fn (Request $r) => $r->body() === SCOPED_PREFIX.$sql);
+    Http::assertSent(fn (Request $r) => $r->body() === scopedPrefix().$sql);
 })->with([
     'lower case' => 'select 1 FROM project_events',
     'leading spaces and newline' => "  \n\tSELECT 1 FROM project_events",
@@ -68,7 +70,7 @@ it('lets a builder use subqueries, UNION ALL, GROUP BY and typed params over pro
     Http::assertSent(function (Request $r) use ($sql) {
         $q = scopedQuery($r);
 
-        return $r->body() === SCOPED_PREFIX.$sql
+        return $r->body() === scopedPrefix().$sql
             && $q['param_a'] === 'x' && $q['param_b'] === 'y'
             && $q['max_execution_time'] === '5' && $q['SQL_project_id'] === '7';
     });
@@ -159,11 +161,10 @@ it('does not reject words that merely contain a forbidden word', function () {
     Http::assertSentCount(1);
 });
 
-it('has an explicit column list that matches the CTE (over the scoped view) and excludes nothing the builders need', function () {
-    expect(ProjectScopedReader::COLUMNS)->toBe([
-        'uuid', 'project_id', 'event', 'distinct_id', 'properties', 'timestamp', 'created_at', 'current_url', 'browser', 'country_code',
-        'os', 'device_type', 'utm_source', 'utm_medium', 'utm_campaign',
-    ])->and(ProjectScopedReader::cte())->not->toContain('*')
+it('has an explicit column list that is the one the migrations leave in the scoped view, and a CTE over that view', function () {
+    // the migrations are the single source of the real columns (tests/Support/MigrationColumns folds them all)
+    expect(ProjectScopedReader::COLUMNS)->toBe(MigrationColumns::viewColumns())
+        ->and(ProjectScopedReader::cte())->toBe(scopedPrefix())->and(ProjectScopedReader::cte())->not->toContain('*')
         ->and(ProjectScopedReader::cte())->toContain('FROM posthog.project_events_v)');
 });
 
@@ -232,7 +233,7 @@ it('type-hints the ClickHouseReads interface and works with any implementation',
 
     expect($rows)->toBe([['n' => 9]])
         ->and($fake->calls)->toBe([[
-            SCOPED_PREFIX.'SELECT 1 FROM project_events',
+            scopedPrefix().'SELECT 1 FROM project_events',
             ['a' => 1],
             ['max_threads' => 2, 'log_comment' => 'project:5', 'SQL_project_id' => 5],
             9,

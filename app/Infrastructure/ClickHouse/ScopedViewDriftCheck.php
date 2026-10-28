@@ -41,7 +41,7 @@ final class ScopedViewDriftCheck
         }
 
         if ($problems !== []) {
-            $problems[] = 'fix: recreate the view with CREATE OR REPLACE VIEW in a new migration (keep DEFINER and the WHERE of 002_scoped_events_view.sql) and update ProjectScopedReader::COLUMNS';
+            $problems[] = 'fix: recreate the view with CREATE OR REPLACE VIEW in a new migration (keep DEFINER and the WHERE of 002_scoped_events_view.sql) and update ProjectScopedReader::COLUMNS (`php artisan clickhouse:view-sql` prints the statement for the current COLUMNS)';
         }
 
         return $problems;

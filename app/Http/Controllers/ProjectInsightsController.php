@@ -44,7 +44,7 @@ class ProjectInsightsController extends Controller
                 'presets' => array_map(fn (DatePreset $preset) => ['value' => $preset->value, 'label' => self::presetLabel($preset)], DatePreset::cases()),
                 'intervals' => array_map(fn (Interval $interval) => ['value' => $interval->value, 'label' => ucfirst($interval->value)], Interval::cases()),
                 'metrics' => array_map(fn (Metric $metric) => ['value' => $metric->value, 'label' => self::metricLabel($metric)], Metric::cases()),
-                'breakdown_columns' => array_map(fn (BreakdownColumn $column) => ['value' => $column->value, 'label' => self::columnLabel($column)], BreakdownColumn::cases()),
+                'breakdown_columns' => array_map(fn (BreakdownColumn $column) => ['value' => $column->value, 'label' => $column->label()], BreakdownColumn::cases()),
                 'operators' => array_map(fn (FilterOperator $operator) => ['value' => $operator->value, 'label' => self::operatorLabel($operator), 'needs_value' => $operator->needsValue()], FilterOperator::cases()),
             ],
             'defaults' => [
@@ -100,22 +100,6 @@ class ProjectInsightsController extends Controller
         return match ($metric) {
             Metric::TotalEvents => 'Total events',
             Metric::UniqueUsers => 'Unique users',
-        };
-    }
-
-    private static function columnLabel(BreakdownColumn $column): string
-    {
-        return match ($column) {
-            BreakdownColumn::Event => 'Event name',
-            BreakdownColumn::DistinctId => 'User (distinct id)',
-            BreakdownColumn::Browser => 'Browser',
-            BreakdownColumn::CountryCode => 'Country',
-            BreakdownColumn::CurrentUrl => 'Current URL',
-            BreakdownColumn::Os => 'Operating system',
-            BreakdownColumn::DeviceType => 'Device type',
-            BreakdownColumn::UtmSource => 'UTM source',
-            BreakdownColumn::UtmMedium => 'UTM medium',
-            BreakdownColumn::UtmCampaign => 'UTM campaign',
         };
     }
 
