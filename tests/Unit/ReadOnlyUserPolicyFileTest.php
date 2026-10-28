@@ -128,7 +128,7 @@ it('numbers the migrations without gaps or duplicates and never edits applied on
     expect($numbers)->toBe(range(1, count($numbers)));
 });
 
-it('applies every migration with exactly one statement per MATERIALIZE COLUMN', function () {
+it('adds the five enrichment columns in migration 003 and materializes each in its own statement', function () {
     $sql = (string) file_get_contents(base_path('database/clickhouse/migrations/003_enrichment_columns.sql'));
     $statements = ClickHouseMigrator::statements($sql);
     $added = array_values(array_filter(array_map(fn ($s) => preg_match('/ADD COLUMN IF NOT EXISTS (\w+) /', $s, $m) ? $m[1] : null, $statements)));
