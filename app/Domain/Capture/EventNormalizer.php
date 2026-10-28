@@ -41,7 +41,6 @@ final class EventNormalizer
         int $project,
         CarbonImmutable $now,
         ?CarbonImmutable $sentAt = null,
-        ?string $ip = null,
     ): ?array {
         if ($project <= 0 || $project > self::MAX_PROJECT_ID) {
             throw new \InvalidArgumentException('project must be between 1 and 4294967295');
@@ -63,9 +62,6 @@ final class EventNormalizer
         }
 
         unset($properties['token']);
-        if ($ip !== null && ! array_key_exists('$ip', $properties)) {
-            $properties['$ip'] = $ip;
-        }
 
         try {
             $propertiesJson = json_encode((object) $properties, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);

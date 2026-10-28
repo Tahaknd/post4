@@ -154,14 +154,15 @@ final class ClickHouseIntegration
      * materialized columns are computed by the real table. Starts from a clean slate for those projects and
      * remembers them for cleanupEnrichmentAfterAll().
      *
-     * @param  list<array{uuid: string, project_id: int, event: string, distinct_id: string, properties: string, timestamp: string}>  $messages
+     * @param  \Closure(): list<array{uuid: string, project_id: int, event: string, distinct_id: string, properties: string, timestamp: string}>  $messages  builds the messages; called only the first time in a process
      */
-    public function seedMessagesOnce(array $messages): void
+    public function seedMessagesOnce(\Closure $messages): void
     {
         if (self::$enrichmentSeeded) {
             return;
         }
         self::$enrichmentSeeded = true;
+        $messages = $messages();
 
         $this->deleteRowsOf([self::ENRICH_A, self::ENRICH_B]);
 

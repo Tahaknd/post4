@@ -38,12 +38,11 @@ it('encodes empty properties as an object', function () {
     expect($m['properties'])->toBe('{}');
 });
 
-it('adds $ip only when absent', function () {
-    $a = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u'], project: 1, now: $this->now, ip: '1.2.3.4');
-    $b = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['$ip' => '9.9.9.9']], project: 1, now: $this->now, ip: '1.2.3.4');
+it('leaves the ip to the enricher: it never adds or removes $ip itself', function () {
+    $m = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u', 'properties' => ['$ip' => '9.9.9.9']], project: 1, now: $this->now);
+    $n = $this->normalizer->normalize(['event' => 'e', 'distinct_id' => 'u'], project: 1, now: $this->now);
 
-    expect(json_decode($a['properties'], true)['$ip'])->toBe('1.2.3.4')
-        ->and(json_decode($b['properties'], true)['$ip'])->toBe('9.9.9.9');
+    expect(json_decode($m['properties'], true))->toBe(['$ip' => '9.9.9.9'])->and($n['properties'])->toBe('{}');
 });
 
 it('drops events without name or distinct id', function (array $raw) {

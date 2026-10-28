@@ -80,7 +80,8 @@ it('looks the client ip up and does not store it by default', function () {
 });
 
 it('stores $ip next to the geo properties with CAPTURE_STORE_IP', function () {
-    config(['capture.store_ip' => true]);
+    // store_ip is read when the Enricher is built (worker boot), so the test builds its own instance
+    $this->app->instance(Enricher::class, new Enricher(new UserAgentParser, new MmdbGeoLookup($this->mmdb), storeIp: true));
     postWith(['REMOTE_ADDR' => '8.8.8.8'], ['api_key' => $this->key, 'event' => 'e', 'distinct_id' => 'u'])->assertOk();
 
     expect(enrichedProps($this->producer))->toMatchArray(['$ip' => '8.8.8.8', '$geoip_country_code' => 'US']);
@@ -151,6 +152,41 @@ it('keeps the Enricher in the Octane warm list so its caches live per worker', f
 it('reads the enrichment defaults from the config', function () {
     expect(config('capture.store_ip'))->toBeFalse()
         ->and(config('capture.enrichment.enabled'))->toBeTrue()
-        ->and(config('capture.enrichment.geoip_path'))->toBe('/app/storage/geoip/geoip.mmdb')
+        ->and(config('capture.store_raw_user_agent'))->toBeFalse()
+        ->and(config('capture.enrichment.max_ua_parses_per_request'))->toBe(20)
+        ->and(config('capture.enrichment.geoip_retry_seconds'))->toBe(60)
+        ->and(config('capture.enrichment.geoip_path'))->toBe(storage_path('geoip/geoip.mmdb'))
         ->and(config('capture.enrichment.ua_cache_entries'))->toBe(2000);
+});
+
+it('builds the Enricher from the config once and honours the privacy settings in it', function () {
+    config(['capture.store_ip' => true, 'capture.store_raw_user_agent' => true, 'capture.enrichment.max_ua_parses_per_request' => 3]);
+    $this->app->forgetInstance(Enricher::class);
+    $this->app->forgetInstance(EventProducer::class);
+    $this->app->instance(EventProducer::class, $this->producer);
+
+    postWith(['REMOTE_ADDR' => '8.8.8.8'], ['api_key' => $this->key, 'event' => 'e', 'distinct_id' => 'u', 'properties' => ['$raw_user_agent' => ENRICH_CHROME]])->assertOk();
+
+    expect(enrichedProps($this->producer))->toMatchArray(['$ip' => '8.8.8.8', '$raw_user_agent' => ENRICH_CHROME, '$browser' => 'Chrome']);
+});
+
+it('strips $ip from $set and $set_once and the raw user agent by default', function () {
+    postWith(['REMOTE_ADDR' => '8.8.8.8'], ['api_key' => $this->key, 'event' => '$identify', 'distinct_id' => 'u', 'properties' => [
+        '$ip' => '8.8.8.8', '$raw_user_agent' => ENRICH_CHROME, '$set' => ['$ip' => '8.8.8.8', 'plan' => 'pro'], '$set_once' => ['$ip' => '8.8.8.8'],
+    ]])->assertOk();
+
+    $props = enrichedProps($this->producer);
+
+    expect($props)->not->toHaveKey('$ip')->and($props)->not->toHaveKey('$raw_user_agent')
+        ->and($props['$set'])->toBe(['plan' => 'pro'])->and($props['$set_once'])->toBe([])
+        ->and($props)->toHaveKey('$browser', 'Chrome')
+        ->and($this->producer->messages[0]['properties'])->not->toContain('8.8.8.8');
+});
+
+it('with ?ip=0 does no geo lookup at all, not even for a body $ip', function () {
+    $this->call('POST', '/e/?ip=0', [], [], [], ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '8.8.8.8'], json_encode(
+        ['api_key' => $this->key, 'event' => 'e', 'distinct_id' => 'u', 'properties' => ['$ip' => '81.2.69.142']],
+    ))->assertOk();
+
+    expect(enrichedProps($this->producer))->toBe([]);
 });

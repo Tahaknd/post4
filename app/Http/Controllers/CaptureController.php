@@ -90,17 +90,14 @@ final class CaptureController extends Controller
         $produced = 0;
         try {
             $sentAt = $this->parseSentAt($payload->sentAt);
-            $ip = $this->ipDisabled($request->query('ip')) ? null : $request->ip();
-
-            // The ip is the trusted proxy aware one (`$request->ip()`), never a raw X-Forwarded-For. It feeds the
-            // GeoIP lookup and is stored as `$ip` only when CAPTURE_STORE_IP is on.
-            $storeIp = (bool) config('capture.store_ip');
-            $enrichment = $enricher->forRequest($request->userAgent(), $ip, $storeIp);
+            // The ip is the trusted proxy aware one (`$request->ip()`), never a raw X-Forwarded-For. What is done
+            // with it (GeoIP lookup, whether `$ip` is stored) is decided in one place: the Enricher.
+            $enrichment = $enricher->forRequest($request->userAgent(), $request->ip(), $this->ipDisabled($request->query('ip')));
 
             $messages = [];
             $months = [];
             foreach ($payload->events as $raw) {
-                $message = $normalizer->normalize($enrichment->apply($raw), $projectId, $now, $sentAt, $storeIp ? $ip : null);
+                $message = $normalizer->normalize($enrichment->apply($raw), $projectId, $now, $sentAt);
                 if ($message !== null) {
                     $messages[] = $message;
                     $months[substr($message['timestamp'], 0, 7)] = true;

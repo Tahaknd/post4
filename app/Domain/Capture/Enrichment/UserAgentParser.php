@@ -8,17 +8,23 @@ use WhichBrowser\Parser;
  * Turns a User-Agent string into the PostHog compatible event properties `$browser`, `$browser_version`
  * (major, integer), `$os`, `$os_version` and `$device_type` (Desktop, Mobile, Tablet, Bot, ...).
  *
- * Library: whichbrowser/parser (MIT). Cost on a warm worker: about 100 microseconds per parse (about 0.4 ms
- * for the worst 512 byte inputs), 11 ms once per worker for the lazily loaded data tables, about 3 MB.
- * Parsing is memoised per User-Agent in a bounded LRU: browsers send a handful of distinct strings, so the
- * hit rate is very high and a batch of 500 events with one User-Agent parses it once. Garbage User-Agents
- * are cached too (an empty result) but cannot grow the cache past its entry and byte bounds.
+ * Library: whichbrowser/parser (MIT); it loads its data tables lazily (a one-off cost per worker). Parsing is
+ * memoised per User-Agent in a bounded LRU keyed by the capped string itself, with the key length counted in
+ * the byte budget: browsers send a handful of distinct strings, so the hit rate is very high and a batch of
+ * 500 events with one User-Agent parses it once. Garbage User-Agents are cached too (an empty result) but
+ * cannot grow the cache past its entry and byte bounds (a full default memo is roughly 1.5 MB per worker, hard
+ * capped by the byte bound). The number of DISTINCT strings one request may make the library parse is limited
+ * separately, see RequestEnrichment. Measurements: tests/Unit/EnricherPerformanceTest.php.
  *
  * Only properties that could be determined are returned; an unknown User-Agent (posthog-node, curl without a
  * match, an empty string) yields an empty array, never placeholder values.
  */
-final class UserAgentParser
+/* Not final only so that a test can make parse() throw and prove that a User-Agent failure keeps the geo values. */
+class UserAgentParser
 {
+    /** User-Agents are capped to this many bytes before anything is done with them. */
+    public const MAX_LENGTH = 512;
+
     /** Linux distributions whichbrowser names by distribution; posthog-js reports all of them as `Linux`. */
     private const LINUX_DISTRIBUTIONS = [
         'Ubuntu', 'Kubuntu', 'Xubuntu', 'Lubuntu', 'Debian', 'Fedora', 'Red Hat', 'CentOS', 'Arch Linux', 'Linux Mint',
@@ -32,24 +38,31 @@ final class UserAgentParser
     public function __construct(
         int $cacheEntries = 2000,
         int $cacheBytes = 2 * 1024 * 1024,
-        private readonly int $maxLength = 512,
+        private readonly int $maxLength = self::MAX_LENGTH,
     ) {
         $this->cache = new BoundedLru($cacheEntries, $cacheBytes);
+    }
+
+    /**
+     * The memoised result of a User-Agent, or null when it is not in the memo. Never parses.
+     *
+     * @return array<string, string|int>|null
+     */
+    public function cached(string $userAgent): ?array
+    {
+        $key = $this->normalise($userAgent);
+
+        return $key === '' ? [] : $this->cache->get($key);
     }
 
     /** @return array<string, string|int> */
     public function parse(string $userAgent): array
     {
-        if (strlen($userAgent) > $this->maxLength) {
-            $userAgent = substr($userAgent, 0, $this->maxLength);
-        }
-
-        $userAgent = trim($userAgent);
-        if ($userAgent === '') {
+        $key = $this->normalise($userAgent);
+        if ($key === '') {
             return [];
         }
 
-        $key = hash('xxh128', $userAgent);
         $cached = $this->cache->get($key);
         if ($cached !== null) {
             return $cached;
@@ -58,7 +71,7 @@ final class UserAgentParser
         $this->libraryParses++;
 
         try {
-            $properties = $this->detect($userAgent);
+            $properties = $this->detect($key);
         } catch (\Throwable) {
             // A library failure on one odd string must not cost the event; cache the empty answer.
             $properties = [];
@@ -69,20 +82,30 @@ final class UserAgentParser
         return $properties;
     }
 
-    /** How many times the library actually ran (cache misses); tests and diagnostics. */
+    /** How many times the library actually ran (cache misses).
+     *
+     * @internal tests and diagnostics only
+     */
     public function libraryParses(): int
     {
         return $this->libraryParses;
     }
 
+    /** @internal tests and diagnostics only */
     public function cacheEntries(): int
     {
         return $this->cache->count();
     }
 
+    /** @internal tests and diagnostics only */
     public function cacheBytes(): int
     {
         return $this->cache->bytes();
+    }
+
+    private function normalise(string $userAgent): string
+    {
+        return trim(strlen($userAgent) > $this->maxLength ? substr($userAgent, 0, $this->maxLength) : $userAgent);
     }
 
     /** @return array<string, string|int> */

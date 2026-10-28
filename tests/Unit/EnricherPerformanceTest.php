@@ -5,13 +5,11 @@ use App\Domain\Capture\Enrichment\GeoLookup;
 use App\Domain\Capture\Enrichment\UserAgentParser;
 
 /*
- * Hot path guard: 10 000 events enriched with a warm User-Agent memo and a (fake, instant) geo lookup. Typical
- * numbers on the dev machine (php-cli inside the app container, no opcache): about 8 ms for the 10 000
- * events, i.e. under 1 microsecond per event of enrichment work; a cold User-Agent parse is about 100 microseconds
- * (the first one of a worker about 11 ms for the lazily loaded tables); a full memo of 2000 distinct User-Agents
- * is about 1 MB estimated and 1.4 MB measured. The assertion is an order of
- * magnitude bound only (3 s = about 300 microseconds per event), so a loaded CI box cannot make it flaky, while
- * an accidental parse-per-event (10 000 x 100 us = 1 s plus the cache misses) or a quadratic loop still shows.
+ * Hot path guard: 10 000 events enriched with a warm User-Agent memo and a (fake, instant) geo lookup. The
+ * assertions are structural (no parse after the warm-up) plus an order of magnitude time bound that a loaded
+ * CI box cannot trip: 3 s for 10 000 events is a few hundred microseconds per event, while an accidental
+ * parse per event or a quadratic loop would exceed it. Typical numbers are far below the bound; measure with
+ * this test's loop rather than trusting a figure written down here.
  */
 it('enriches 10 000 events with a warm memo well inside an order of magnitude bound', function () {
     $geo = new class implements GeoLookup

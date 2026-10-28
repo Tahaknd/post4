@@ -40,32 +40,33 @@ beforeEach(function () {
     $this->ch = CH::connect();
     $this->runner = new InsightRunner($this->ch->reader, new TrendsSqlBuilder, new Repository(new ArrayStore));
 
-    // The capture requests are only made once per process, with the fake producer collecting the messages.
-    $producer = new FakeEventProducer;
-    $this->app->instance(EventProducer::class, $producer);
-    $this->app->instance(Enricher::class, new Enricher(new UserAgentParser));
-    config(['capture.store_ip' => false]);
+    // Seeded once per process, like the other ClickHouse files: the capture requests below run only the first time.
+    $this->ch->seedMessagesOnce(function () {
+        $producer = new FakeEventProducer;
+        $this->app->instance(EventProducer::class, $producer);
+        $this->app->instance(Enricher::class, new Enricher(new UserAgentParser));
 
-    $send = function (int $project, string $ua, array $properties = []) {
-        Project::query()->whereKey($project)->exists() || Project::factory()->create(['id' => $project]);
-        $key = Project::query()->whereKey($project)->value('api_key');
-        $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_USER_AGENT' => $ua], json_encode([
-            'api_key' => $key, 'event' => 'signup', 'distinct_id' => 'u'.Str::random(6), 'timestamp' => '2026-03-14T10:00:00Z',
-            'properties' => $properties,
-        ]))->assertOk();
-    };
+        $send = function (int $project, string $ua, array $properties = []) {
+            Project::query()->whereKey($project)->exists() || Project::factory()->create(['id' => $project]);
+            $key = Project::query()->whereKey($project)->value('api_key');
+            $this->call('POST', '/e/', [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_USER_AGENT' => $ua], json_encode([
+                'api_key' => $key, 'event' => 'signup', 'distinct_id' => 'u'.Str::random(6), 'timestamp' => '2026-03-14T10:00:00Z',
+                'properties' => $properties,
+            ]))->assertOk();
+        };
 
-    $send(CH::ENRICH_A, ENRICH_UA_CHROME_WIN, ['utm_source' => 'news', 'utm_medium' => 'email', 'utm_campaign' => 'spring']);
-    $send(CH::ENRICH_A, ENRICH_UA_CHROME_WIN, ['utm_source' => 'news']);
-    $send(CH::ENRICH_A, ENRICH_UA_IPHONE, ['utm_source' => 'ads', 'utm_campaign' => 'spring']);
-    $send(CH::ENRICH_A, ENRICH_UA_GOOGLEBOT);
-    $send(CH::ENRICH_A, 'posthog-node/5.56.0');
-    $send(CH::ENRICH_A, ENRICH_UA_CHROME_WIN, ['$os' => 'Plan 9']);
-    $send(CH::ENRICH_B, ENRICH_UA_ANDROID, ['utm_source' => 'news']);
-    $send(CH::ENRICH_B, ENRICH_UA_ANDROID, ['utm_source' => 'news']);
-    $send(CH::ENRICH_B, ENRICH_UA_FIREFOX_LINUX);
+        $send(CH::ENRICH_A, ENRICH_UA_CHROME_WIN, ['utm_source' => 'news', 'utm_medium' => 'email', 'utm_campaign' => 'spring']);
+        $send(CH::ENRICH_A, ENRICH_UA_CHROME_WIN, ['utm_source' => 'news']);
+        $send(CH::ENRICH_A, ENRICH_UA_IPHONE, ['utm_source' => 'ads', 'utm_campaign' => 'spring']);
+        $send(CH::ENRICH_A, ENRICH_UA_GOOGLEBOT);
+        $send(CH::ENRICH_A, 'posthog-node/5.56.0');
+        $send(CH::ENRICH_A, ENRICH_UA_CHROME_WIN, ['$os' => 'Plan 9']);
+        $send(CH::ENRICH_B, ENRICH_UA_ANDROID, ['utm_source' => 'news']);
+        $send(CH::ENRICH_B, ENRICH_UA_ANDROID, ['utm_source' => 'news']);
+        $send(CH::ENRICH_B, ENRICH_UA_FIREFOX_LINUX);
 
-    $this->ch->seedMessagesOnce($producer->messages);
+        return $producer->messages;
+    });
 });
 
 afterAll(function () {

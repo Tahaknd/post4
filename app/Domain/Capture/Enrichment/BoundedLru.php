@@ -13,7 +13,7 @@ namespace App\Domain\Capture\Enrichment;
 final class BoundedLru
 {
     /** Bookkeeping cost of one entry (hash bucket, zval, the size record), added to the caller's estimate. */
-    private const ENTRY_OVERHEAD_BYTES = 120;
+    private const ENTRY_OVERHEAD_BYTES = 250;
 
     /** @var array<string, array{0: mixed, 1: int}> */
     private array $entries = [];
@@ -25,6 +25,7 @@ final class BoundedLru
         private readonly int $maxBytes,
     ) {}
 
+    /** @internal tests only */
     public function has(string $key): bool
     {
         return isset($this->entries[$key]);
@@ -78,7 +79,11 @@ final class BoundedLru
         return $this->bytes;
     }
 
-    /** @return list<string> keys from the least to the most recently used (tests, diagnostics) */
+    /**
+     * @internal tests and diagnostics only
+     *
+     * @return list<string> keys from the least to the most recently used
+     */
     public function keys(): array
     {
         return array_keys($this->entries);

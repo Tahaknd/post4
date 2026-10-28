@@ -104,6 +104,9 @@ class AppServiceProvider extends ServiceProvider
                 (int) config('capture.enrichment.geoip_retry_seconds'),
             ),
             (bool) config('capture.enrichment.enabled'),
+            (bool) config('capture.store_ip'),
+            (bool) config('capture.store_raw_user_agent'),
+            (int) config('capture.enrichment.max_ua_parses_per_request'),
         ));
 
         $this->app->singleton(PayloadDecoder::class, fn () => new PayloadDecoder(

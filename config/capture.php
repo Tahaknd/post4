@@ -42,28 +42,46 @@ return [
      * Keep the raw client ip in the stored event properties as `$ip` (env CAPTURE_STORE_IP, default false).
      * DEVIATION FROM POSTHOG, which stores `$ip` unless a project discards it: here the address is used for the
      * GeoIP lookup (when a database is installed) and then dropped, so the event store holds no IP addresses.
-     * An `$ip` an SDK sends itself is dropped too. `?ip=0` on the request still means "no ip at all".
+     * An `$ip` an SDK sends itself is dropped too, also inside `$set` and `$set_once`. `?ip=0` on the request
+     * means "no ip at all": no GeoIP lookup (even for a body `$ip`) and no client ip added.
+     * All of `store_ip`, `store_raw_user_agent` and the enrichment keys below are read ONCE when the Enricher
+     * singleton is built (worker boot, see config/octane.php `warm`): changing the env needs a restart or
+     * `php artisan octane:reload`, not just the next request.
      */
     'store_ip' => (bool) env('CAPTURE_STORE_IP', false),
+
+    /*
+     * Keep the `$raw_user_agent` an SDK may send (env CAPTURE_STORE_RAW_UA, default false). It is used to derive
+     * browser, os and device and then dropped, like the ip, because a User-Agent can identify a person. When kept
+     * it is capped at 512 bytes. The request's own User-Agent HEADER is never stored.
+     */
+    'store_raw_user_agent' => (bool) env('CAPTURE_STORE_RAW_UA', false),
 
     /*
      * Enrichment of captured events (App\Domain\Capture\Enricher): browser, os and device properties from the
      * User-Agent, and `$geoip_*` properties from an OPTIONAL operator supplied MaxMind DB file. It only FILLS
      * properties the SDK left out and never rejects an event.
-     *  - enabled: CAPTURE_ENRICHMENT_ENABLED (default true); false skips the User-Agent and GeoIP work (the `$ip`
-     *    handling above still applies).
+     *  - enabled: CAPTURE_ENRICHMENT_ENABLED (default true); false skips the User-Agent and GeoIP work (the ip and
+     *    raw User-Agent handling above still applies).
      *  - ua_cache_entries / ua_cache_max_bytes: bound of the per worker memo of parsed User-Agents
-     *    (CAPTURE_UA_CACHE_ENTRIES, CAPTURE_UA_CACHE_MAX_BYTES). 2000 entries is about 1 MB.
+     *    (CAPTURE_UA_CACHE_ENTRIES, CAPTURE_UA_CACHE_MAX_BYTES). A full default memo is roughly 1.5 MB per worker
+     *    and never more than the byte bound.
+     *  - max_ua_parses_per_request: CAPTURE_UA_PARSES_PER_REQUEST (default 20), the most DISTINCT User-Agent
+     *    strings the events of ONE request may make the library parse. Events carrying their own
+     *    `$raw_user_agent` can otherwise make a 500 event batch cost 500 parses; over the budget an event gets
+     *    the request header's result. Memo hits, repeats and the header itself never count.
      *  - geoip_path: GEOIP_DB_PATH, a GeoLite2-City or DB-IP Lite City `.mmdb`. No file means no `$geoip_*`
      *    properties and no error; the file is picked up (and a replaced one reopened) within
-     *    geoip_retry_seconds without a restart. The database is NEVER bundled: licences.
+     *    geoip_retry_seconds (GEOIP_RETRY_SECONDS, default 60) without a restart. The database is NEVER bundled:
+     *    licences. Check a file with `php artisan geoip:check`.
      */
     'enrichment' => [
         'enabled' => (bool) env('CAPTURE_ENRICHMENT_ENABLED', true),
         'ua_cache_entries' => (int) env('CAPTURE_UA_CACHE_ENTRIES', 2000),
         'ua_cache_max_bytes' => (int) env('CAPTURE_UA_CACHE_MAX_BYTES', 2 * 1024 * 1024),
-        'geoip_path' => (string) env('GEOIP_DB_PATH', '/app/storage/geoip/geoip.mmdb'),
-        'geoip_retry_seconds' => 60,
+        'max_ua_parses_per_request' => (int) env('CAPTURE_UA_PARSES_PER_REQUEST', 20),
+        'geoip_path' => (string) env('GEOIP_DB_PATH', storage_path('geoip/geoip.mmdb')),
+        'geoip_retry_seconds' => (int) env('GEOIP_RETRY_SECONDS', 60),
     ],
 
     /*
