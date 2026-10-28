@@ -154,17 +154,6 @@ class ProjectScopedReader
         return $this->client->select(self::cte().$sql, $params, $settings, $timeout);
     }
 
-    /**
-     * The statement a migration that changes the columns of `events` must contain (one line): the scoped view
-     * over exactly {@see self::COLUMNS}, DEFINER and filter as in 002_scoped_events_view.sql. Printed by
-     * `php artisan clickhouse:view-sql`, so nobody types the column list by hand twice.
-     */
-    public static function viewStatement(): string
-    {
-        return 'CREATE OR REPLACE VIEW '.self::VIEW.' DEFINER = CURRENT_USER SQL SECURITY DEFINER AS SELECT '
-            .implode(', ', self::COLUMNS)." FROM events WHERE project_id = toUInt32(getSetting('SQL_project_id'))";
-    }
-
     /** `WITH project_events AS (SELECT <COLUMNS> FROM posthog.project_events_v) `. */
     public static function cte(): string
     {

@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Infrastructure\ClickHouse\ProjectScopedReader;
+use App\Infrastructure\ClickHouse\ScopedViewStatement;
 use Illuminate\Console\Command;
 
 class ClickHouseViewSql extends Command
@@ -13,7 +13,7 @@ class ClickHouseViewSql extends Command
 
     public function handle(): int
     {
-        $this->line(ProjectScopedReader::viewStatement().';');
+        $this->line(ScopedViewStatement::sql().';');
 
         return self::SUCCESS;
     }

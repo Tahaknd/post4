@@ -2,6 +2,7 @@
 
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
+use App\Infrastructure\ClickHouse\ScopedViewStatement;
 use Tests\Support\MigrationColumns;
 
 it('gives every breakdown column a non-empty label', function () {
@@ -18,7 +19,7 @@ it('offers only columns of the scoped relation', function () {
 
 it('prints, from COLUMNS, exactly the view statement the last migration contains', function () {
     // one source for the column list: the command output equals the CREATE OR REPLACE VIEW the migrations leave behind
-    expect(ProjectScopedReader::viewStatement())->toBe(MigrationColumns::viewStatement());
+    expect(ScopedViewStatement::sql())->toBe(MigrationColumns::viewStatement());
 
-    $this->artisan('clickhouse:view-sql')->expectsOutput(ProjectScopedReader::viewStatement().';')->assertExitCode(0);
+    $this->artisan('clickhouse:view-sql')->expectsOutput(ScopedViewStatement::sql().';')->assertExitCode(0);
 });
