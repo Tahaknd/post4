@@ -72,6 +72,37 @@ final class MmdbGeoLookup implements GeoLookup
         }
     }
 
+    /**
+     * One-off diagnosis for `php artisan geoip:check` (never used on the capture path): opens the file afresh
+     * (no retry interval, no log throttle) and reports what the real reader makes of $ip.
+     *
+     * @return array{status: 'ready'|'no database'|'unreadable', properties: array<string, string>, error: ?string}
+     */
+    public function check(string $ip): array
+    {
+        if (! is_file($this->path)) {
+            return ['status' => 'no database', 'properties' => [], 'error' => null];
+        }
+
+        try {
+            $reader = new Reader($this->path);
+        } catch (Throwable $e) {
+            return ['status' => 'unreadable', 'properties' => [], 'error' => $e::class.': '.mb_substr($e->getMessage(), 0, 200)];
+        }
+
+        try {
+            $record = $reader->get($ip);
+
+            return ['status' => 'ready', 'properties' => is_array($record) ? $this->properties($record) : [], 'error' => null];
+        } catch (\InvalidArgumentException $e) {
+            return ['status' => 'ready', 'properties' => [], 'error' => $e->getMessage()];
+        } catch (Throwable $e) {
+            return ['status' => 'unreadable', 'properties' => [], 'error' => $e::class.': '.mb_substr($e->getMessage(), 0, 200)];
+        } finally {
+            $reader->close();
+        }
+    }
+
     public function close(): void
     {
         $this->reader?->close();

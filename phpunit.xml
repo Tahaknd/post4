@@ -18,6 +18,7 @@
             <group>postgres</group>
             <group>clickhouse</group>
             <group>slow</group>
+            <group>geoip</group>
         </exclude>
     </groups>
     <source>
