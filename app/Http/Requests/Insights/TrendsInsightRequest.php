@@ -2,8 +2,6 @@
 
 namespace App\Http\Requests\Insights;
 
-use App\Domain\Insights\Query\DatePreset;
-use App\Domain\Insights\Query\DateRange;
 use App\Domain\Insights\Query\FilterOperator;
 use App\Domain\Insights\Query\InvalidDateSelection;
 use App\Domain\Insights\Query\InvalidInsightQuery;
@@ -14,9 +12,7 @@ use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Models\Project;
-use DateTimeInterface;
 use DateTimeZone;
-use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Illuminate\Validation\Validator;
@@ -45,29 +41,11 @@ use Illuminate\Validation\Validator;
  * Strings arrive untouched (the API skips TrimStrings and ConvertEmptyStringsToNull, see bootstrap/app.php): an
  * event name keeps its spaces and `equals ''` keeps its empty value.
  */
-class TrendsInsightRequest extends FormRequest
+class TrendsInsightRequest extends InsightRequest
 {
-    /** Largest body accepted: the legal maximum is about 15 KB. */
-    public const int MAX_BODY_BYTES = 65536;
-
     private const array FIELDS = ['events', 'metric', 'interval', 'timezone', 'date_preset', 'date_from', 'date_to', 'breakdown', 'filters'];
 
     private ?TrendsQuery $trends = null;
-
-    protected function prepareForValidation(): void
-    {
-        $body = $this->getContent();
-
-        abort_unless($this->isJson(), 415);
-        abort_if(strlen($body) > self::MAX_BODY_BYTES, 413);
-        abort_unless($body !== '' && json_validate($body), 400);
-    }
-
-    public function authorize(): bool
-    {
-        // The binder already answered 404 for a project the user cannot open; this is the independent second check.
-        return $this->user()?->can('view', $this->route('project')) === true;
-    }
 
     /**
      * `filled` on every text field that must not be empty: the validator skips most rules for an empty string, so
@@ -85,10 +63,6 @@ class TrendsInsightRequest extends FormRequest
             'events.*' => ['required', 'string', 'min:1', 'max:'.TrendsQuery::MAX_EVENT_LENGTH, 'distinct:strict'],
             'metric' => ['sometimes', 'filled', 'string', Rule::in(array_column(Metric::cases(), 'value'))],
             'interval' => ['sometimes', 'filled', 'string', Rule::in(array_column(Interval::cases(), 'value'))],
-            'timezone' => ['sometimes', 'filled', 'string', Rule::in(DateTimeZone::listIdentifiers())],
-            'date_preset' => ['sometimes', 'filled', 'string', Rule::in(array_column(DatePreset::cases(), 'value'))],
-            'date_from' => ['sometimes', 'filled', 'string', 'regex:/\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/'],
-            'date_to' => ['sometimes', 'filled', 'string', 'regex:/\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/'],
             'breakdown' => ['sometimes', 'nullable', 'array'],
             'breakdown.column' => ['nullable', 'string', Rule::in(array_column(BreakdownColumn::cases(), 'value'))],
             'breakdown.property' => ['nullable', 'string', 'max:'.Breakdown::MAX_KEY_LENGTH],
@@ -98,7 +72,7 @@ class TrendsInsightRequest extends FormRequest
             'filters.*.key' => ['required', 'string', 'max:'.PropertyFilter::MAX_KEY_LENGTH],
             'filters.*.operator' => ['required', 'string', Rule::in(array_column(FilterOperator::cases(), 'value'))],
             'filters.*.value' => ['nullable', 'string', 'max:'.PropertyFilter::MAX_VALUE_LENGTH],
-        ];
+        ] + $this->dateRules();
     }
 
     /**
@@ -120,10 +94,6 @@ class TrendsInsightRequest extends FormRequest
             'events.*' => 'Each event name must be 1 to '.TrendsQuery::MAX_EVENT_LENGTH.' characters of text, and names must be distinct.',
             'metric' => 'The metric must be total_events or unique_users.',
             'interval' => 'The interval must be hour, day, week or month.',
-            'timezone' => 'Use an IANA time zone name, for example Europe/Istanbul.',
-            'date_preset' => 'The date preset must be one of '.implode(', ', array_column(DatePreset::cases(), 'value')).'.',
-            'date_from' => 'Dates must look like 2026-03-01.',
-            'date_to' => 'Dates must look like 2026-03-01.',
             'breakdown' => 'The breakdown must be null or an object.',
             'breakdown.column' => 'The breakdown column must be one of '.implode(', ', array_column(BreakdownColumn::cases(), 'value')).'.',
             'breakdown.property' => 'The breakdown property must be 1 to '.Breakdown::MAX_KEY_LENGTH.' characters of text.',
@@ -133,7 +103,7 @@ class TrendsInsightRequest extends FormRequest
             'filters.*.key' => 'A filter key must be 1 to '.PropertyFilter::MAX_KEY_LENGTH.' characters of text.',
             'filters.*.operator' => 'A filter operator must be equals, not_equals, contains or is_set.',
             'filters.*.value' => 'A filter value must be text of at most '.PropertyFilter::MAX_VALUE_LENGTH.' characters, or null.',
-        ];
+        ] + $this->dateMessages();
     }
 
     /** @return list<callable(Validator): void> */
@@ -154,17 +124,11 @@ class TrendsInsightRequest extends FormRequest
         try {
             $this->trends = TrendsQuery::fromInput($this->validated(), new DateTimeZone($project->timezone), $this->now());
         } catch (InvalidDateSelection) {
-            throw ValidationException::withMessages(['date_from' => 'Use real calendar days: the end must not be before the start, and the range can be at most '.DateRange::MAX_DAYS.' days.']);
+            throw $this->invalidDateSelection();
         } catch (InvalidInsightQuery) {
             // The exception text names the broken rule but is not shown: one fixed sentence per request.
             throw ValidationException::withMessages(['definition' => 'This combination is not allowed. Use at most '.TrendsQuery::MAX_SERIES.' series, a smaller breakdown, or a shorter range or larger interval (a result may have at most '.TrendsQuery::MAX_ROWS.' rows).']);
         }
-    }
-
-    /** The clock of date presets; a test (or a different clock source) overrides this one method. */
-    protected function now(): DateTimeInterface
-    {
-        return now();
     }
 
     /** The validated definition. Only meaningful after validation passed (the controller runs after it). */
@@ -223,10 +187,6 @@ class TrendsInsightRequest extends FormRequest
             }
         }
 
-        $preset = array_key_exists('date_preset', $input);
-        $absolute = array_key_exists('date_from', $input) || array_key_exists('date_to', $input);
-        if ($preset === $absolute || ($absolute && ! (array_key_exists('date_from', $input) && array_key_exists('date_to', $input)))) {
-            $validator->errors()->add('date_preset', 'Send either a date_preset, or both date_from and date_to.');
-        }
+        $this->checkDateShape($validator, $input);
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Http;
 
+use App\Domain\Insights\InsightTypes;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -53,13 +54,14 @@ final class ApiErrors
     }
 
     /**
-     * The one request that carries the user's definition: strings must reach the domain exactly as sent, so the
+     * The requests that carry the user's definition (one POST per insight type): strings must reach the domain exactly as sent, so the
      * framework's TrimStrings and ConvertEmptyStringsToNull are skipped for it only (every other API endpoint trims
      * and null-checks what it needs by hand).
      */
     public static function keepsStringsExact(Request $request): bool
     {
-        return $request->isMethod('POST') && preg_match('#\Aapi/projects/[0-9]{1,18}/insights/trends\z#', $request->path()) === 1;
+        return $request->isMethod('POST')
+            && preg_match('#\Aapi/projects/[0-9]{1,18}/insights/('.implode('|', array_map('preg_quote', InsightTypes::keys())).')\z#', $request->path()) === 1;
     }
 
     /**

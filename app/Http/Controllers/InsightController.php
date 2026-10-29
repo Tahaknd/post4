@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Domain\Insights\InsightQuery;
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
@@ -9,7 +10,7 @@ use App\Http\ApiErrors;
 use App\Http\InsightErrorResponse;
 use App\Http\Requests\Insights\TrendsInsightRequest;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
-use App\Jobs\RunTrendsInsight;
+use App\Jobs\RunInsight;
 use App\Models\Project;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
@@ -23,7 +24,9 @@ use Throwable;
  * The insight JSON API. `{project}` is bound through Project::visibleTo(user) (AppServiceProvider): a project the
  * user cannot open is a 404, exactly like one that does not exist, and the project id is never read from a body.
  *
- *   POST   /api/projects/{project}/insights/trends      200 {status: done, run_id: null, result}  a fresh cached result
+ *   POST   /api/projects/{project}/insights/{type}      one route per registered type (App\Domain\Insights\InsightTypes),
+ *                                                       each with the request class of its type; the flow is the same:
+ *                                                       200 {status: done, run_id: null, result}  a fresh cached result
  *                                                       202 {status: queued, run_id, poll_url}    a run was queued, or
  *                                                           the SAME run again when an identical POST of this user is
  *                                                           still queued or running (idempotent)
@@ -31,7 +34,7 @@ use Throwable;
  *   GET    /api/projects/{project}/insights/runs/{run}  200 {status: queued|running|done|failed|cancelled, ...}
  *   DELETE /api/projects/{project}/insights/runs/{run}  204 cancels a queued or running run (idempotent), frees its slots
  *
- * A heavy insight never runs inside the request: it is a RunTrendsInsight job on the `insights` queue, and there is
+ * A heavy insight never runs inside the request: it is a RunInsight job (one class per type) on the `insights` queue, and there is
  * no synchronous mode. The only failures that are HTTP errors are the ones that happen BEFORE a run exists (caps,
  * throttle, store down); everything that goes wrong while the query runs is a 200 poll answer with status `failed`
  * and an `error` object. Every error body has the shape of {@see ApiErrors::body()}: `kind` is a ClickHouseErrorKind
@@ -46,8 +49,16 @@ class InsightController extends Controller
 {
     public function trends(TrendsInsightRequest $request, Project $project, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
     {
+        return $this->start($request, $project, $request->definition(), $runner, $runs, $gate);
+    }
+
+    /**
+     * The whole flow of starting a run, the same for every insight type: the definition is already validated and built
+     * by the type's request class. 200 with the cached result, else (limits permitting) 202 with a run id.
+     */
+    private function start(Request $request, Project $project, InsightQuery $query, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
+    {
         $user = $this->user($request);
-        $query = $request->definition();
         $hash = $query->hash();
 
         // Identical definitions of the same local day share this entry (see TrendsInsightRequest on quantisation).
@@ -92,9 +103,9 @@ class InsightController extends Controller
                 return $this->busy('Too many insights of this project are running. Try again in a few seconds.');
             }
 
-            $runs->create($runId, InsightRunStore::TYPE_TRENDS, $project->id, $userId, $hash, $projectSlot, $userSlot);
+            $runs->create($runId, $query->type(), $project->id, $userId, $hash, $projectSlot, $userSlot);
             $created = true;
-            RunTrendsInsight::dispatch($project->id, $runId, $query->canonical(), $userId, $projectSlot, $userSlot);
+            RunInsight::dispatchFor($query, $project->id, $runId, $userId, $projectSlot, $userSlot);
         } catch (Throwable $e) {
             // Ids and the exception class only: the message of a Redis or queue failure is not for the log of every request.
             Log::warning('insight run could not be queued', ['project_id' => $project->id, 'exception' => $e::class]);
