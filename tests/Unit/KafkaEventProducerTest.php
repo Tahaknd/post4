@@ -3,6 +3,7 @@
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\ProducerUnavailable;
 use App\Infrastructure\Kafka\KafkaEventProducer;
+use Tests\Support\FakeRdKafkaProducer;
 
 function kafkaMessage(string $properties = '{}'): array
 {
@@ -153,4 +154,52 @@ it('wires the producer timeouts and breaker cooldown from config', function () {
         ->and(config('capture.kafka_flush_timeout_ms'))->toBe(3000)
         ->and(config('capture.kafka_breaker_cooldown_seconds'))->toBe(10.0)
         ->and(app(EventProducer::class))->toBeInstanceOf(KafkaEventProducer::class);
+});
+
+/** A producer wired to a fake client: [producer, fake client holder] (the client exists after the first produce). */
+function producerWithFakeClient(): array
+{
+    $holder = new stdClass;
+    $holder->client = null;
+    $producer = new KafkaEventProducer('fake:9092', 'fake_topic', breakerCooldownSeconds: 5.0, clock: fn (): float => 1000.0, producerFactory: function ($conf, Closure $onDelivery) use ($holder) {
+        return $holder->client = new FakeRdKafkaProducer($onDelivery);
+    });
+
+    return [$producer, $holder];
+}
+
+it('serves the reports a previous batch left in the queue BEFORE it resets the failure counter', function () {
+    [$producer, $holder] = producerWithFakeClient();
+    $producer->produce([kafkaMessage()]);
+
+    // A message of an earlier batch was still in flight when that batch was judged (purge(QUEUE) cannot remove
+    // it); its failed report only surfaces at the next poll, which nobody ran during the cooldown.
+    $holder->client->leaveStaleFailure();
+    $holder->client->calls = [];
+
+    $producer->produce([kafkaMessage()]);
+
+    // The first thing the new batch does is serve the queue; the stale failure is not charged to it.
+    expect($holder->client->calls[0])->toBe('poll')
+        ->and(array_slice($holder->client->calls, 0, 3))->toBe(['poll', 'newTopic', 'produce']);
+});
+
+it('still fails a batch whose own delivery report is a failure', function () {
+    [$producer, $holder] = producerWithFakeClient();
+    $producer->produce([kafkaMessage()]);
+    $holder->client->deliverWith = RD_KAFKA_RESP_ERR__MSG_TIMED_OUT;
+
+    [, $error] = timedProduce($producer, [kafkaMessage()]);
+
+    expect($error)->toBeInstanceOf(ProducerUnavailable::class)
+        ->and($error->getMessage())->toBe('Kafka delivery failed')
+        ->and($holder->client->calls)->toContain('purge');
+});
+
+it('does not poll before the very first batch (there is no client yet) and succeeds on a clean queue', function () {
+    [$producer, $holder] = producerWithFakeClient();
+
+    $producer->produce([kafkaMessage()]);
+
+    expect($holder->client->calls[0])->toBe('newTopic');
 });

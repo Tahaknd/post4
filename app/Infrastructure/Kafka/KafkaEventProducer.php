@@ -36,6 +36,9 @@ final class KafkaEventProducer implements EventProducer
      * @param  int  $flushTimeoutMs  How long produce() waits for the flush; keep it above $messageTimeoutMs.
      * @param  float  $breakerCooldownSeconds  How long the circuit stays open after a delivery failure.
      * @param  ?\Closure(): float  $clock  Monotonic seconds; a test seam for the circuit breaker (default: hrtime).
+     * @param  ?\Closure(Conf, \Closure): Producer  $producerFactory  Test seam: builds the client from the finished
+     *                                                                conf and the delivery-report callback
+     *                                                                (default: `new Producer($conf)`).
      */
     public function __construct(
         private readonly string $brokers,
@@ -44,6 +47,7 @@ final class KafkaEventProducer implements EventProducer
         private readonly int $flushTimeoutMs = 3000,
         private readonly float $breakerCooldownSeconds = 10.0,
         private readonly ?\Closure $clock = null,
+        private readonly ?\Closure $producerFactory = null,
     ) {}
 
     public function produce(array $messages): void
@@ -83,6 +87,11 @@ final class KafkaEventProducer implements EventProducer
     /** @param  list<array{0:string,1:string}>  $payloads */
     private function send(array $payloads): void
     {
+        // Serve what the previous batch left behind BEFORE zeroing the counter: purge(QUEUE) cannot remove
+        // messages that are already in flight, so their (failed) delivery reports can still sit in the queue
+        // while nobody polled during the circuit cooldown. Served after the reset, such a stale report would
+        // be counted against this batch and turn a delivered batch into a spurious 503 and a second cooldown.
+        $this->producer?->poll(0);
         $this->failures = 0;
         $queued = 0;
 
@@ -166,14 +175,15 @@ final class KafkaEventProducer implements EventProducer
         $conf->set('message.timeout.ms', (string) $this->messageTimeoutMs);
         $conf->set('socket.keepalive.enable', 'true');
         $conf->set('log.connection.close', 'false');
-        $conf->setDrMsgCb(function ($kafka, $message): void {
+        $onDelivery = function ($kafka, $message): void {
             if ($message->err === RD_KAFKA_RESP_ERR__FATAL) {
                 $this->fatal = true;
             }
             if ($message->err !== RD_KAFKA_RESP_ERR_NO_ERROR) {
                 $this->failures++;
             }
-        });
+        };
+        $conf->setDrMsgCb($onDelivery);
         $conf->setErrorCb(function ($kafka, int $err, string $reason): void {
             // Transient errors (brokers down, transport) are already logged by the log callback.
             if ($err === RD_KAFKA_RESP_ERR__FATAL) {
@@ -189,7 +199,9 @@ final class KafkaEventProducer implements EventProducer
             Log::log($level <= 4 ? 'warning' : 'debug', 'librdkafka '.$facility.': '.$message);
         });
 
-        return $this->producer = new Producer($conf);
+        return $this->producer = $this->producerFactory !== null
+            ? ($this->producerFactory)($conf, $onDelivery)
+            : new Producer($conf);
     }
 
     private function now(): float
