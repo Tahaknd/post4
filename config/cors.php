@@ -1,7 +1,9 @@
 <?php
 
 return [
-    'paths' => ['e', 'batch', 'capture', 'decide', 'i/*'],
+    // Every public SDK path, for every origin and without credentials. `s` (session recording) and `static` (lazy
+    // scripts) are not served in 3.9: the stubbed remote config switches those SDK features off.
+    'paths' => ['e', 'batch', 'capture', 'decide', 'flags', 'i/*', 'array/*'],
     'allowed_methods' => ['*'],
     'allowed_origins' => ['*'],
     'allowed_origins_patterns' => [],

@@ -31,27 +31,27 @@ final class PayloadDecoder
         }
     }
 
+    /**
+     * The body of a posthog-js feature flag request (`/flags`, `/decide`): one JSON object, sent the same ways as an
+     * event (plain JSON, gzip with or without `compression=gzip-js`, a `data=` form field, base64), with the same
+     * size and complexity caps. Anything that is not an object (a list, a scalar) is an InvalidPayload.
+     *
+     * @return array<string, mixed>
+     */
+    public function decodeObject(Request $request): array
+    {
+        $data = $this->decodeJson($request);
+
+        if (! is_array($data) || ($data !== [] && array_is_list($data))) {
+            throw new InvalidPayload('Payload must be an object');
+        }
+
+        return $data;
+    }
+
     public function decode(Request $request): CapturePayload
     {
-        $raw = $this->rawBody($request);
-
-        if (str_starts_with($raw, "\x1f\x8b")) {
-            $raw = @gzdecode($raw, $this->maxDecodedBytes);
-            if ($raw === false) {
-                throw new InvalidPayload('Invalid or oversized gzip body');
-            }
-        }
-
-        // Cheap structural cap before json_decode: it over-counts brackets inside strings, which is fine.
-        if (substr_count($raw, '[') + substr_count($raw, '{') > $this->maxContainers) {
-            throw new InvalidPayload('Payload too complex');
-        }
-
-        try {
-            $data = json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            throw new InvalidPayload('Invalid JSON');
-        }
+        $data = $this->decodeJson($request);
 
         if (! is_array($data)) {
             throw new InvalidPayload('Payload must be an object or an array');
@@ -87,6 +87,30 @@ final class PayloadDecoder
             $events,
             is_string($sentAt) ? $sentAt : null,
         );
+    }
+
+    /** The request body as decoded JSON: unwrapped from form/base64, gunzipped, capped, parsed. */
+    private function decodeJson(Request $request): mixed
+    {
+        $raw = $this->rawBody($request);
+
+        if (str_starts_with($raw, "\x1f\x8b")) {
+            $raw = @gzdecode($raw, $this->maxDecodedBytes);
+            if ($raw === false) {
+                throw new InvalidPayload('Invalid or oversized gzip body');
+            }
+        }
+
+        // Cheap structural cap before json_decode: it over-counts brackets inside strings, which is fine.
+        if (substr_count($raw, '[') + substr_count($raw, '{') > $this->maxContainers) {
+            throw new InvalidPayload('Payload too complex');
+        }
+
+        try {
+            return json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            throw new InvalidPayload('Invalid JSON');
+        }
     }
 
     private function rawBody(Request $request): string

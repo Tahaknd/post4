@@ -12,6 +12,7 @@ use App\Domain\Capture\ProducerUnavailable;
 use App\Domain\Capture\ProjectRateLimiter;
 use App\Domain\Capture\ProjectResolver;
 use App\Domain\Capture\TooManyEvents;
+use App\Http\Controllers\Concerns\AnswersCaptureErrors;
 use App\Support\RateLimit\LimiterOutage;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
@@ -21,6 +22,8 @@ use Illuminate\Support\Facades\Log;
 
 final class CaptureController extends Controller
 {
+    use AnswersCaptureErrors;
+
     /** Per-hour drop counters read by `capture:status`: capture-dropped:{project_id}:{YmdH} (UTC). */
     public const DROPPED_KEY_PREFIX = 'capture-dropped:';
 
@@ -40,11 +43,8 @@ final class CaptureController extends Controller
         FailureLimiter $failures,
         ProjectRateLimiter $projectLimiter,
     ): JsonResponse {
-        // 1. Body size: the declared length first (cheap), then the real body.
-        $maxBody = (int) config('capture.max_body_bytes');
-        $declared = $request->header('Content-Length');
-        if ((is_string($declared) && ctype_digit($declared) && (int) $declared > $maxBody)
-            || strlen($request->getContent()) > $maxBody) {
+        // 1. Body size.
+        if ($this->bodyTooLarge($request)) {
             return $this->error(413, 'payload_too_large', 'Request body is too large');
         }
 
@@ -167,22 +167,6 @@ final class CaptureController extends Controller
         return is_string($value) && in_array(strtolower($value), ['0', 'false'], true);
     }
 
-    /**
-     * Answer for a request that did not authenticate: 429 when this ip has already used up its failure
-     * budget (no further work), otherwise count the failure and answer with the specific error.
-     */
-    private function unauthenticated(FailureLimiter $failures, string $ip, int $status, string $code, string $detail): JsonResponse
-    {
-        $retryAfter = $failures->blockedFor($ip);
-        if ($retryAfter !== null) {
-            return $this->unavailable('too_many_requests', 'Too many failed attempts, retry later', $retryAfter, 429);
-        }
-
-        $failures->record($ip);
-
-        return $this->error($status, $code, $detail);
-    }
-
     private function parseSentAt(?string $value): ?CarbonImmutable
     {
         if ($value === null || strlen($value) > 40 || preg_match(self::SENT_AT_FORMAT, $value) !== 1) {
@@ -194,16 +178,5 @@ final class CaptureController extends Controller
         } catch (\Throwable) {
             return null;
         }
-    }
-
-    /** A retryable error (503, or 429 for the per-ip limit) with its Retry-After. */
-    private function unavailable(string $code, string $detail, int $retryAfter, int $status = 503): JsonResponse
-    {
-        return $this->error($status, $code, $detail)->header('Retry-After', (string) $retryAfter);
-    }
-
-    private function error(int $status, string $code, string $detail): JsonResponse
-    {
-        return response()->json(['type' => 'capture_error', 'code' => $code, 'detail' => $detail], $status);
     }
 }

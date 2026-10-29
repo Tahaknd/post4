@@ -7,10 +7,14 @@ namespace App\Http;
  *
  * SEGMENTS belong to event capture and the posthog-js SDK endpoints. They are served without session,
  * cookie or CSRF middleware (see routes/capture.php) and SDKs hard-code them.
- * Verified in posthog-js 1.438.15: `e`, `s` (session recording), `i`, `static` (toolbar and other
- * assets) and `array` (config); posthog-node: `batch`, `capture`. UNVERIFIED (kept from review, the
- * SDK builds these paths at runtime): `decide`, `flags`, `engage` (legacy people endpoint).
- * `array`, `decide`, `flags` are reserved ahead of the SDK stubs (Milestone 3.9).
+ * Verified in the pinned posthog-js 1.438.24 (task 3.9, read from the package source and seen in a real browser):
+ * `e` (events, default `/e/`), `i` (`/i/v0/e/` via the analytics endpoint), `s` (session recording, `/s/`), `static`
+ * (lazy extension scripts `/static/{version}/{kind}.js`, legacy `/static/{kind}.js`), `array` (`/array/{token}/config`
+ * and `config.js`), `flags` (`POST /flags/?v=2`). posthog-node: `batch`, `capture`.
+ * `decide` is no longer called by 1.438.24 (it is what SDKs before the /flags split ask), and `engage` (the legacy
+ * people endpoint) does not appear in it at all: both stay reserved for older SDKs.
+ * Served in 3.9: `e`, `i`, `batch`, `capture`, `array`, `flags`, `decide` (the last three as stubs, SdkStubController).
+ * Reserved but NOT served: `s` (the stubbed remote config switches session recording off), `static`, `engage`.
  *
  * APP_OWNED are names the application or its packages already use: the health route, built assets,
  * the storage disk, Horizon, Inertia's DevTools and the JSON API. A UI page cannot take them; only

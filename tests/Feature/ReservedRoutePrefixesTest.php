@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\CaptureController;
+use App\Http\Controllers\SdkStubController;
 use App\Http\Middleware\HandleInertiaRequests;
 use App\Http\ReservedPaths;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
@@ -111,8 +112,12 @@ it('detects a web route under a reserved prefix', function (string $uri) {
     '/capture/settings',
     '/i/anything',
     '/array/config',
+    '/array/phc_x/config.js',
     '/decide',
     '/flags',
+    '/s/anything',
+    '/static/recorder.js',
+    '/engage',
     '/{project}/insights',
 ]);
 
@@ -130,6 +135,7 @@ it('classifies reserved paths by their first segment', function () {
         ->and(ReservedPaths::collides('/i/v0/e'))->toBeTrue()
         ->and(ReservedPaths::collides('/E'))->toBeTrue()
         ->and(ReservedPaths::collides('/array/abc/config'))->toBeTrue()
+        ->and(ReservedPaths::collides('/flags/'))->toBeTrue()
         ->and(ReservedPaths::collides('/'))->toBeFalse()
         ->and(ReservedPaths::collides('/events'))->toBeFalse()
         ->and(ReservedPaths::collides('/projects/1'))->toBeFalse();
@@ -144,6 +150,20 @@ it('registers the capture routes only under reserved prefixes and without middle
     expect($capture)->not->toBeEmpty();
 
     foreach ($capture as $route) {
+        expect(ReservedPaths::collides($route->uri()))->toBeTrue("{$route->uri()} is not covered by ReservedPaths::SEGMENTS")
+            ->and($route->gatherMiddleware())->toBe([], "{$route->uri()} must stay middleware-free");
+    }
+});
+
+it('registers the SDK stub routes only under reserved prefixes and without middleware', function () {
+    $stubs = array_values(array_filter(
+        Route::getRoutes()->getRoutes(),
+        fn (RoutingRoute $route) => str_starts_with((string) $route->getAction('controller'), SdkStubController::class.'@'),
+    ));
+
+    expect($stubs)->toHaveCount(4);
+
+    foreach ($stubs as $route) {
         expect(ReservedPaths::collides($route->uri()))->toBeTrue("{$route->uri()} is not covered by ReservedPaths::SEGMENTS")
             ->and($route->gatherMiddleware())->toBe([], "{$route->uri()} must stay middleware-free");
     }

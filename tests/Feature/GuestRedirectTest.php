@@ -137,4 +137,4 @@ it('never starts a session for a capture or SDK path, even with a cookie', funct
     expect($response->getStatusCode())->toBe(404)
         ->and($response->headers->getCookies())->toBe([])
         ->and($response->getContent())->not->toContain('data-page');
-})->with(['/e/x', '/batch/x', '/capture/x', '/i/v0/x', '/array/abc/config', '/flags', '/decide']);
+})->with(['/e/x', '/batch/x', '/capture/x', '/i/v0/x', '/array/abc/elsewhere', '/static/recorder.js', '/s/x', '/engage', '/flags', '/decide']);
