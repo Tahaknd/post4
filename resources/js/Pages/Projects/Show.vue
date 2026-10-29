@@ -89,7 +89,7 @@ function destroy() {
 
         <section aria-labelledby="insights-heading" class="space-y-3">
             <h2 id="insights-heading" class="text-lg font-semibold tracking-tight">Insights</h2>
-            <p class="text-sm text-muted">See how often your events happen over time, and where people drop off between steps.</p>
+            <p class="text-sm text-muted">See how often your events happen over time, where people drop off between steps, and who comes back.</p>
             <div class="flex flex-wrap gap-3">
                 <Link
                     :href="urls.trends"
@@ -102,6 +102,12 @@ function destroy() {
                     class="inline-flex items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-fg hover:bg-canvas"
                 >
                     Open Funnel
+                </Link>
+                <Link
+                    :href="urls.retention"
+                    class="inline-flex items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-fg hover:bg-canvas"
+                >
+                    Open Retention
                 </Link>
             </div>
         </section>

@@ -133,6 +133,12 @@ class HandleInertiaRequests extends Middleware
 
                 return $current instanceof Project ? route('projects.insights.funnel', $current, absolute: false) : null;
             },
+            // The Retention page of the project on screen, the same way.
+            'retentionUrl' => function () use ($request) {
+                $current = $request->route('project');
+
+                return $current instanceof Project ? route('projects.insights.retention', $current, absolute: false) : null;
+            },
             'flash' => fn () => [
                 // Not every request that renders a page has a session (404 pages of unmatched routes).
                 'status' => $request->hasSession() ? $request->session()->get('status') : null,

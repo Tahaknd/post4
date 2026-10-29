@@ -224,6 +224,7 @@ describe('show', function () {
                     'index' => '/projects',
                     'trends' => "/projects/{$mine->id}/insights/trends",
                     'funnel' => "/projects/{$mine->id}/insights/funnel",
+                    'retention' => "/projects/{$mine->id}/insights/retention",
                     'demo' => "/projects/{$mine->id}/demo",
                     'rotate_key' => "/projects/{$mine->id}/api-key",
                     'destroy' => "/projects/{$mine->id}",

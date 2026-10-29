@@ -10,21 +10,27 @@ use App\Domain\Insights\Funnel\FunnelStep;
 use App\Domain\Insights\Funnel\WindowUnit;
 use App\Domain\Insights\Query\DatePreset;
 use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\EventCondition;
 use App\Domain\Insights\Query\EventName;
 use App\Domain\Insights\Query\FilterOperator;
 use App\Domain\Insights\Query\PropertyFilter;
+use App\Domain\Insights\Retention\RetentionPeriod;
+use App\Domain\Insights\Retention\RetentionQuery;
+use App\Domain\Insights\Retention\RetentionType;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Models\Project;
+use DateTimeZone;
 use Illuminate\Support\Facades\Gate;
 use Inertia\Inertia;
 use Inertia\Response;
 
 /**
- * The insight pages: Trends (`GET /projects/{project}/insights/trends`) and Funnel (`GET /projects/{project}/insights/funnel`).
+ * The insight pages: Trends (`GET /projects/{project}/insights/trends`), Funnel (`GET /projects/{project}/insights/funnel`) and
+ * Retention (`GET /projects/{project}/insights/retention`).
  * `{project}` is bound through Project::visibleTo(user)
  * (a project the user cannot open is a 404) and the policy `view` is the independent second check.
  *
@@ -33,7 +39,8 @@ use Inertia\Response;
  * (domain constants, mirrored by the client only for instant feedback; the API stays the source of truth), the
  * defaults, and the API URLs built here with route(). There is no API key: the page talks to the API with the
  * session cookie. The run URL (poll and cancel) comes from the `poll_url` of the 202 answer; `urls.runs` is the base the client
- * checks it against. The Funnel page carries the same kinds of props for its own definition (its steps, window and order).
+ * checks it against. The Funnel page carries the same kinds of props for its own definition (its steps, window and order), the
+ * Retention page for its own (the two events, the periods, the retention type and the time zone list the API validates against).
  */
 class ProjectInsightsController extends Controller
 {
@@ -128,6 +135,51 @@ class ProjectInsightsController extends Controller
         ]);
     }
 
+    public function retention(Project $project): Response
+    {
+        Gate::authorize('view', $project);
+
+        return Inertia::render('Projects/Insights/Retention', [
+            'project' => [
+                'id' => $project->id,
+                'name' => $project->name,
+                'timezone' => $project->timezone,
+            ],
+            'options' => [
+                'presets' => array_map(fn (DatePreset $preset) => ['value' => $preset->value, 'label' => self::presetLabel($preset)], DatePreset::cases()),
+                'operators' => array_map(fn (FilterOperator $operator) => ['value' => $operator->value, 'label' => self::operatorLabel($operator), 'needs_value' => $operator->needsValue()], FilterOperator::cases()),
+                'periods' => array_map(fn (RetentionPeriod $period) => ['value' => $period->value, 'label' => ucfirst($period->value)], RetentionPeriod::cases()),
+                'retention_types' => array_map(fn (RetentionType $type) => ['value' => $type->value, 'label' => self::retentionTypeLabel($type)], RetentionType::cases()),
+                // The identifiers the API accepts for `timezone` (the same list the definition validates against).
+                'timezones' => DateTimeZone::listIdentifiers(),
+            ],
+            'defaults' => [
+                'date_preset' => DatePreset::Last30Days->value,
+                'period' => RetentionPeriod::Day->value,
+                'periods' => RetentionQuery::DEFAULT_PERIODS,
+                'retention_type' => RetentionType::FirstTime->value,
+                'timezone' => $project->timezone,
+            ],
+            'limits' => [
+                'min_periods' => RetentionQuery::MIN_PERIODS,
+                'max_periods' => RetentionQuery::MAX_PERIODS,
+                'max_event_length' => EventName::MAX_LENGTH,
+                'max_filters_per_event' => EventCondition::MAX_FILTERS,
+                'max_filter_key_length' => PropertyFilter::MAX_KEY_LENGTH,
+                'max_filter_value_length' => PropertyFilter::MAX_VALUE_LENGTH,
+                'max_range_days' => DateRange::MAX_DAYS,
+                'max_search_length' => EventNamesSqlBuilder::MAX_SEARCH_LENGTH,
+                'event_window_days' => EventNamesSqlBuilder::WINDOW_DAYS,
+            ],
+            'urls' => [
+                'retention' => route('api.insights.retention', $project, absolute: false),
+                'runs' => self::runsBase($project),
+                'events' => route('api.insights.events', $project, absolute: false),
+                'project' => route('projects.show', $project, absolute: false),
+            ],
+        ]);
+    }
+
     /** `/api/projects/{id}/insights/runs/`, taken from the route itself (a run id placeholder is cut off again). */
     private static function runsBase(Project $project): string
     {
@@ -160,6 +212,14 @@ class ProjectInsightsController extends Controller
         return match ($order) {
             FunnelOrder::Ordered => 'Ordered',
             FunnelOrder::StrictOrder => 'Strict order',
+        };
+    }
+
+    private static function retentionTypeLabel(RetentionType $type): string
+    {
+        return match ($type) {
+            RetentionType::FirstTime => 'First time',
+            RetentionType::Recurring => 'Recurring',
         };
     }
 

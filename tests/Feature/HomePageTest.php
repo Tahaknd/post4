@@ -40,11 +40,11 @@ it('lists only the projects the user can open on the Home page, without keys', f
 it('shares exactly the app name, errors, auth and flash with a guest page', function () {
     $props = $this->get('/login')->viewData('page')['props'];
 
-    expect(array_keys($props))->toEqualCanonicalizing(['errors', 'app', 'auth', 'projects', 'projectsTruncated', 'trendsUrl', 'funnelUrl', 'flash', 'canRegister', 'next'])
+    expect(array_keys($props))->toEqualCanonicalizing(['errors', 'app', 'auth', 'projects', 'projectsTruncated', 'trendsUrl', 'funnelUrl', 'retentionUrl', 'flash', 'canRegister', 'next'])
         ->and($props['app'])->toBe(['name' => config('app.name')])
         ->and($props['auth'])->toBe(['user' => null])
         ->and($props['projects'])->toBe([])
-        ->and($props['projectsTruncated'])->toBeFalse()->and($props['trendsUrl'])->toBeNull()->and($props['funnelUrl'])->toBeNull()
+        ->and($props['projectsTruncated'])->toBeFalse()->and($props['trendsUrl'])->toBeNull()->and($props['funnelUrl'])->toBeNull()->and($props['retentionUrl'])->toBeNull()
         ->and($props['flash'])->toBe(['status' => null]);
 });
 
