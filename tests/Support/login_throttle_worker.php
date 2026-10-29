@@ -34,7 +34,7 @@ $logger = new class extends AbstractLogger
 {
     public ?string $warning = null;
 
-    public function log($level, string|\Stringable $message, array $context = []): void
+    public function log($level, string|Stringable $message, array $context = []): void
     {
         $this->warning = $message.' '.json_encode($context);
     }
