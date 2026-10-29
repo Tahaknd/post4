@@ -352,12 +352,23 @@ services:
     depends_on:
       kafka: { condition: service_healthy }
     entrypoint: ["/bin/sh", "-c"]
+    # Idempotent and safe to re-run on a stack that already has the topics (`docker compose up -d kafka-init`
+    # recreates and re-runs this one-shot service when its definition changed; `docker compose run --rm kafka-init`
+    # re-runs it any time): --if-not-exists never touches an existing topic or its data, and the config line below
+    # only sets one named property, so repeating it changes nothing.
+    #   events               capture -> ClickHouse (group clickhouse_events) and the identity consumer (group identity)
+    #   person_distinct_ids  written by `identity:consume`, read by ClickHouse (Milestone 4.3)
+    #   events_dlq           events the identity consumer cannot process, with the error and the origin of the message
+    # The DLQ is kept 30 days (the others keep Kafka's default of 7): somebody has to look at it first.
     command:
       - |
+        set -e
         for t in events person_distinct_ids events_dlq; do
           /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
             --create --if-not-exists --topic "$$t" --partitions 3 --replication-factor 1
         done
+        /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:9092 \
+          --alter --entity-type topics --entity-name events_dlq --add-config retention.ms=2592000000
 
   clickhouse:
     image: clickhouse/clickhouse-server:25.8
