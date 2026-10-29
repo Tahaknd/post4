@@ -14,6 +14,9 @@
 //   - poll the `poll_url`: the first poll after the Retry-After of the 202 (default 1 s), then every POLL_FAST_MS for
 //     the first FAST_POLLS polls and every POLL_SLOW_MS after that (a poll's own Retry-After is a floor); stop at done,
 //     failed, cancelled, or a 404 (the run expired or is not ours: offer to run again);
+//   - a page that runs on a button instead of on every change uses run() (no debounce) and cancel() (DELETE of the run, or of
+//     the run a POST still in flight creates; the state becomes `cancelled`); while it polls, `stage` says whether the run
+//     is `queued` or already `running`;
 //   - every request has its own time limit (min(REQUEST_TIMEOUT_MS, what is left of the TIMEOUT_MS budget)), and the whole
 //     run gives up after TIMEOUT_MS (and cancels);
 //   - 429 and 503 honour Retry-After (bounded automatic retries, then the error is shown);
@@ -44,7 +47,7 @@ const CLIENT_ERRORS = {
     unexpected: { kind: 'unexpected', message: 'Something unexpected happened. Try again.', retryable: true, retry_after_seconds: null },
 };
 
-export const IDLE_STATE = Object.freeze({ phase: 'idle', notice: null, result: null, error: null, fieldErrors: null });
+export const IDLE_STATE = Object.freeze({ phase: 'idle', stage: null, notice: null, result: null, error: null, fieldErrors: null });
 
 export class InsightRunClient {
     #postUrl;
@@ -116,6 +119,29 @@ export class InsightRunClient {
         this.#start(this.#body);
     }
 
+    /** A new definition, run right now (the page's Run button): supersedes whatever runs, no debounce. */
+    run(body) {
+        if (this.#disposed) {
+            return;
+        }
+
+        this.#body = body;
+        this.retry();
+    }
+
+    /**
+     * The user stops what runs: its run is cancelled on the server (a POST that is still in flight cancels the run it creates
+     * when it is answered) and the phase becomes `cancelled`. Nothing runs, nothing to cancel: no change.
+     */
+    cancel() {
+        if (this.#disposed || this.#state.phase !== 'loading') {
+            return;
+        }
+
+        this.#supersede();
+        this.#set({ phase: 'cancelled', notice: null, error: null, fieldErrors: null });
+    }
+
     /**
      * The definition is incomplete (a field is still being filled in): nothing is sent and whatever runs is cancelled, but
      * the last result STAYS (phase `held`) instead of the chart vanishing under an unfinished edit.
@@ -146,7 +172,9 @@ export class InsightRunClient {
             return;
         }
 
-        this.#state = { ...this.#state, ...patch };
+        const next = { ...this.#state, ...patch };
+        // The stage belongs to a run in progress only.
+        this.#state = next.phase === 'loading' ? next : { ...next, stage: null };
         this.#onChange(this.#state);
     }
 
@@ -332,6 +360,9 @@ export class InsightRunClient {
             switch (json.status) {
                 case 'queued':
                 case 'running':
+                    if (this.#state.stage !== json.status) {
+                        this.#set({ stage: json.status });
+                    }
                     floor = answer.retryAfter ?? 0;
                     continue;
                 case 'done':

@@ -505,3 +505,122 @@ test('hold cancels what runs and keeps the last result (an unfinished edit does 
     assert.deepEqual(deletes(calls).map((call) => call.url), [url(RUN_A)]);
     assert.equal(posts(calls).length, 2);
 });
+
+// ---------------------------------------------------------------- run() and cancel(): a page with a Run button
+
+test('run() posts at once without the debounce, and the state says queued, then running, then done', async () => {
+    let polled = 0;
+    const { client, clock, calls, states, last } = setup((call) => {
+        if (call.method === 'POST') {
+            return json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) });
+        }
+        polled++;
+
+        return polled === 1 ? json(200, { status: 'queued', run_id: RUN_A }) : polled === 2 ? json(200, { status: 'running', run_id: RUN_A }) : json(200, { status: 'done', run_id: RUN_A, result: RESULT });
+    });
+
+    client.run({ steps: [] });
+    await flush();
+
+    assert.equal(posts(calls).length, 1, 'no debounce');
+    assert.deepEqual(posts(calls)[0].body, { steps: [] });
+    assert.equal(last().phase, 'loading');
+    assert.equal(last().stage, null);
+
+    await clock.advance(POLL_FAST_MS);
+    assert.equal(last().stage, 'queued');
+    await clock.advance(POLL_FAST_MS);
+    assert.equal(last().stage, 'running');
+    await clock.advance(POLL_FAST_MS);
+    assert.equal(last().phase, 'done');
+    assert.equal(last().stage, null, 'the stage belongs to a run in progress');
+    assert.deepEqual(states.map((state) => state.phase), ['loading', 'loading', 'loading', 'done']);
+});
+
+test('cancel() deletes the run, becomes cancelled and never polls it again', async () => {
+    const { client, clock, calls, last } = setup((call) => {
+        if (call.method === 'POST') {
+            return json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) });
+        }
+
+        return call.method === 'DELETE' ? json(204, undefined) : json(200, { status: 'running', run_id: RUN_A });
+    });
+
+    client.run({});
+    await clock.advance(POLL_FAST_MS);
+    assert.equal(last().stage, 'running');
+
+    client.cancel();
+    await flush();
+
+    assert.equal(last().phase, 'cancelled');
+    assert.equal(last().stage, null);
+    assert.deepEqual(deletes(calls).map((call) => call.url), [url(RUN_A)]);
+    const polled = polls(calls).length;
+    await clock.advance(30000);
+    assert.equal(polls(calls).length, polled, 'polling stopped');
+    assert.equal(last().phase, 'cancelled');
+});
+
+test('cancel() while the POST is still in flight cancels the run that POST creates', async () => {
+    let release;
+    const gate = new Promise((resolve) => (release = resolve));
+    const { client, clock, calls, last } = setup(async (call) => {
+        if (call.method === 'POST') {
+            await gate;
+
+            return json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) });
+        }
+
+        return json(204, undefined);
+    });
+
+    client.run({});
+    await flush();
+    client.cancel();
+    assert.equal(last().phase, 'cancelled');
+
+    release();
+    await flush();
+
+    assert.deepEqual(deletes(calls).map((call) => call.url), [url(RUN_A)]);
+    await clock.advance(10000);
+    assert.equal(polls(calls).length, 0);
+    assert.equal(last().phase, 'cancelled', 'the late answer does not change the state');
+});
+
+test('cancel() with nothing running changes nothing, and a finished result stays done', async () => {
+    const { client, states, last } = setup(() => json(200, { status: 'done', run_id: null, result: RESULT }));
+
+    client.cancel();
+    assert.equal(states.length, 0);
+
+    client.run({});
+    await flush();
+    assert.equal(last().phase, 'done');
+    const count = states.length;
+
+    client.cancel();
+    assert.equal(states.length, count);
+    assert.equal(last().phase, 'done');
+});
+
+test('run() again after a cancel starts a fresh run, and a run waiting for the POST gap can be cancelled', async () => {
+    const { client, clock, calls, last } = setup(() => json(200, { status: 'done', run_id: null, result: RESULT }));
+
+    client.run({ n: 1 });
+    await flush();
+    client.run({ n: 2 });
+    await flush();
+    assert.equal(posts(calls).length, 1, 'the second POST waits for the gap');
+
+    client.cancel();
+    await clock.advance(MIN_POST_GAP_MS + 10);
+    assert.equal(posts(calls).length, 1, 'a cancelled run never posts');
+    assert.equal(last().phase, 'cancelled');
+
+    client.run({ n: 3 });
+    await clock.advance(MIN_POST_GAP_MS + 10);
+    assert.deepEqual(posts(calls).map((call) => call.body), [{ n: 1 }, { n: 3 }]);
+    assert.equal(last().phase, 'done');
+});
