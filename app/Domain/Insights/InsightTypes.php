@@ -2,6 +2,9 @@
 
 namespace App\Domain\Insights;
 
+use App\Domain\Insights\Funnel\FunnelQuery;
+use App\Domain\Insights\Funnel\FunnelResult;
+use App\Domain\Insights\Funnel\FunnelSqlBuilder;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsResult;
 use App\Domain\Insights\Trends\TrendsSqlBuilder;
@@ -23,6 +26,7 @@ final class InsightTypes
     /** @var array<string, array{query: class-string<InsightQuery>, result: class-string<InsightResult>, builder: class-string<InsightSqlBuilder>}> */
     private const TYPES = [
         self::TRENDS => ['query' => TrendsQuery::class, 'result' => TrendsResult::class, 'builder' => TrendsSqlBuilder::class],
+        self::FUNNEL => ['query' => FunnelQuery::class, 'result' => FunnelResult::class, 'builder' => FunnelSqlBuilder::class],
     ];
 
     private function __construct() {}

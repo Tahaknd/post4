@@ -43,6 +43,7 @@ final class Params
         $fits = match ($type) {
             ParamType::Text => is_string($value) && mb_check_encoding($value, 'UTF-8'),
             ParamType::SmallCount => is_int($value) && $value >= 0 && $value <= 255,
+            ParamType::Count64 => is_int($value) && $value >= 0,
             ParamType::TextList => is_array($value) && array_is_list($value) && $value !== []
                 && array_filter($value, fn ($v) => ! is_string($v) || ! mb_check_encoding($v, 'UTF-8')) === [],
             ParamType::Instant => $value instanceof DateTimeInterface,

@@ -334,6 +334,6 @@ describe('parameter binder', function () {
     });
 
     it('offers only fixed ClickHouse type strings', function () {
-        expect(array_map(fn ($c) => $c->value, ParamType::cases()))->toBe(['String', 'UInt8', 'Array(String)', 'DateTime64(3)']);
+        expect(array_map(fn ($c) => $c->value, ParamType::cases()))->toBe(['String', 'UInt8', 'UInt64', 'Array(String)', 'DateTime64(3)']);
     });
 });

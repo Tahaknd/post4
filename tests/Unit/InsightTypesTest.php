@@ -8,6 +8,7 @@ use App\Domain\Insights\Runs\InsightRunStore;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsResult;
 use App\Domain\Insights\Trends\TrendsSqlBuilder;
+use Tests\Support\FunnelFixtures as F;
 use Tests\Support\TrendsFixtures as T;
 
 /*
@@ -20,6 +21,7 @@ function sampleQueries(): array
 {
     return [
         InsightTypes::TRENDS => fn (): InsightQuery => T::query(),
+        InsightTypes::FUNNEL => fn (): InsightQuery => F::query(['view', 'buy']),
     ];
 }
 

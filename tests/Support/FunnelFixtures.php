@@ -57,7 +57,7 @@ final class FunnelFixtures
     {
         $rows = [];
         foreach ($levels as $level => $persons) {
-            $rows[] = ['level' => $level, 'persons' => $persons];
+            $rows[] = ['level' => $level, 'people' => $persons];
         }
 
         return $rows;

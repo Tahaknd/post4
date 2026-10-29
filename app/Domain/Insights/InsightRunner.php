@@ -2,6 +2,8 @@
 
 namespace App\Domain\Insights;
 
+use App\Domain\Insights\Funnel\FunnelQuery;
+use App\Domain\Insights\Funnel\FunnelResult;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsResult;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
@@ -50,6 +52,15 @@ final class InsightRunner
     {
         $result = $this->run($projectId, $query);
         \assert($result instanceof TrendsResult);
+
+        return $result;
+    }
+
+    /** @throws InsightFailed */
+    public function funnel(int $projectId, FunnelQuery $query): FunnelResult
+    {
+        $result = $this->run($projectId, $query);
+        \assert($result instanceof FunnelResult);
 
         return $result;
     }

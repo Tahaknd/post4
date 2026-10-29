@@ -3,12 +3,14 @@
 use App\Domain\Insights\InsightTypes;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
+use App\Jobs\RunFunnelInsight;
 use App\Jobs\RunInsight;
 use App\Jobs\RunTrendsInsight;
 use App\Models\Project;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Queue;
 use Tests\Support\FakeQueueJob;
+use Tests\Support\FunnelFixtures as F;
 use Tests\Support\ScriptedReads;
 use Tests\Support\TrendsFixtures as T;
 
@@ -62,6 +64,7 @@ function jobSamples(): array
 {
     return [
         InsightTypes::TRENDS => [fn () => T::definition(), RunTrendsInsight::class],
+        InsightTypes::FUNNEL => [fn () => F::query(['view', 'buy']), RunFunnelInsight::class],
     ];
 }
 

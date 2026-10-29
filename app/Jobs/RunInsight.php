@@ -116,6 +116,7 @@ abstract class RunInsight implements ShouldQueue
     {
         $job = match ($query->type()) {
             InsightTypes::TRENDS => RunTrendsInsight::class,
+            InsightTypes::FUNNEL => RunFunnelInsight::class,
             default => throw new InvalidArgumentException("No job for insight type '{$query->type()}'"),
         };
         $job::dispatch($projectId, $runId, $query->canonical(), $userId, $projectSlot, $userSlot);

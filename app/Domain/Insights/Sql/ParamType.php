@@ -14,6 +14,7 @@ enum ParamType: string
 {
     case Text = 'String';
     case SmallCount = 'UInt8';
+    case Count64 = 'UInt64';
     case TextList = 'Array(String)';
     case Instant = 'DateTime64(3)';
 }
