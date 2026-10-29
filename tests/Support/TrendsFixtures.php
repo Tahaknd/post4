@@ -9,7 +9,6 @@ use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsResult;
-use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use DateTimeImmutable;
@@ -58,7 +57,7 @@ final class TrendsFixtures
     /** An InsightRunner over `$client` (through the real ProjectScopedReader) and an in-memory cache unless one is given. */
     public static function runner(ClickHouseReads $client, ?Repository $cache = null): InsightRunner
     {
-        return new InsightRunner(new ProjectScopedReader($client), new TrendsSqlBuilder, $cache ?? new Repository(new ArrayStore));
+        return new InsightRunner(new ProjectScopedReader($client), $cache ?? new Repository(new ArrayStore));
     }
 
     /** Rows for the 3 day window of {@see self::definition()}: 4 events on day 1, 9 on day 3. */

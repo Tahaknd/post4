@@ -3,7 +3,6 @@
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightRunStore;
 use App\Domain\Insights\Trends\TrendsQuery;
-use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Models\Project;
@@ -53,7 +52,7 @@ beforeEach(function () {
     $this->ch = CH::connect();
     $this->ch->seedApiOnce();
     $this->reads = new CountingReads($this->ch->ro);
-    app()->instance(InsightRunner::class, new InsightRunner(new ProjectScopedReader($this->reads), new TrendsSqlBuilder, Cache::store('array')));
+    app()->instance(InsightRunner::class, new InsightRunner(new ProjectScopedReader($this->reads), Cache::store('array')));
 
     $this->a = Project::factory()->create(['id' => CH::API_A, 'timezone' => 'UTC']);
     $this->b = Project::factory()->create(['id' => CH::API_B, 'timezone' => 'UTC']);

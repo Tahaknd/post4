@@ -2,6 +2,7 @@
 
 namespace App\Domain\Insights\Runs;
 
+use App\Domain\Insights\InsightTypes;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Throwable;
@@ -47,7 +48,7 @@ final class InsightRunStore
     public const string CANCELLED = 'cancelled';
 
     /** Insight types; part of the record and of the flight keys (the next insight type gets its own value). */
-    public const string TYPE_TRENDS = 'trends';
+    public const string TYPE_TRENDS = InsightTypes::TRENDS;
 
     private const string KEY_PREFIX = 'insights:run:';
 

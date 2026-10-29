@@ -34,7 +34,7 @@ beforeEach(function () {
     config(['insights.cache_ttl_seconds' => 0]);
     $this->ch = CH::connect();
     $this->ch->seedTrendsOnce();
-    $this->runner = new InsightRunner($this->ch->reader, new TrendsSqlBuilder, new Repository(new ArrayStore));
+    $this->runner = new InsightRunner($this->ch->reader, new Repository(new ArrayStore));
 });
 
 afterAll(function () {
@@ -251,7 +251,6 @@ it('maps a real server error to InsightFailed without leaking server text (wrong
     $url = getenv('CLICKHOUSE_INTEGRATION_URL');
     $bad = new InsightRunner(
         new ProjectScopedReader(new ReadOnlyClickHouseClient($url, 'posthog', 'posthog_ro', 'definitely-wrong-password')),
-        new TrendsSqlBuilder,
         new Repository(new ArrayStore),
     );
 

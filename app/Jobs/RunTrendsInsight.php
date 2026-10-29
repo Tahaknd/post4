@@ -3,12 +3,12 @@
 namespace App\Jobs;
 
 use App\Domain\Insights\InsightFailed;
+use App\Domain\Insights\InsightResult;
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Query\InvalidInsightQuery;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
 use App\Domain\Insights\Trends\TrendsQuery;
-use App\Domain\Insights\Trends\TrendsResult;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Models\Project;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -206,7 +206,7 @@ class RunTrendsInsight implements ShouldQueue
             }
 
             try {
-                $result = $runner->trends($this->projectId, $query);
+                $result = $runner->run($this->projectId, $query);
             } catch (InsightFailed $e) {
                 if ($e->isBusy() && $record['busy_retries'] < self::BUSY_RETRIES && $this->attempts() < self::maxAttempts()) {
                     $runs->markQueued($this->runId, $record['busy_retries'] + 1);
@@ -270,7 +270,7 @@ class RunTrendsInsight implements ShouldQueue
         return false;
     }
 
-    private function done(InsightRunStore $runs, InsightGate $gate, TrendsResult $result, string $source, float $started): void
+    private function done(InsightRunStore $runs, InsightGate $gate, InsightResult $result, string $source, float $started): void
     {
         $runs->markDone($this->runId, $result->toArray());
         $this->releaseAll($gate);

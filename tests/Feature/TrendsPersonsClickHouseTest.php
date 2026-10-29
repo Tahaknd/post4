@@ -110,7 +110,7 @@ beforeEach(function () {
     $this->ch->deletePersonRowsOf(CH::PTREND_IDS);
     $this->ch->deleteRowsOf(CH::PTREND_IDS);
     seedPersonTrendsEvents($this->ch);
-    $this->runner = new InsightRunner($this->ch->reader, new TrendsSqlBuilder, new Repository(new ArrayStore));
+    $this->runner = new InsightRunner($this->ch->reader, new Repository(new ArrayStore));
     $this->unique = fn (int $project, array $o = []) => T::dataOf($this->runner->trends($project, T::integration(['metric' => Metric::UniqueUsers] + $o)));
 });
 

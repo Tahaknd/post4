@@ -3,6 +3,7 @@
 namespace App\Domain\Insights\Trends;
 
 use App\Domain\Insights\InsightFailed;
+use App\Domain\Insights\InsightResult;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use DateTimeImmutable;
 use DateTimeZone;
@@ -18,7 +19,7 @@ use RuntimeException;
  * series last. The bucket axis is the computed one unless ClickHouse returned a bucket that is not on it, in which
  * case the returned buckets are used as they are (see fromRows). `is_other` / `is_none` mark the Breakdown sentinels so the UI can render words.
  */
-final readonly class TrendsResult
+final readonly class TrendsResult implements InsightResult
 {
     /**
      * @param  list<int>  $buckets

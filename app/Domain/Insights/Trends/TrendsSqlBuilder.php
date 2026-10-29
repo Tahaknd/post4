@@ -3,10 +3,14 @@
 namespace App\Domain\Insights\Trends;
 
 use App\Domain\Insights\BuiltQuery;
+use App\Domain\Insights\InsightQuery;
+use App\Domain\Insights\InsightResult;
+use App\Domain\Insights\InsightSqlBuilder;
 use App\Domain\Insights\Sql\Params;
 use App\Domain\Insights\Sql\ParamType;
 use App\Domain\Insights\Sql\PersonSource;
 use App\Domain\Insights\Sql\PropertyFilterSql;
+use InvalidArgumentException;
 
 /**
  * TrendsQuery to SQL for ProjectScopedReader. The text is assembled ONLY from class constants, enum
@@ -34,10 +38,14 @@ use App\Domain\Insights\Sql\PropertyFilterSql;
  * Week and month buckets are DATES in ClickHouse (toStartOfInterval returns Date), so the bucket is routed
  * through toDateTime(..., zone) to get the local midnight instant instead of UTC midnight of that date.
  */
-final class TrendsSqlBuilder
+final class TrendsSqlBuilder implements InsightSqlBuilder
 {
-    public function build(TrendsQuery $query): BuiltQuery
+    public function build(InsightQuery $query): BuiltQuery
     {
+        if (! $query instanceof TrendsQuery) {
+            throw new InvalidArgumentException('TrendsSqlBuilder builds trends queries only, got '.$query::class);
+        }
+
         $p = new Params;
         // Not named `events`: the reader lint bans that word, placeholders included.
         $names = $p->bind('names', ParamType::TextList, $query->events);
@@ -94,5 +102,14 @@ final class TrendsSqlBuilder
         }
 
         return 'JSONExtractString(properties, '.$p->bind('bd_key', ParamType::Text, (string) $breakdown->propertyKey).')';
+    }
+
+    public function result(InsightQuery $query, array $rows): InsightResult
+    {
+        if (! $query instanceof TrendsQuery) {
+            throw new InvalidArgumentException('TrendsSqlBuilder reads the rows of trends queries only, got '.$query::class);
+        }
+
+        return TrendsResult::fromRows($query, $rows);
     }
 }

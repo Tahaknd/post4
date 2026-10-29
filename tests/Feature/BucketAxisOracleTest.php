@@ -6,7 +6,6 @@ use App\Domain\Insights\Trends\BucketAxis;
 use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\TrendsQuery;
-use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
 use Tests\Support\AxisOracle;
@@ -47,7 +46,7 @@ it('does not shift the buckets after a missing local midnight (Santiago 2023-09-
     $q = new TrendsQuery(['visit'], Metric::TotalEvents, $range, Interval::Day, 'America/Santiago');
 
     $axis = $q->buckets();
-    $runner = new InsightRunner($this->ch->reader, new TrendsSqlBuilder, new Repository(new ArrayStore));
+    $runner = new InsightRunner($this->ch->reader, new Repository(new ArrayStore));
     $result = $runner->trends(CH::TREND_D, $q);
 
     // Sep 3 starts at the transition instant 04:00Z (local midnight does not exist), Sep 4 at a REAL local

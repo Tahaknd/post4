@@ -2,6 +2,8 @@
 
 namespace App\Domain\Insights\Trends;
 
+use App\Domain\Insights\InsightQuery;
+use App\Domain\Insights\InsightTypes;
 use App\Domain\Insights\Query\Canonical;
 use App\Domain\Insights\Query\DatePreset;
 use App\Domain\Insights\Query\DateRange;
@@ -28,7 +30,7 @@ use DateTimeZone;
  *    {@see self::MAX_ROWS}, which is half of the profile's max_result_rows (20000): the result can never
  *    be cut off by `LIMIT` or by the overflow mode (hourly over a year with a breakdown is refused).
  */
-final readonly class TrendsQuery
+final readonly class TrendsQuery implements InsightQuery
 {
     public const MAX_SERIES = 10;
 
@@ -101,6 +103,11 @@ final readonly class TrendsQuery
         if ($rows > self::MAX_ROWS) {
             throw new InvalidTrendsQuery('The query would return up to '.$rows.' rows (limit '.self::MAX_ROWS.'): use a shorter range, a larger interval, fewer series or a smaller breakdown');
         }
+    }
+
+    public function type(): string
+    {
+        return InsightTypes::TRENDS;
     }
 
     public function timezone(): string

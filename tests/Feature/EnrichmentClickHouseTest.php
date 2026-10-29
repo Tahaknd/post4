@@ -6,7 +6,6 @@ use App\Domain\Capture\EventProducer;
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
-use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Models\Project;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
@@ -38,7 +37,7 @@ const ENRICH_UA_GOOGLEBOT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www
 
 beforeEach(function () {
     $this->ch = CH::connect();
-    $this->runner = new InsightRunner($this->ch->reader, new TrendsSqlBuilder, new Repository(new ArrayStore));
+    $this->runner = new InsightRunner($this->ch->reader, new Repository(new ArrayStore));
 
     // Seeded once per process, like the other ClickHouse files: the capture requests below run only the first time.
     $this->ch->seedMessagesOnce(function () {
