@@ -6,6 +6,7 @@ use App\Http\Middleware\HandleInertiaRequests;
 use App\Http\Middleware\NoStoreResponses;
 use App\Http\Middleware\RejectMalformedUtf8;
 use App\Http\Middleware\RejectSessionlessGuests;
+use App\Http\Middleware\SecurityHeaders;
 use App\Http\Middleware\ThrottleUser;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -28,10 +29,11 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         // Only the web group: the capture routes (routes/capture.php) run with no middleware at all.
+        // SecurityHeaders wraps all of them (a redirect or a 404 answered early still carries the headers).
         // RejectSessionlessGuests goes first, ahead of StartSession: a visitor without a session cookie who
         // asks for a page that needs a sign-in is redirected without ever getting a session or a cookie.
         $middleware->web(
-            prepend: [RejectMalformedUtf8::class, RejectSessionlessGuests::class],
+            prepend: [SecurityHeaders::class, RejectMalformedUtf8::class, RejectSessionlessGuests::class],
             append: [HandleInertiaRequests::class],
         );
 

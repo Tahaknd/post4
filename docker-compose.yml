@@ -54,6 +54,9 @@ x-app: &app
     CAPTURE_BLOCKED_DECODE_MAX_BYTES: ${CAPTURE_BLOCKED_DECODE_MAX_BYTES:-16384}
     CAPTURE_STUB_MAX_BODY_BYTES: ${CAPTURE_STUB_MAX_BODY_BYTES:-65536}
     CAPTURE_STUB_CALLS_PER_MINUTE: ${CAPTURE_STUB_CALLS_PER_MINUTE:-600}
+    # Security headers of the UI pages. Explicit defaults: SECURITY_CSP_MODE is report-only | enforce | off.
+    SECURITY_HEADERS_ENABLED: ${SECURITY_HEADERS_ENABLED:-true}
+    SECURITY_CSP_MODE: ${SECURITY_CSP_MODE:-report-only}
     # Enrichment (browser/os/device from the User-Agent, optional GeoIP). Explicit defaults on purpose: an empty
     # value would be read as false/0. CAPTURE_STORE_IP=false is the privacy default: `$ip` is used for the GeoIP
     # lookup and then dropped (PostHog keeps it).
