@@ -64,13 +64,13 @@ it('uses the client timestamp as is when sent_at is unknown', function () {
 });
 
 it('corrects client clock skew using sent_at', function () {
-    // İstemci saati 60 sn geride: sent_at 11:59:00 iken sunucu saati 12:00:00.
+    // The client clock is 60 s behind: sent_at is 11:59:00 while the server clock is 12:00:00.
     $m = $this->normalizer->normalize(
         ['event' => 'e', 'distinct_id' => 'u', 'timestamp' => '2026-10-22T11:58:58.500Z'],
         project: 1, now: $this->now, sentAt: CarbonImmutable::parse('2026-10-22T11:59:00Z'),
     );
 
-    // Olay, gönderimden 1.5 sn önce olmuş: sunucu zamanı 12:00:00 - 1.5 sn.
+    // The event happened 1.5 s before it was sent: server time 12:00:00 - 1.5 s.
     expect($m['timestamp'])->toBe('2026-10-22 11:59:58.500');
 });
 
