@@ -44,6 +44,22 @@ change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.project_eve
 EVERY relation found in SHOW GRANTS a bare SELECT (no SQL_project_id) must fail with 115, so a relation
 granted without a filter is caught. One PASS or FAIL line per check.
 
+The same guarantees are then probed over the HTTP interface (the path the application really uses: URL
+arguments instead of SET statements, run from inside the ClickHouse container with bash and /dev/tcp as
+posthog_ro, authenticated with X-ClickHouse-* headers): the view read with SQL_project_id as URL argument,
+fail-closed without it (115) and with a non-number (6), `readonly=0` (164) and raised limits
+(max_execution_time=1000 and 0, max_memory_usage, max_result_rows: 452) as URL arguments, `profile=default`
+accepted but loosening nothing (readonly stays 2, max_execution_time stays 20) while `profile=readonly` is
+refused (164), `role=` of an unknown role (511), `user=` / `password=` URL arguments next to the header
+credentials (516), a `session_id` session in which SET readonly = 0 (164) and SET max_execution_time = 0 (452)
+fail and SET profile = 'default' loosens nothing, direct reads of posthog.events, system.users and
+system.query_log (497), INSERT (497), and that system.tables shows only the view. A last group runs inside the
+app container (docker compose only, skipped with CH_CONTAINER): the application's own
+ReadOnlyClickHouseClient::select() reads the view with SQL_project_id, fails closed without it (115) and is
+denied on posthog.events, system.users and system.query_log (497). One documented limitation is printed as an
+INFO line, not a check: SQL text `SETTINGS SQL_project_id = <other id>` overrides the URL argument (the filter
+protects against builder bugs, not against SQL injection; see 20-readonly-user.xml and the reader lint).
+
 The password never appears on a command line: it is read inside the container from
 CLICKHOUSE_RO_PASSWORD.
 
@@ -142,6 +158,50 @@ check_code() {
   fi
 }
 
+# hx_raw <url arguments> <sql>: POST <sql> to the ClickHouse HTTP interface (127.0.0.1:8123 inside the
+# container) as posthog_ro, with the URL arguments exactly as the application sends them. Only bash and
+# /dev/tcp are used (the image has neither curl nor Python): the password is expanded by the container's bash
+# from CLICKHOUSE_RO_PASSWORD into a socket write, so it is on no argv. Prints the raw HTTP response.
+# shellcheck disable=SC2016
+hx_raw() {
+  local script='export LC_ALL=C; qs=$1; sql=$2
+exec 3<>/dev/tcp/127.0.0.1/8123 || exit 7
+printf "POST /?%s HTTP/1.0\r\nHost: localhost\r\nX-ClickHouse-User: posthog_ro\r\nX-ClickHouse-Key: %s\r\nContent-Length: %d\r\n\r\n%s" "$qs" "$CLICKHOUSE_RO_PASSWORD" "${#sql}" "$sql" >&3
+head -c 20000 <&3 | tr -d "\r"'
+  if [[ -n "$CH_CONTAINER" ]]; then
+    docker exec "$CH_CONTAINER" bash -c "$script" bash "$1" "$2"
+  else
+    docker compose exec -T clickhouse bash -c "$script" bash "$1" "$2"
+  fi
+}
+
+# hrun <url arguments> <sql>: HTTP status in HTTP_STATUS, response body in OUT, transport status in RC.
+hrun() {
+  local raw
+  RC=0
+  raw="$(hx_raw "$1" "$2" 2>&1)" || RC=$?
+  HTTP_STATUS="$(printf '%s\n' "$raw" | sed -n '1s/^HTTP\/[0-9.]* \([0-9]\{3\}\).*/\1/p')"
+  OUT="$(printf '%s\n' "$raw" | sed '1,/^$/d')"
+}
+
+# check_http_out <name> <url arguments> <sql> <expected body>: HTTP 200 and exactly this body.
+check_http_out() {
+  hrun "$2" "$3"
+  if [[ $RC -eq 0 && "$HTTP_STATUS" == "200" && "$OUT" == "$4" ]]; then pass "$1"; else fail "$1: expected '$4', got (HTTP ${HTTP_STATUS:-none}, exit $RC): $(short "$OUT")"; fi
+}
+
+# check_http_code <name> <error code> <url arguments> <sql>: not HTTP 200 and this exact ClickHouse error code.
+check_http_code() {
+  hrun "$3" "$4"
+  if [[ "$HTTP_STATUS" != "200" && "$OUT" == *"Code: $2. DB::Exception"* ]]; then
+    pass "$1 -> $2 (HTTP $HTTP_STATUS)"
+  elif [[ "$HTTP_STATUS" == "200" ]]; then
+    fail "$1: expected error $2 but the request SUCCEEDED over HTTP (check the grants and profile in 20-readonly-user.xml)"
+  else
+    fail "$1: expected error $2, got (HTTP ${HTTP_STATUS:-none}, exit $RC): $(short "$OUT")"
+  fi
+}
+
 # clickhouse-client as the ADMIN user of the container (CLICKHOUSE_USER / CLICKHOUSE_PASSWORD are in the
 # container's own environment, so no secret is on any argv). Used only to seed and delete the throwaway rows.
 adx() {
@@ -194,7 +254,7 @@ run 'SELECT currentUser()'
 if [[ $RC -eq 0 && "$OUT" == "posthog_ro" ]]; then
   pass "login works (currentUser() = posthog_ro)"
 else
-  fail "login as posthog_ro failed: $(short "$OUT") (is 20-readonly-user.xml mounted and CLICKHOUSE_RO_PASSWORD set in the container?)"
+  fail "login as posthog_ro failed: $(short "$OUT") (is 20-readonly-user.xml mounted and CLICKHOUSE_RO_PASSWORD set in the container? Is ClickHouse crash-looping after a config edit? Check \`docker compose ps clickhouse\`: exit code 91 or 36 in a restart loop means an invalid or renamed setting in docker/clickhouse/config.d or users.d, see \`docker compose logs clickhouse\`)"
   echo "----"
   echo "check-readonly-user: $PASSED passed, $FAILED failed"
   exit 1
@@ -310,6 +370,78 @@ check_code "a limit still cannot be raised after SET profile = 'default'" 452 "S
 check_code "SET profile = 'readonly' (stock profile) is refused" 164 "SET profile = 'readonly'"
 check_out "SET ROLE ALL enables no role" 'SET ROLE ALL; SELECT length(enabledRoles())' 0
 check_code "SET ROLE of an unknown role is refused" 511 'SET ROLE nosuchrole'
+
+# --- the same guarantees over the HTTP interface (what ReadOnlyClickHouseClient really uses) ---------------------
+# The application never speaks the native protocol: it sends SQL_project_id, default_format, wait_end_of_query
+# and database as URL arguments, which is why the profile is readonly=2. The probes below put the settings the
+# native checks above change with SET into URL arguments (and into a session) and expect the same outcomes.
+check_http_out "HTTP: login as posthog_ro with readonly = 2" "SQL_project_id=1" "SELECT currentUser(), getSetting('readonly')" $'posthog_ro\t2'
+check_http_out "HTTP: project $SEED_A sees exactly its 3 rows (SQL_project_id as URL argument)" "SQL_project_id=$SEED_A" 'SELECT count() FROM posthog.project_events_v' 3
+check_http_out "HTTP: project $SEED_B sees exactly its 2 rows" "SQL_project_id=$SEED_B" 'SELECT count() FROM posthog.project_events_v' 2
+check_http_out "HTTP: the view hides every other project" "SQL_project_id=$SEED_A" "SELECT count() FROM posthog.project_events_v WHERE project_id != $SEED_A" 0
+check_http_code "HTTP: a read without SQL_project_id is rejected (fail-closed)" 115 "default_format=TSV" 'SELECT count() FROM posthog.project_events_v'
+check_http_code "HTTP: SQL_project_id that is not a number is rejected" 6 "SQL_project_id=abc" 'SELECT count() FROM posthog.project_events_v'
+check_http_code "HTTP: readonly=0 as URL argument is refused" 164 "SQL_project_id=1&readonly=0" 'SELECT 1'
+check_http_code "HTTP: readonly=1 as URL argument is refused (readonly cannot be touched at all)" 164 "SQL_project_id=1&readonly=1" 'SELECT 1'
+check_http_code "HTTP: max_execution_time=1000 as URL argument exceeds the cap" 452 "SQL_project_id=1&max_execution_time=1000" 'SELECT 1'
+check_http_code "HTTP: max_execution_time=0 (unlimited) as URL argument is refused" 452 "SQL_project_id=1&max_execution_time=0" 'SELECT 1'
+check_http_code "HTTP: max_memory_usage=500000000 as URL argument exceeds the cap" 452 "SQL_project_id=1&max_memory_usage=500000000" 'SELECT 1'
+check_http_code "HTTP: max_result_rows=30000 as URL argument exceeds the cap" 452 "SQL_project_id=1&max_result_rows=30000" 'SELECT 1'
+check_http_code "HTTP: allow_introspection_functions=1 as URL argument is pinned" 452 "SQL_project_id=1&allow_introspection_functions=1" 'SELECT 1'
+check_http_out "HTTP: a benign URL argument (max_execution_time=5) is accepted and applied" "SQL_project_id=1&max_execution_time=5" "SELECT getSetting('max_execution_time')" 5
+check_http_out "HTTP: profile=default is accepted but keeps readonly and max_execution_time" "SQL_project_id=1&profile=default" "SELECT getSetting('readonly'), getSetting('max_execution_time')" $'2\t20'
+check_http_code "HTTP: a limit still cannot be raised together with profile=default" 452 "SQL_project_id=1&profile=default&max_execution_time=0" 'SELECT 1'
+check_http_code "HTTP: profile=readonly (stock profile) is refused" 164 "SQL_project_id=1&profile=readonly" 'SELECT 1'
+check_http_code "HTTP: role= of an unknown role is refused" 511 "SQL_project_id=1&role=nosuchrole" 'SELECT 1'
+check_http_code "HTTP: user= next to the header credentials is refused (no user switch)" 516 "SQL_project_id=1&user=default" 'SELECT 1'
+check_http_code "HTTP: user= and password= next to the header credentials are refused" 516 "SQL_project_id=1&user=posthog&password=x" 'SELECT 1'
+check_http_out "HTTP: a quota_key changes nothing" "SQL_project_id=$SEED_A&quota_key=other" 'SELECT count() FROM posthog.project_events_v' 3
+
+# A session (session_id) keeps SET statements between requests: none of them may loosen the profile.
+HTTP_SESSION="ro_check_$$_${RANDOM}"
+check_http_code "HTTP session: SET readonly = 0 is refused" 164 "SQL_project_id=1&session_id=$HTTP_SESSION" 'SET readonly = 0'
+check_http_code "HTTP session: SET max_execution_time = 0 is refused" 452 "SQL_project_id=1&session_id=$HTTP_SESSION" 'SET max_execution_time = 0'
+check_http_code "HTTP session: SET max_memory_usage above the cap is refused" 452 "SQL_project_id=1&session_id=$HTTP_SESSION" 'SET max_memory_usage = 500000000'
+check_http_out "HTTP session: SET profile = 'default' is accepted" "SQL_project_id=1&session_id=$HTTP_SESSION" "SET profile = 'default'" ""
+check_http_out "HTTP session: the session still has readonly = 2 and max_execution_time = 20" "SQL_project_id=1&session_id=$HTTP_SESSION" "SELECT getSetting('readonly'), getSetting('max_execution_time')" $'2\t20'
+check_http_code "HTTP session: a limit still cannot be raised afterwards" 452 "SQL_project_id=1&session_id=$HTTP_SESSION" 'SELECT 1 SETTINGS max_execution_time = 0'
+
+# Grants over HTTP: no read of events, no system tables with data, no write.
+check_http_code "HTTP: direct SELECT from posthog.events is denied" 497 "SQL_project_id=1" 'SELECT count() FROM posthog.events'
+check_http_code "HTTP: SELECT from system.users is denied" 497 "SQL_project_id=1" 'SELECT count() FROM system.users'
+check_http_code "HTTP: SELECT from system.query_log is denied" 497 "SQL_project_id=1" 'SELECT count() FROM system.query_log'
+check_http_code "HTTP: INSERT into posthog.events is denied" 497 "SQL_project_id=1" "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT toUUID('00000000-0000-0000-0000-000000000000'), 0, '', '', '', now64(3) WHERE 0"
+check_http_code "HTTP: CREATE TABLE is denied" 497 "SQL_project_id=1" 'CREATE TABLE posthog.ro_check_probe (a Int8) ENGINE = Memory'
+check_http_out "HTTP: database=system shows only the granted view in system.tables" "SQL_project_id=1&database=system" "SELECT concat(database, '.', name) FROM tables" "posthog.project_events_v"
+hrun "SQL_project_id=$SEED_A" "SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = $SEED_B"
+echo "INFO: documented limitation, not a check: SQL text 'SETTINGS SQL_project_id = <other id>' overrides the URL argument (URL argument said project $SEED_A, the SQL text said project $SEED_B, the server counted $(short "$OUT") row(s)): the filter guards against query builder bugs, injection is stopped by typed parameters and the ProjectScopedReader lint"
+
+# --- the application's own client in the app container (compose only) --------------------------------------------------------
+if [[ -z "$CH_CONTAINER" ]]; then
+  if [[ -z "$(docker compose ps -q app 2>/dev/null || true)" ]]; then
+    echo "INFO: the app service is not up: the ReadOnlyClickHouseClient probes are skipped"
+  else
+    # shellcheck disable=SC2016
+    APP_PROBE='$c = app(App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient::class);
+$p = function (string $name, string $sql, array $s = []) use ($c) {
+    try { $r = $c->select($sql, [], $s); echo "PROBE|$name|ok|".($r[0]["c"] ?? "")."\n"; }
+    catch (Throwable $e) { preg_match("/Code: (\\d+)\\./", $e->getMessage(), $m); echo "PROBE|$name|error|".($m[1] ?? "none")."\n"; }
+};
+$id = [App\Infrastructure\ClickHouse\RoSettings::SQL_PROJECT_ID => '"$SEED_A"'];
+$p("view", "SELECT count() AS c FROM posthog.project_events_v", $id);
+$p("bare", "SELECT count() AS c FROM posthog.project_events_v");
+$p("events", "SELECT count() AS c FROM posthog.events", $id);
+$p("users", "SELECT count() AS c FROM system.users", $id);
+$p("query_log", "SELECT count() AS c FROM system.query_log", $id);'
+    APP_OUT="$(docker compose exec -T app php artisan tinker --execute="$APP_PROBE" 2>&1 || true)"
+    probe_line() { printf '%s\n' "$APP_OUT" | grep -m1 "^PROBE|$1|" || true; }
+    [[ "$(probe_line view)" == "PROBE|view|ok|3" ]] && pass "app ReadOnlyClickHouseClient: the view with SQL_project_id returns project $SEED_A's 3 rows" || fail "app ReadOnlyClickHouseClient view read: expected 3 rows, got: $(short "$(probe_line view)") $(short "$APP_OUT")"
+    [[ "$(probe_line bare)" == "PROBE|bare|error|115" ]] && pass "app ReadOnlyClickHouseClient: a read without SQL_project_id fails closed -> 115" || fail "app ReadOnlyClickHouseClient bare read: expected error 115, got: $(short "$(probe_line bare)")"
+    [[ "$(probe_line events)" == "PROBE|events|error|497" ]] && pass "app ReadOnlyClickHouseClient: posthog.events is denied -> 497" || fail "app ReadOnlyClickHouseClient events read: expected error 497, got: $(short "$(probe_line events)")"
+    [[ "$(probe_line users)" == "PROBE|users|error|497" ]] && pass "app ReadOnlyClickHouseClient: system.users is denied -> 497" || fail "app ReadOnlyClickHouseClient system.users read: expected error 497, got: $(short "$(probe_line users)")"
+    [[ "$(probe_line query_log)" == "PROBE|query_log|error|497" ]] && pass "app ReadOnlyClickHouseClient: system.query_log is denied -> 497" || fail "app ReadOnlyClickHouseClient system.query_log read: expected error 497, got: $(short "$(probe_line query_log)")"
+  fi
+fi
 
 # --- grants are exactly one line (the view, never posthog.events) ---------------------------------------------------------------------
 check_out "grants are exactly SELECT on posthog.project_events_v" 'SHOW GRANTS FOR posthog_ro' 'GRANT SELECT ON posthog.project_events_v TO posthog_ro'
