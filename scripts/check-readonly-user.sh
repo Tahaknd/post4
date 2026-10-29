@@ -5,8 +5,8 @@
 # Only talks to a local Docker engine. Every probe runs as posthog_ro and is either a SELECT, a statement
 # that must be refused before it runs (and would be harmless with zero rows if it were not), or a setting the
 # server must reject. The ONLY writes are made by the ADMIN user (credentials read inside the container) to
-# seed five throwaway rows for the two projects 990901 and 990902, so that the tenant isolation checks cannot
-# pass on an empty table; an EXIT trap deletes exactly those rows again.
+# seed throwaway rows for the two projects 990901 and 990902 (five events and eight person_distinct_ids rows), so that
+# the tenant isolation checks cannot pass on an empty table; an EXIT trap deletes exactly those rows again.
 #
 # Run `scripts/check-readonly-user.sh --help` for usage, environment variables and exit codes.
 set -euo pipefail
@@ -20,18 +20,22 @@ usage() {
   cat <<'EOF_USAGE'
 Usage: scripts/check-readonly-user.sh [-h|--help]
 
-Seeds five rows for the throwaway projects 990901 (3 rows) and 990902 (2 rows) as the admin user, and
-deletes them again on exit (also on failure). Then checks that the ClickHouse read-only user posthog_ro can
-log in and SELECT from the DEFINER view posthog.project_events_v (every read must carry the SQL_project_id
-setting of the view filter, which hides all other projects), and that everything else is refused with the
-RIGHT error code (not merely "some error"):
-  497 ACCESS_DENIED     posthog.events itself (direct, and through mergeTreeIndex / view(), which skip row
-                        policies but need a grant), other tables (events_errors,
-                        schema_migrations, kafka_events), INSERT, ALTER, CREATE, and the url() / file() /
-                        remote() table functions
+Seeds five events for the throwaway projects 990901 (3 rows) and 990902 (2 rows) and six person_distinct_ids
+rows for them (990901: ids d1 moved once = two unmerged versions, d2, ro_check, and d3 with a newest tombstone;
+990902: e1, e2) as the admin user, and deletes them again on exit (also on failure). Then checks that the ClickHouse
+read-only user posthog_ro can log in and SELECT from the two DEFINER views posthog.project_events_v and
+posthog.project_person_distinct_ids_v (the deduplicated distinct id -> person mapping): every read must carry
+the SQL_project_id setting of the view filter, which hides all other projects; the person view shows the newest
+version of an id and hides a tombstoned one. Everything else is refused with the RIGHT error code (not merely
+"some error"):
+  497 ACCESS_DENIED     posthog.events and posthog.person_distinct_ids themselves (direct, and through
+                        mergeTreeIndex / view(), which skip row policies but need a grant), other tables
+                        (events_errors, schema_migrations, kafka_events, kafka_person_distinct_ids), INSERT,
+                        ALTER, CREATE, and the url() / file() / remote() table functions
   636 CANNOT_EXTRACT_TABLE_STRUCTURE
-                        merge() over events (it only lists tables the user may see: nothing matches)
-  36  BAD_ARGUMENTS     mergeTreeIndex on the view (a view is not a MergeTree)
+                        merge() over events or person_distinct_ids (it only lists tables the user may see:
+                        nothing matches)
+  36  BAD_ARGUMENTS     mergeTreeIndex on either view (a view is not a MergeTree)
   115 UNKNOWN_SETTING   a read of the view WITHOUT SQL_project_id (fails closed)
   6   CANNOT_PARSE_TEXT SQL_project_id that is not a number
   511 UNKNOWN_ROLE      SET ROLE of a role that does not exist
@@ -43,24 +47,27 @@ RIGHT error code (not merely "some error"):
                         stream_like_engine_allow_direct_select, session_timezone,
                         output_format_json_quote_64bit_integers, serialize_query_plan, enable_analyzer)
 and that a benign setting (max_execution_time = 5) is accepted, SET profile = 'default' and SET ROLE ALL
-change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.project_events_v TO posthog_ro`. For
+change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.project_events_v TO posthog_ro` and
+`GRANT SELECT ON posthog.project_person_distinct_ids_v TO posthog_ro`. For
 EVERY relation found in SHOW GRANTS a bare SELECT (no SQL_project_id) must fail with 115, so a relation
 granted without a filter is caught. One PASS or FAIL line per check.
 
 The same guarantees are then probed over the HTTP interface (the path the application really uses: URL
 arguments instead of SET statements, run from inside the ClickHouse container with bash and /dev/tcp as
-posthog_ro, authenticated with X-ClickHouse-* headers): the view read with SQL_project_id as URL argument,
+posthog_ro, authenticated with X-ClickHouse-* headers): the views read with SQL_project_id as URL argument,
 fail-closed without it (115) and with a non-number (6), `readonly=0` (164) and raised limits
 (max_execution_time=1000 and 0, max_memory_usage, max_result_rows: 452) as URL arguments, `profile=default`
 accepted but loosening nothing (readonly stays 2, max_execution_time stays 20) while `profile=readonly` is
 refused (164), `role=` of an unknown role (511), `user=` / `password=` URL arguments next to the header
 credentials (516), a `session_id` session in which SET readonly = 0 (164) and SET max_execution_time = 0 (452)
 fail and SET profile = 'default' loosens nothing, direct reads of posthog.events, system.users and
-system.query_log (497), INSERT (497), and that system.tables shows only the view. A last group runs inside the
+system.query_log (497), direct reads of posthog.person_distinct_ids and kafka_person_distinct_ids (497), INSERT
+(497), and that system.tables shows only the two views. A last group runs inside the
 app container (docker compose only, skipped with CH_CONTAINER): the application's own
-ReadOnlyClickHouseClient::select() reads the view with SQL_project_id, fails closed without it (115) and is
-denied on posthog.events, system.users and system.query_log (497). One documented limitation is printed as an
-INFO line, not a check: SQL text `SETTINGS SQL_project_id = <other id>` overrides the URL argument (the filter
+ReadOnlyClickHouseClient::select() reads each view with SQL_project_id, fails closed without it (115) and is
+denied on posthog.events, posthog.person_distinct_ids, system.users and system.query_log (497). One documented
+limitation is printed as an INFO line (twice, once per view), not a check: SQL text `SETTINGS SQL_project_id =
+<other id>` overrides the URL argument (the filter
 protects against builder bugs, not against SQL injection; see 20-readonly-user.xml and the reader lint).
 
 The password never appears on a command line: it is read inside the container from
@@ -206,12 +213,13 @@ SEED_A=990901
 SEED_B=990902
 SEEDED=0
 
-# delete_seed: deletes the seeded rows and waits (at most 30 s) until they are gone; 0 when they are gone.
+# delete_seed: deletes the seeded rows of both tables and waits (at most 30 s) until they are gone; 0 when they are gone.
 delete_seed() {
   local tries=0 left=1
   adx --lightweight_deletes_sync=0 --query "DELETE FROM posthog.events WHERE project_id IN ($SEED_A, $SEED_B)" >/dev/null 2>&1 || true
+  adx --lightweight_deletes_sync=0 --query "DELETE FROM posthog.person_distinct_ids WHERE project_id IN ($SEED_A, $SEED_B)" >/dev/null 2>&1 || true
   while [[ $tries -lt 30 ]]; do
-    left="$(adx --query "SELECT count() FROM posthog.events WHERE project_id IN ($SEED_A, $SEED_B)" 2>/dev/null || echo 1)"
+    left="$(adx --query "SELECT (SELECT count() FROM posthog.events WHERE project_id IN ($SEED_A, $SEED_B)) + (SELECT count() FROM posthog.person_distinct_ids WHERE project_id IN ($SEED_A, $SEED_B))" 2>/dev/null || echo 1)"
     [[ "$left" == "0" ]] && return 0
     tries=$((tries + 1))
     sleep 1
@@ -224,17 +232,27 @@ cleanup_seed() {
   local rc=$?
   trap - EXIT
   if [[ $SEEDED -eq 1 ]] && ! delete_seed; then
-    echo "WARN: seeded rows of projects $SEED_A/$SEED_B are still in posthog.events: delete them by hand" >&2
+    echo "WARN: seeded rows of projects $SEED_A/$SEED_B are still in posthog.events or posthog.person_distinct_ids: delete them by hand" >&2
   fi
   exit "$rc"
 }
 trap cleanup_seed EXIT
 
-# seed_rows: five rows (3 for SEED_A, 2 for SEED_B) written by the admin; starts from a clean slate.
+# Fixed person uuids of the seeded mapping rows (they only need to be distinguishable).
+PERSON_A1='00000000-0000-4000-8000-0000000a0001'
+PERSON_A2='00000000-0000-4000-8000-0000000a0002'
+PERSON_B1='00000000-0000-4000-8000-0000000b0001'
+
+# seed_rows: five events (3 for SEED_A, 2 for SEED_B) and eight person_distinct_ids rows, written by the admin; starts
+# from a clean slate. Mapping rows of SEED_A: d1 version 0 -> PERSON_A1 and version 1 -> PERSON_A2 (a merge moved it;
+# two separate inserts = two parts, unmerged for a while), d2 and ro_check (the distinct id of the seeded events) ->
+# PERSON_A1, d3 version 0 -> PERSON_A1 and a newest tombstone (version 1, is_deleted 1). SEED_B: e1 and e2 -> PERSON_B1.
 seed_rows() {
   SEEDED=1
   delete_seed || return 1
-  adx --query "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT generateUUIDv4(), if(number < 3, $SEED_A, $SEED_B), 'ro_check', 'ro_check', '{\"\$os\":\"ro_os\",\"\$device_type\":\"ro_device\",\"utm_source\":\"ro_utm\"}', now64(3) FROM numbers(5)" >/dev/null 2>&1
+  adx --query "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT generateUUIDv4(), if(number < 3, $SEED_A, $SEED_B), 'ro_check', 'ro_check', '{\"\$os\":\"ro_os\",\"\$device_type\":\"ro_device\",\"utm_source\":\"ro_utm\"}', now64(3) FROM numbers(5)" >/dev/null 2>&1 || return 1
+  adx --query "INSERT INTO posthog.person_distinct_ids (project_id, distinct_id, person_id, version, is_deleted, created_at) VALUES ($SEED_A, 'd1', '$PERSON_A1', 0, 0, now64(3)), ($SEED_A, 'd2', '$PERSON_A1', 0, 0, now64(3)), ($SEED_A, 'ro_check', '$PERSON_A1', 0, 0, now64(3)), ($SEED_A, 'd3', '$PERSON_A1', 0, 0, now64(3)), ($SEED_B, 'e1', '$PERSON_B1', 0, 0, now64(3)), ($SEED_B, 'e2', '$PERSON_B1', 0, 0, now64(3))" >/dev/null 2>&1 || return 1
+  adx --query "INSERT INTO posthog.person_distinct_ids (project_id, distinct_id, person_id, version, is_deleted, created_at) VALUES ($SEED_A, 'd1', '$PERSON_A2', 1, 0, now64(3)), ($SEED_A, 'd3', '$PERSON_A1', 1, 1, now64(3))" >/dev/null 2>&1
 }
 
 echo "check-readonly-user: target=${CH_CONTAINER:-compose service clickhouse}"
@@ -254,7 +272,7 @@ check_ok "SELECT count() FROM posthog.project_events_v works (with SQL_project_i
 
 # Five throwaway rows (admin) so the isolation checks below cannot pass on an empty table.
 if seed_rows; then
-  pass "seeded 3 rows for project $SEED_A and 2 rows for project $SEED_B (removed again on exit)"
+  pass "seeded 3 events and 6 mapping rows for project $SEED_A, 2 events and 2 mapping rows for project $SEED_B (removed again on exit)"
 else
   fail "could not seed the throwaway rows as the admin user (is CLICKHOUSE_USER / CLICKHOUSE_PASSWORD set in the container?)"
 fi
@@ -273,6 +291,27 @@ check_out "the view hides every other project (WHERE project_id != $SEED_A is em
 check_out "the filter applies inside a UNION ALL subquery too" "SELECT count() FROM (SELECT project_id FROM posthog.project_events_v UNION ALL SELECT project_id FROM posthog.project_events_v) WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
 check_out "a project id nobody owns (0) sees no rows although the table has some" 'SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = 0' 0
 
+# --- tenant isolation: the DEFINER view posthog.project_person_distinct_ids_v (migration 004, the same pattern) ----------
+# Deduplicated mapping: one row per distinct id with the NEWEST version, none for an id whose newest row is a tombstone.
+# SEED_A has 5 physical rows (d1 twice, d3 twice) but sees 2 mappings (d1, d2); SEED_B sees e1, e2.
+check_code "person view: SELECT without SQL_project_id is rejected (fail-closed)" 115 'SELECT count() FROM posthog.project_person_distinct_ids_v'
+check_code "person view: SQL_project_id that is not a number is rejected" 6 "SELECT count() FROM posthog.project_person_distinct_ids_v SETTINGS SQL_project_id = 'abc'"
+check_out "person view: project $SEED_A sees exactly its 3 live mappings (d1 deduplicated, d3 tombstoned)" "SELECT count() FROM posthog.project_person_distinct_ids_v SETTINGS SQL_project_id = $SEED_A" 3
+check_out "person view: project $SEED_B sees exactly its 2 mappings" "SELECT count() FROM posthog.project_person_distinct_ids_v SETTINGS SQL_project_id = $SEED_B" 2
+check_out "person view: d1 maps to the NEWEST version (the person it was merged into), d2 to the first one" \
+  "SELECT concat(distinct_id, '=', toString(person_id), '@', toString(version)) FROM posthog.project_person_distinct_ids_v ORDER BY distinct_id SETTINGS SQL_project_id = $SEED_A" \
+  $'d1='"$PERSON_A2"$'@1\nd2='"$PERSON_A1"$'@0\nro_check='"$PERSON_A1"$'@0'
+check_out "person view: a tombstoned id (d3) is not visible" "SELECT count() FROM posthog.project_person_distinct_ids_v WHERE distinct_id = 'd3' SETTINGS SQL_project_id = $SEED_A" 0
+check_out "person view: the superseded person of d1 is not visible through a person_id filter either" "SELECT count() FROM posthog.project_person_distinct_ids_v WHERE distinct_id = 'd1' AND person_id = '$PERSON_A1' SETTINGS SQL_project_id = $SEED_A" 0
+check_out "person view: project $SEED_B sees only its own project id" "SELECT toString(groupUniqArray(project_id)) FROM posthog.project_person_distinct_ids_v SETTINGS SQL_project_id = $SEED_B" "[$SEED_B]"
+check_out "person view: it hides every other project (WHERE project_id != $SEED_A is empty)" "SELECT count() FROM posthog.project_person_distinct_ids_v WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
+check_out "person view: the filter applies inside a UNION ALL subquery too" "SELECT count() FROM (SELECT project_id FROM posthog.project_person_distinct_ids_v UNION ALL SELECT project_id FROM posthog.project_person_distinct_ids_v) WHERE project_id != $SEED_A SETTINGS SQL_project_id = $SEED_A" 0
+check_out "person view: a project id nobody owns (0) sees no rows although the table has some" 'SELECT count() FROM posthog.project_person_distinct_ids_v SETTINGS SQL_project_id = 0' 0
+check_out "the two views join inside one project: the 3 events of $SEED_A meet its ro_check mapping" \
+  "SELECT count() FROM posthog.project_events_v AS e INNER JOIN posthog.project_person_distinct_ids_v AS p ON e.distinct_id = p.distinct_id SETTINGS SQL_project_id = $SEED_A" 3
+check_out "... and the 2 events of $SEED_B meet nothing: project $SEED_A's ro_check mapping is invisible to it" \
+  "SELECT count() FROM posthog.project_events_v AS e INNER JOIN posthog.project_person_distinct_ids_v AS p ON e.distinct_id = p.distinct_id SETTINGS SQL_project_id = $SEED_B" 0
+
 # --- the view after a CREATE OR REPLACE (migration 003 recreated it): columns, grant, policy, definer ---------
 # The columns materialized by 003 are readable through the replaced view, from the seeded properties.
 check_out "the columns added by migration 003 (os, device_type, utm_source) are readable through the view" \
@@ -287,6 +326,11 @@ POLICIES="$(adx --query "SELECT count() FROM system.row_policies WHERE database 
 if [[ "$POLICIES" =~ ^[0-9]+$ && "$POLICIES" -ge 1 ]]; then pass "a row policy exists on posthog.project_events_v ($POLICIES)"; else fail "no row policy on posthog.project_events_v (got '$POLICIES'): it must survive CREATE OR REPLACE VIEW"; fi
 DEFINER_OK="$(adx --query "SELECT count() FROM system.tables WHERE database = 'posthog' AND name = 'project_events_v' AND create_table_query LIKE '%SQL SECURITY DEFINER%' AND create_table_query LIKE '%getSetting(\\'SQL_project_id\\')%'" 2>/dev/null || echo ERR)"
 if [[ "$DEFINER_OK" == "1" ]]; then pass "the current view is SQL SECURITY DEFINER and keeps the SQL_project_id filter"; else fail "the current view lost SQL SECURITY DEFINER or its SQL_project_id filter (got '$DEFINER_OK')"; fi
+
+POLICIES="$(adx --query "SELECT count() FROM system.row_policies WHERE database = 'posthog' AND table = 'project_person_distinct_ids_v'" 2>/dev/null || echo ERR)"
+if [[ "$POLICIES" =~ ^[0-9]+$ && "$POLICIES" -ge 1 ]]; then pass "a row policy exists on posthog.project_person_distinct_ids_v ($POLICIES)"; else fail "no row policy on posthog.project_person_distinct_ids_v (got '$POLICIES')"; fi
+DEFINER_OK="$(adx --query "SELECT count() FROM system.tables WHERE database = 'posthog' AND name = 'project_person_distinct_ids_v' AND create_table_query LIKE '%SQL SECURITY DEFINER%' AND create_table_query LIKE '%getSetting(\\'SQL_project_id\\')%'" 2>/dev/null || echo ERR)"
+if [[ "$DEFINER_OK" == "1" ]]; then pass "the person view is SQL SECURITY DEFINER and keeps the SQL_project_id filter"; else fail "the person view lost SQL SECURITY DEFINER or its SQL_project_id filter (got '$DEFINER_OK')"; fi
 
 # Every relation the user may SELECT from needs a filter: derive them from SHOW GRANTS (not from this
 # script) and require that a bare read FAILS with 115 for each. A relation granted without a filter would
@@ -317,14 +361,25 @@ check_code "merge() over posthog.events finds no readable table" 636 "SELECT cou
 check_code "view() over posthog.events is denied" 497 'SELECT count() FROM view(SELECT * FROM posthog.events) SETTINGS SQL_project_id = 1'
 check_code "mergeTreeIndex on the view itself fails (a view is not a MergeTree)" 36 "SELECT * FROM mergeTreeIndex('posthog', 'project_events_v') SETTINGS SQL_project_id = 1"
 
+# The same for the person mapping: the base table has no grant at all, so every road to it is closed on the server.
+check_code "direct SELECT from posthog.person_distinct_ids is denied" 497 'SELECT count() FROM posthog.person_distinct_ids SETTINGS SQL_project_id = 1'
+check_code "mergeTreeIndex on posthog.person_distinct_ids is denied" 497 "SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', 'person_distinct_ids') SETTINGS SQL_project_id = 1"
+check_code "mergeTreeIndex with an assembled person table name is denied" 497 "SELECT DISTINCT project_id FROM mergeTreeIndex('posthog', concat('person_distinct', '_ids')) SETTINGS SQL_project_id = 1"
+check_code "merge() over posthog.person_distinct_ids finds no readable table" 636 "SELECT count() FROM merge('posthog', '^person_distinct_ids\$') SETTINGS SQL_project_id = 1"
+check_code "view() over posthog.person_distinct_ids is denied" 497 'SELECT count() FROM view(SELECT * FROM posthog.person_distinct_ids) SETTINGS SQL_project_id = 1'
+check_code "mergeTreeIndex on the person view itself fails (a view is not a MergeTree)" 36 "SELECT * FROM mergeTreeIndex('posthog', 'project_person_distinct_ids_v') SETTINGS SQL_project_id = 1"
+
 # --- no other table ----------------------------------------------------------------------------------
 check_code "SELECT from posthog.events_errors is denied" 497 'SELECT count() FROM posthog.events_errors'
 check_code "SELECT from posthog.schema_migrations is denied" 497 'SELECT count() FROM posthog.schema_migrations'
 check_code "SELECT from posthog.kafka_events is denied" 497 'SELECT count() FROM posthog.kafka_events'
+check_code "SELECT from posthog.kafka_person_distinct_ids is denied" 497 'SELECT count() FROM posthog.kafka_person_distinct_ids'
 
 # --- no writes (each statement is refused before it runs; the INSERT and ALTER would touch no row anyway)
 check_code "INSERT into posthog.events is denied" 497 "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT toUUID('00000000-0000-0000-0000-000000000000'), 0, '', '', '', now64(3) WHERE 0"
+check_code "INSERT into posthog.person_distinct_ids is denied" 497 "INSERT INTO posthog.person_distinct_ids (project_id, distinct_id, person_id, version, is_deleted, created_at) SELECT 0, '', toUUID('00000000-0000-0000-0000-000000000000'), 0, 0, now64(3) WHERE 0"
 check_code "ALTER TABLE posthog.events is denied" 497 'ALTER TABLE posthog.events DELETE WHERE 0'
+check_code "ALTER TABLE posthog.person_distinct_ids is denied" 497 'ALTER TABLE posthog.person_distinct_ids DELETE WHERE 0'
 check_code "CREATE TABLE is denied" 497 'CREATE TABLE posthog.ro_check_probe (a Int8) ENGINE = Memory'
 
 # --- no files, URLs or remote servers (the ABSENCE of the SOURCES grant, not readonly, blocks these) ---
@@ -369,6 +424,12 @@ check_http_out "HTTP: login as posthog_ro with readonly = 2" "SQL_project_id=1" 
 check_http_out "HTTP: project $SEED_A sees exactly its 3 rows (SQL_project_id as URL argument)" "SQL_project_id=$SEED_A" 'SELECT count() FROM posthog.project_events_v' 3
 check_http_out "HTTP: project $SEED_B sees exactly its 2 rows" "SQL_project_id=$SEED_B" 'SELECT count() FROM posthog.project_events_v' 2
 check_http_out "HTTP: the view hides every other project" "SQL_project_id=$SEED_A" "SELECT count() FROM posthog.project_events_v WHERE project_id != $SEED_A" 0
+check_http_out "HTTP: person view: project $SEED_A sees exactly its 3 live mappings (SQL_project_id as URL argument)" "SQL_project_id=$SEED_A" 'SELECT count() FROM posthog.project_person_distinct_ids_v' 3
+check_http_out "HTTP: person view: project $SEED_B sees exactly its 2 mappings" "SQL_project_id=$SEED_B" 'SELECT count() FROM posthog.project_person_distinct_ids_v' 2
+check_http_out "HTTP: person view: d1 maps to the newest version" "SQL_project_id=$SEED_A" "SELECT toString(person_id) FROM posthog.project_person_distinct_ids_v WHERE distinct_id = 'd1'" "$PERSON_A2"
+check_http_out "HTTP: person view: it hides every other project" "SQL_project_id=$SEED_A" "SELECT count() FROM posthog.project_person_distinct_ids_v WHERE project_id != $SEED_A" 0
+check_http_code "HTTP: person view: a read without SQL_project_id is rejected (fail-closed)" 115 "default_format=TSV" 'SELECT count() FROM posthog.project_person_distinct_ids_v'
+check_http_code "HTTP: person view: SQL_project_id that is not a number is rejected" 6 "SQL_project_id=abc" 'SELECT count() FROM posthog.project_person_distinct_ids_v'
 check_http_code "HTTP: a read without SQL_project_id is rejected (fail-closed)" 115 "default_format=TSV" 'SELECT count() FROM posthog.project_events_v'
 check_http_code "HTTP: SQL_project_id that is not a number is rejected" 6 "SQL_project_id=abc" 'SELECT count() FROM posthog.project_events_v'
 check_http_code "HTTP: readonly=0 as URL argument is refused" 164 "SQL_project_id=1&readonly=0" 'SELECT 1'
@@ -398,13 +459,17 @@ check_http_code "HTTP session: a limit still cannot be raised afterwards" 452 "S
 
 # Grants over HTTP: no read of events, no system tables with data, no write.
 check_http_code "HTTP: direct SELECT from posthog.events is denied" 497 "SQL_project_id=1" 'SELECT count() FROM posthog.events'
+check_http_code "HTTP: direct SELECT from posthog.person_distinct_ids is denied" 497 "SQL_project_id=1" 'SELECT count() FROM posthog.person_distinct_ids'
+check_http_code "HTTP: SELECT from posthog.kafka_person_distinct_ids is denied" 497 "SQL_project_id=1" 'SELECT count() FROM posthog.kafka_person_distinct_ids'
 check_http_code "HTTP: SELECT from system.users is denied" 497 "SQL_project_id=1" 'SELECT count() FROM system.users'
 check_http_code "HTTP: SELECT from system.query_log is denied" 497 "SQL_project_id=1" 'SELECT count() FROM system.query_log'
 check_http_code "HTTP: INSERT into posthog.events is denied" 497 "SQL_project_id=1" "INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) SELECT toUUID('00000000-0000-0000-0000-000000000000'), 0, '', '', '', now64(3) WHERE 0"
 check_http_code "HTTP: CREATE TABLE is denied" 497 "SQL_project_id=1" 'CREATE TABLE posthog.ro_check_probe (a Int8) ENGINE = Memory'
-check_http_out "HTTP: database=system shows only the granted view in system.tables" "SQL_project_id=1&database=system" "SELECT concat(database, '.', name) FROM tables" "posthog.project_events_v"
+check_http_out "HTTP: database=system shows only the two granted views in system.tables" "SQL_project_id=1&database=system" "SELECT concat(database, '.', name) FROM tables ORDER BY name" $'posthog.project_events_v\nposthog.project_person_distinct_ids_v'
 hrun "SQL_project_id=$SEED_A" "SELECT count() FROM posthog.project_events_v SETTINGS SQL_project_id = $SEED_B"
 echo "INFO: documented limitation, not a check: SQL text 'SETTINGS SQL_project_id = <other id>' overrides the URL argument (URL argument said project $SEED_A, the SQL text said project $SEED_B, the server counted $(short "$OUT") row(s)): the filter guards against query builder bugs, injection is stopped by typed parameters and the ProjectScopedReader lint"
+hrun "SQL_project_id=$SEED_A" "SELECT count() FROM posthog.project_person_distinct_ids_v SETTINGS SQL_project_id = $SEED_B"
+echo "INFO: documented limitation, not a check (person view, same as the events view): SQL text 'SETTINGS SQL_project_id = <other id>' overrides the URL argument (URL argument said project $SEED_A, the SQL text said project $SEED_B, the server counted $(short "$OUT") mapping(s)): closed only by the ProjectScopedReader lint"
 
 # --- the application's own client in the app container (compose only) --------------------------------------------------------
 if [[ -z "$CH_CONTAINER" ]]; then
@@ -422,19 +487,25 @@ $p("view", "SELECT count() AS c FROM posthog.project_events_v", $id);
 $p("bare", "SELECT count() AS c FROM posthog.project_events_v");
 $p("events", "SELECT count() AS c FROM posthog.events", $id);
 $p("users", "SELECT count() AS c FROM system.users", $id);
-$p("query_log", "SELECT count() AS c FROM system.query_log", $id);'
+$p("query_log", "SELECT count() AS c FROM system.query_log", $id);
+$p("pview", "SELECT count() AS c FROM posthog.project_person_distinct_ids_v", $id);
+$p("pbare", "SELECT count() AS c FROM posthog.project_person_distinct_ids_v");
+$p("ptable", "SELECT count() AS c FROM posthog.person_distinct_ids", $id);'
     APP_OUT="$(docker compose exec -T app php artisan tinker --execute="$APP_PROBE" 2>&1 || true)"
     probe_line() { printf '%s\n' "$APP_OUT" | grep -m1 "^PROBE|$1|" || true; }
     [[ "$(probe_line view)" == "PROBE|view|ok|3" ]] && pass "app ReadOnlyClickHouseClient: the view with SQL_project_id returns project $SEED_A's 3 rows" || fail "app ReadOnlyClickHouseClient view read: expected 3 rows, got: $(short "$(probe_line view)") $(short "$APP_OUT")"
     [[ "$(probe_line bare)" == "PROBE|bare|error|115" ]] && pass "app ReadOnlyClickHouseClient: a read without SQL_project_id fails closed -> 115" || fail "app ReadOnlyClickHouseClient bare read: expected error 115, got: $(short "$(probe_line bare)")"
     [[ "$(probe_line events)" == "PROBE|events|error|497" ]] && pass "app ReadOnlyClickHouseClient: posthog.events is denied -> 497" || fail "app ReadOnlyClickHouseClient events read: expected error 497, got: $(short "$(probe_line events)")"
     [[ "$(probe_line users)" == "PROBE|users|error|497" ]] && pass "app ReadOnlyClickHouseClient: system.users is denied -> 497" || fail "app ReadOnlyClickHouseClient system.users read: expected error 497, got: $(short "$(probe_line users)")"
+    [[ "$(probe_line pview)" == "PROBE|pview|ok|3" ]] && pass "app ReadOnlyClickHouseClient: the person view with SQL_project_id returns project $SEED_A's 3 mappings" || fail "app ReadOnlyClickHouseClient person view read: expected 3 rows, got: $(short "$(probe_line pview)") $(short "$APP_OUT")"
+    [[ "$(probe_line pbare)" == "PROBE|pbare|error|115" ]] && pass "app ReadOnlyClickHouseClient: a person view read without SQL_project_id fails closed -> 115" || fail "app ReadOnlyClickHouseClient person view bare read: expected error 115, got: $(short "$(probe_line pbare)")"
+    [[ "$(probe_line ptable)" == "PROBE|ptable|error|497" ]] && pass "app ReadOnlyClickHouseClient: posthog.person_distinct_ids is denied -> 497" || fail "app ReadOnlyClickHouseClient person table read: expected error 497, got: $(short "$(probe_line ptable)")"
     [[ "$(probe_line query_log)" == "PROBE|query_log|error|497" ]] && pass "app ReadOnlyClickHouseClient: system.query_log is denied -> 497" || fail "app ReadOnlyClickHouseClient system.query_log read: expected error 497, got: $(short "$(probe_line query_log)")"
   fi
 fi
 
-# --- grants are exactly one line (the view, never posthog.events) ---------------------------------------------------------------------
-check_out "grants are exactly SELECT on posthog.project_events_v" 'SHOW GRANTS FOR posthog_ro' 'GRANT SELECT ON posthog.project_events_v TO posthog_ro'
+# --- grants are exactly two lines (the two views, never a base table) ---------------------------------------------------------------------
+check_out "grants are exactly SELECT on posthog.project_events_v and posthog.project_person_distinct_ids_v" 'SHOW GRANTS FOR posthog_ro' $'GRANT SELECT ON posthog.project_events_v TO posthog_ro\nGRANT SELECT ON posthog.project_person_distinct_ids_v TO posthog_ro'
 
 echo "----"
 echo "check-readonly-user: $PASSED passed, $FAILED failed"
