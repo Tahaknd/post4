@@ -140,7 +140,7 @@ final class EventNormalizer
             return $clientTime;
         }
 
-        // sunucu zamanı + (olay zamanı - istemcinin gönderim zamanı)
+        // server time + (event time - the client's send time)
         return $now->subMilliseconds((int) $clientTime->diffInMilliseconds($sentAt, false));
     }
 

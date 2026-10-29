@@ -7,7 +7,7 @@ interface EventProducer
     /**
      * @param  list<array<string, mixed>>  $messages
      *
-     * @throws ProducerUnavailable Teslim edilemeyen mesaj varsa
+     * @throws ProducerUnavailable When a message could not be delivered
      */
     public function produce(array $messages): void;
 }
