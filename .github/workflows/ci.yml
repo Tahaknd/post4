@@ -76,7 +76,24 @@ jobs:
           echo "OCTANE_WORKERS=2" >> .env
 
       - name: Build and start the stack
-        run: docker compose up -d --build --wait --wait-timeout 900
+        run: docker compose up -d --build
+
+      # `docker compose up --wait` is NOT usable here: worker and scheduler have their health check switched off
+      # on purpose and `--wait` fails on a service without one ("has no healthcheck configured"). `up -d` already
+      # waits for every dependency of the app (databases healthy, kafka-init finished); what is left is the app
+      # itself, then the two background services being up.
+      - name: Wait for the stack
+        run: |
+          for _ in $(seq 1 120); do
+            if [ "$(docker compose ps app --format '{{.Health}}')" = healthy ] \
+              && [ "$(docker compose ps worker --format '{{.State}}')" = running ] \
+              && [ "$(docker compose ps scheduler --format '{{.State}}')" = running ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose ps -a
+          exit 1
 
       - name: Show the stack
         run: docker compose ps -a
