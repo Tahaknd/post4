@@ -9,9 +9,11 @@ namespace App\Domain\Capture;
  * Kafka consumer keeps polling but its materialized view INSERT fails forever, so nothing is committed.
  * Two independent signatures (either one is enough):
  *  - the consumer raised an exception within the last 120 s, has not committed for more than 120 s
- *    (or never) and its last poll is fresher than 60 s;
+ *    (or never), its last poll is fresher than 60 s and the Kafka lag is not 0 (a wedge always leaves a
+ *    backlog; an idle topic never commits, so one exception from a Kafka restart or a cold start, where
+ *    ClickHouse comes up before Kafka, must not read STALLED; an unknown lag keeps this signature armed);
  *  - Kafka lag is known and > 0 while the consumer offsets did not move since a previous snapshot taken
- *    at least 60 s ago (that snapshot also saw lag > 0, so a burst that just arrived is not a stall).
+ *    at least 60 s ago (that snapshot also saw a KNOWN lag > 0, so a burst that just arrived is not a stall).
  * WARN is everything else worth looking at; OK means nothing was found. Missing snapshot keys mean
  * "unknown" and never raise a reason on their own.
  *
@@ -72,7 +74,9 @@ final class IngestHealth
         $exceptionAge = self::int($s, 'exception_age');
         $commitAge = self::int($s, 'commit_age');
         $pollAge = self::int($s, 'poll_age');
+        $lag = self::int($s, 'lag');
         if ($exceptionAge !== null && $exceptionAge <= $t['stall_exception_window_seconds']
+            && $lag !== 0
             && ($commitAge === null || $commitAge > $t['stall_commit_stale_seconds'])
             && $pollAge !== null && $pollAge < $t['stall_poll_fresh_seconds']) {
             $reasons[] = sprintf(
@@ -85,14 +89,13 @@ final class IngestHealth
             );
         }
 
-        $lag = self::int($s, 'lag');
         $baselineAge = self::int($s, 'previous_age');
         $previousSum = self::int($s, 'previous_offset_sum');
         $previousLag = self::int($s, 'previous_lag');
         if ($lag !== null && $lag > 0
             && $baselineAge !== null && $baselineAge >= $t['stall_min_baseline_age_seconds']
             && $previousSum !== null && $previousSum === self::int($s, 'offset_sum')
-            && ($previousLag === null || $previousLag > 0)) {
+            && $previousLag !== null && $previousLag > 0) {
             $reasons[] = sprintf(
                 'Kafka is stalled: lag is %d and the consumer offsets have not moved for %d s (offset sum %d); %s',
                 $lag,

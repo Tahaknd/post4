@@ -123,6 +123,18 @@ it('detects the consumer wedge: STALLED, exit 2, one prominent line with the mes
         ->and(substr_count($err, 'INGEST STALLED'))->toBe(1);
 });
 
+it('does not call one recent exception a stall on an idle topic (lag 0): Kafka restart or cold start', function () {
+    ClickHouseStatusFake::install([
+        'consumers' => [ClickHouseStatusFake::consumer(commitAgo: 4000, pollAgo: 2, exceptions: [10 => 'Local: Broker transport failure'])],
+    ]);
+
+    [$code, $out, $err] = runStatus();
+
+    expect($code)->toBe(0)
+        ->and($out)->toContain('Ingest status: OK')->toContain('total lag:           0')
+        ->and($err)->toBe('');
+});
+
 it('does not call an old exception a stall, and a quiet idle consumer is not one either', function () {
     ClickHouseStatusFake::install([
         'consumers' => [ClickHouseStatusFake::consumer(commitAgo: 400, pollAgo: 2, exceptions: [500 => WEDGE_MESSAGE])],
@@ -223,6 +235,7 @@ it('warns when lag is unknown while the consumer has a recent exception', functi
 
 it('treats a consumer that never committed as a stale commit', function () {
     ClickHouseStatusFake::install(['consumers' => [ClickHouseStatusFake::consumer(commitAgo: 0, exceptions: [4 => WEDGE_MESSAGE])]]);
+    $this->app->instance(KafkaLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => null, 'high' => 40, 'lag' => 40]]));
 
     [$code, $out, $err] = runStatus();
 

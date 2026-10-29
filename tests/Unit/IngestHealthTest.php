@@ -34,6 +34,8 @@ function wedgedSnapshot(array $override = []): array
         'exception_age' => 5,
         'commit_age' => 400,
         'poll_age' => 3,
+        // A real wedge always has a backlog: the block that cannot be inserted stays unread-by-commit.
+        'lag' => 150,
     ], $override));
 }
 
@@ -75,6 +77,16 @@ describe('stall signature: exception + stale commit + fresh poll', function () {
             ->and(IngestHealth::classify(wedgedSnapshot(['poll_age' => null]))['status'])->not->toBe('STALLED');
     });
 
+    it('is NOT stalled at lag 0: a quiet topic has nothing to commit, one exception (Kafka restart, cold start) must not read STALLED', function () {
+        $result = IngestHealth::classify(wedgedSnapshot(['lag' => 0]));
+
+        expect($result['status'])->toBe('OK')->and($result['reasons'])->toBe([]);
+    });
+
+    it('keeps the fallback when the lag is unknown: still STALLED, because the consumer may be wedged', function () {
+        expect(IngestHealth::classify(wedgedSnapshot(['lag' => null]))['status'])->toBe('STALLED');
+    });
+
     it('is not stalled without a recent exception', function () {
         expect(IngestHealth::classify(wedgedSnapshot(['exception_message' => null, 'exception_age' => null]))['status'])->toBe('OK');
     });
@@ -108,6 +120,12 @@ describe('stall signature: lag with frozen offsets', function () {
 
         expect(IngestHealth::classify(healthySnapshot(['lag' => 0] + $frozen))['status'])->toBe('OK')
             ->and(IngestHealth::classify(healthySnapshot(['lag' => null] + $frozen))['status'])->toBe('OK');
+    });
+
+    it('is not stalled when the previous lag is unknown (null): a baseline without a known backlog proves nothing', function () {
+        expect(IngestHealth::classify(healthySnapshot([
+            'lag' => 25, 'previous_offset_sum' => 1000, 'previous_age' => 300, 'previous_lag' => null,
+        ]))['status'])->toBe('OK');
     });
 
     it('is not stalled when lag only just appeared (the previous run saw none)', function () {
