@@ -89,13 +89,21 @@ function destroy() {
 
         <section aria-labelledby="insights-heading" class="space-y-3">
             <h2 id="insights-heading" class="text-lg font-semibold tracking-tight">Insights</h2>
-            <p class="text-sm text-muted">See how often your events happen over time.</p>
-            <Link
-                :href="urls.trends"
-                class="inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 font-medium text-accent-fg hover:bg-accent-hover"
-            >
-                Open Trends
-            </Link>
+            <p class="text-sm text-muted">See how often your events happen over time, and where people drop off between steps.</p>
+            <div class="flex flex-wrap gap-3">
+                <Link
+                    :href="urls.trends"
+                    class="inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 font-medium text-accent-fg hover:bg-accent-hover"
+                >
+                    Open Trends
+                </Link>
+                <Link
+                    :href="urls.funnel"
+                    class="inline-flex items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-fg hover:bg-canvas"
+                >
+                    Open Funnel
+                </Link>
+            </div>
         </section>
 
         <section aria-labelledby="key-heading" class="space-y-3">

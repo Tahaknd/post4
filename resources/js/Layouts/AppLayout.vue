@@ -10,9 +10,11 @@ const page = usePage();
 
 const user = computed(() => page.props.auth?.user ?? null);
 
-// The Trends page of the project on screen (server-built URL, null on pages without a project).
+// The insight pages of the project on screen (server-built URLs, null on pages without a project).
 const trendsUrl = computed(() => page.props.trendsUrl ?? null);
 const onTrends = computed(() => trendsUrl.value !== null && page.url.split('?')[0] === trendsUrl.value);
+const funnelUrl = computed(() => page.props.funnelUrl ?? null);
+const onFunnel = computed(() => funnelUrl.value !== null && page.url.split('?')[0] === funnelUrl.value);
 
 // The primary navigation exists for signed-in users only.
 const navItems = [{ label: 'Home', href: HOME_URL }];
@@ -40,6 +42,7 @@ function logout() {
             <ProjectMenu />
 
             <Link v-if="trendsUrl" :href="trendsUrl" class="text-muted hover:text-fg" :class="onTrends ? 'font-medium text-fg' : ''" :aria-current="onTrends ? 'page' : undefined">Trends</Link>
+            <Link v-if="funnelUrl" :href="funnelUrl" class="text-muted hover:text-fg" :class="onFunnel ? 'font-medium text-fg' : ''" :aria-current="onFunnel ? 'page' : undefined">Funnel</Link>
 
             <!-- Horizon is a separate Laravel page, not an Inertia one: a plain link, shown to administrators only. -->
             <a v-if="user.is_admin" :href="HORIZON_URL" class="text-muted hover:text-fg">Horizon</a>
