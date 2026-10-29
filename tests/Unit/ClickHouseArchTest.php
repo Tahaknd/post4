@@ -19,12 +19,11 @@ arch('only the ClickHouse infrastructure and its container wiring use the read-o
         'App\Providers\AppServiceProvider',
     ]);
 
-arch('the admin client is used only by ClickHouse infrastructure, its wiring, capture:status and the project purge job')
+arch('the admin client is used only by ClickHouse infrastructure (capture:status reads through IngestStatusQueries), its wiring and the project purge job')
     ->expect(ClickHouseClient::class)
     ->toOnlyBeUsedIn([
         'App\Infrastructure\ClickHouse',
         'App\Providers\AppServiceProvider',
-        'App\Console\Commands\CaptureStatus',
         'App\Jobs\PurgeProjectEvents',
     ]);
 
