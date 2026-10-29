@@ -6,14 +6,12 @@ import {
     defaultDefinition,
     encodeDefinition,
     activeFilters,
-    inclusiveDays,
-    isBlankFilter,
     mapServerErrors,
     minBuckets,
-    newFilter,
     toRequestBody,
     validateDefinition,
 } from '../../resources/js/lib/trendsDefinition.js';
+import { inclusiveDays, isBlankFilter, newFilter } from '../../resources/js/lib/insightQuery.js';
 
 const props = {
     options: {

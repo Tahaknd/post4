@@ -2,29 +2,29 @@
 // POST /api/projects/{project}/insights/trends, the shareable query string, instant client-side validation and the
 // mapping of the API's 422 field errors back onto controls.
 //
-// The SERVER is the source of truth for every rule. The checks here mirror its limits (read from the page props, which
-// come from the domain constants) only for instant feedback, and they are deliberately never stricter than the server:
-// where a rule depends on something the client cannot know exactly (the number of buckets across DST changes, "today"
-// for this_month), the estimate is a lower bound, so a definition the server would accept is never blocked here.
+// The SERVER is the source of truth for every rule; the shared rules and the reasons the checks are never stricter than the
+// server are in insightQuery.js. What is specific to trends (events, interval, metric, breakdown, the row cap) is here.
 
+import {
+    DATE_ERROR_PATH,
+    MAX_URL_FILTERS,
+    activeFilterRows,
+    decodeFilter,
+    decodeRange,
+    defaultRange,
+    encodeFilter,
+    encodeRange,
+    filterBody,
+    placeFilterError,
+    rangeBody,
+    validateFilterRows,
+    validateRange,
+} from './insightQuery.js';
 import { codePoints } from './trendsFormat.js';
-
-export const PRESET_DAYS_MIN = { last_7_days: 7, last_30_days: 30, last_90_days: 90, this_month: 1, last_month: 28 };
-
-let nextFilterId = 1;
-
-export function newFilter(overrides = {}) {
-    return { id: nextFilterId++, key: '', operator: 'equals', value: '', ...overrides };
-}
-
-/** A filter row nobody has typed into yet: it is a draft, not part of the definition (no body, no validation). */
-export function isBlankFilter(filter) {
-    return filter.key === '' && filter.value === '';
-}
 
 /** The filters that count: every row that is not blank, in the order of the form (and of the request body). */
 export function activeFilters(definition) {
-    return definition.filters.filter((filter) => !isBlankFilter(filter));
+    return activeFilterRows(definition.filters);
 }
 
 /** The definition a page starts from: no event chosen yet, everything else at the server's defaults. */
@@ -33,7 +33,7 @@ export function defaultDefinition(defaults) {
         events: [],
         metric: defaults.metric,
         interval: defaults.interval,
-        range: { mode: 'preset', preset: defaults.date_preset, from: '', to: '' },
+        range: defaultRange(defaults),
         breakdown: { mode: 'none', column: '', property: '', topN: defaults.top_n },
         filters: [],
     };
@@ -47,12 +47,7 @@ export function toRequestBody(definition, options) {
         interval: definition.interval,
     };
 
-    if (definition.range.mode === 'custom') {
-        body.date_from = definition.range.from;
-        body.date_to = definition.range.to;
-    } else {
-        body.date_preset = definition.range.preset;
-    }
+    Object.assign(body, rangeBody(definition.range));
 
     if (definition.breakdown.mode === 'column') {
         body.breakdown = { column: definition.breakdown.column, top_n: definition.breakdown.topN };
@@ -60,35 +55,9 @@ export function toRequestBody(definition, options) {
         body.breakdown = { property: definition.breakdown.property, top_n: definition.breakdown.topN };
     }
 
-    const needsValue = new Map(options.operators.map((operator) => [operator.value, operator.needs_value]));
-
-    body.filters = activeFilters(definition).map((filter) => ({
-        key: filter.key,
-        operator: filter.operator,
-        value: needsValue.get(filter.operator) === false ? null : filter.value,
-    }));
+    body.filters = filterBody(definition.filters, options.operators);
 
     return body;
-}
-
-const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-/** Whole days from `from` to `to` inclusive, or null when either is not a real calendar day. */
-export function inclusiveDays(from, to) {
-    const a = parseDay(from);
-    const b = parseDay(to);
-
-    return a === null || b === null ? null : Math.round((b - a) / 86400000) + 1;
-}
-
-function parseDay(value) {
-    if (typeof value !== 'string' || !DATE_PATTERN.test(value)) {
-        return null;
-    }
-
-    const time = Date.parse(`${value}T00:00:00Z`);
-
-    return Number.isNaN(time) || new Date(time).toISOString().slice(0, 10) !== value ? null : time;
 }
 
 /** A lower bound of the number of buckets of a window (never above what the server computes). */
@@ -118,23 +87,9 @@ export function validateDefinition(definition, props) {
         errors.events = `Pick at most ${limits.max_events} events.`;
     }
 
-    let days = null;
-    if (definition.range.mode === 'custom') {
-        const { from, to } = definition.range;
-        if (from === '' || to === '') {
-            errors.date = 'Pick both a start and an end date.';
-        } else {
-            days = inclusiveDays(from, to);
-            if (days === null) {
-                errors.date = 'Use real calendar dates.';
-            } else if (days < 1) {
-                errors.date = 'The end date must not be before the start date.';
-            } else if (days > limits.max_range_days) {
-                errors.date = `The range can be at most ${limits.max_range_days} days.`;
-            }
-        }
-    } else {
-        days = PRESET_DAYS_MIN[definition.range.preset] ?? 1;
+    const { error: dateError, days } = validateRange(definition.range, limits);
+    if (dateError !== undefined) {
+        errors.date = dateError;
     }
 
     const { breakdown } = definition;
@@ -151,21 +106,7 @@ export function validateDefinition(definition, props) {
     if (definition.filters.length > limits.max_filters) {
         errors.general = `Use at most ${limits.max_filters} filters.`;
     }
-    const needsValue = new Map(props.options.operators.map((operator) => [operator.value, operator.needs_value]));
-    for (const filter of activeFilters(definition)) {
-        const row = {};
-        if (filter.key === '') {
-            row.key = 'Enter a property key.';
-        } else if (codePoints(filter.key) > limits.max_filter_key_length) {
-            row.key = `The key can be at most ${limits.max_filter_key_length} characters.`;
-        }
-        if (needsValue.get(filter.operator) !== false && codePoints(filter.value) > limits.max_filter_value_length) {
-            row.value = `The value can be at most ${limits.max_filter_value_length} characters.`;
-        }
-        if (Object.keys(row).length > 0) {
-            errors.filters[filter.id] = row;
-        }
-    }
+    errors.filters = validateFilterRows(definition.filters, props.options.operators, limits);
 
     for (const event of definition.events) {
         if (codePoints(event) < 1 || codePoints(event) > limits.max_event_length) {
@@ -212,7 +153,7 @@ export function mapServerErrors(serverErrors, definition) {
 
         if (/^events(\.\d+)?$/.test(path)) {
             errors.events ??= message;
-        } else if (/^(date_preset|date_from|date_to)$/.test(path)) {
+        } else if (DATE_ERROR_PATH.test(path)) {
             errors.date ??= message;
         } else if (path === 'metric' || path === 'interval') {
             errors[path] = message;
@@ -228,8 +169,7 @@ export function mapServerErrors(serverErrors, definition) {
             if (target === undefined) {
                 general.push(message);
             } else {
-                errors.filters[target.id] ??= {};
-                errors.filters[target.id][filter[2] === 'operator' ? 'key' : (filter[2] ?? 'key')] ??= message;
+                placeFilterError(errors.filters, target, filter[2], message);
             }
         } else {
             general.push(message);
@@ -244,8 +184,6 @@ export function mapServerErrors(serverErrors, definition) {
 }
 
 // ---------------------------------------------------------------- shareable query string
-
-const MAX_URL_FILTERS = 10;
 
 /**
  * The query string (without `?`) of a definition, defaults omitted. Events are repeated `e`, filters repeated `f`
@@ -263,12 +201,7 @@ export function encodeDefinition(definition, defaults) {
     if (definition.interval !== defaults.interval) {
         params.set('i', definition.interval);
     }
-    if (definition.range.mode === 'custom') {
-        params.set('from', definition.range.from);
-        params.set('to', definition.range.to);
-    } else if (definition.range.preset !== defaults.date_preset) {
-        params.set('p', definition.range.preset);
-    }
+    encodeRange(definition.range, defaults, params);
     if (definition.breakdown.mode === 'column') {
         params.set('b', definition.breakdown.column);
     } else if (definition.breakdown.mode === 'property') {
@@ -278,7 +211,7 @@ export function encodeDefinition(definition, defaults) {
         params.set('bn', String(definition.breakdown.topN));
     }
     for (const filter of activeFilters(definition)) {
-        params.append('f', JSON.stringify([filter.key, filter.operator, filter.value]));
+        params.append('f', encodeFilter(filter));
     }
 
     return params.toString();
@@ -316,14 +249,7 @@ export function decodeDefinition(search, props) {
         definition.interval = interval;
     }
 
-    const from = params.get('from');
-    const to = params.get('to');
-    const preset = params.get('p');
-    if (from !== null && to !== null && parseDay(from) !== null && parseDay(to) !== null) {
-        definition.range = { mode: 'custom', preset: defaults.date_preset, from, to };
-    } else if (preset !== null && allowed(options.presets, preset)) {
-        definition.range.preset = preset;
-    }
+    definition.range = decodeRange(params, options.presets, defaults);
 
     const column = params.get('b');
     const property = params.get('bp');
@@ -340,36 +266,11 @@ export function decodeDefinition(search, props) {
     }
 
     for (const raw of params.getAll('f').slice(0, Math.min(limits.max_filters, MAX_URL_FILTERS))) {
-        const filter = parseFilter(raw, props);
+        const filter = decodeFilter(raw, options.operators, limits);
         if (filter !== null) {
             definition.filters.push(filter);
         }
     }
 
     return definition;
-}
-
-function parseFilter(raw, props) {
-    let parsed;
-    try {
-        parsed = JSON.parse(raw);
-    } catch {
-        return null;
-    }
-
-    if (!Array.isArray(parsed) || parsed.length !== 3) {
-        return null;
-    }
-
-    const [key, operator, value] = parsed;
-    const known = props.options.operators.find((item) => item.value === operator);
-
-    if (typeof key !== 'string' || codePoints(key) < 1 || codePoints(key) > props.limits.max_filter_key_length || known === undefined) {
-        return null;
-    }
-    if (typeof value !== 'string' || codePoints(value) > props.limits.max_filter_value_length) {
-        return null;
-    }
-
-    return newFilter({ key, operator, value });
 }

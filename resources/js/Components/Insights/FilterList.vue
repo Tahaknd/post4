@@ -1,7 +1,7 @@
 <script setup>
 import { useId } from 'vue';
 
-import { newFilter } from '@/lib/trendsDefinition';
+import { newFilter } from '@/lib/insightQuery';
 
 // Property filters: up to `limits.max_filters` rows of { key, operator, value }. The operators come from the server;
 // the value is disabled (and not sent) for an operator that takes none ("is set"). Rows are labelled for screen
