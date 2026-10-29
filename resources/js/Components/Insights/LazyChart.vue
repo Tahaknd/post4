@@ -4,7 +4,7 @@ import { onMounted, shallowRef } from 'vue';
 import ChartError from '@/Components/Insights/ChartError.vue';
 import ChartSkeleton from '@/Components/Insights/ChartSkeleton.vue';
 
-// Loads the ECharts canvas of a chart on first use (`kind`: `trends`, the default, or `funnel`), so ECharts (about 550 kB)
+// Loads the ECharts canvas of a chart on first use (`kind`: `trends`, the default, `funnel` or `retention`), so ECharts (about 550 kB)
 // stays out of the entry bundle and is fetched only when a chart is shown. Every kind has its own chunk with the ECharts
 // parts it needs; the core and the renderer are shared. Written by hand instead of defineAsyncComponent because its
 // failed load cannot be retried by a button (Vue keeps the rejected promise): this one imports again on "Try again".
@@ -20,6 +20,7 @@ const props = defineProps({
 const CANVASES = {
     trends: () => import('@/Components/Insights/ChartCanvas.vue'),
     funnel: () => import('@/Components/Insights/FunnelCanvas.vue'),
+    retention: () => import('@/Components/Insights/RetentionCanvas.vue'),
 };
 
 const canvas = shallowRef(null);

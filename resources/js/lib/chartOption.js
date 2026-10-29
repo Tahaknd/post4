@@ -1,7 +1,7 @@
-// The ECharts options of the insight charts (trends: lines or bars over time; funnel: horizontal bars per step), built from plain data and a resolved colour theme. No ECharts import here: the
+// The ECharts options of the insight charts (trends: lines or bars over time; funnel: horizontal bars per step; retention: the average curve), built from plain data and a resolved colour theme. No ECharts import here: the
 // chart component hands the object to `chart.setOption()`, and tests can inspect it without a DOM.
 
-import { barLabel, stepLabel } from './funnelFormat.js';
+import { barLabel, formatRate, stepLabel } from './funnelFormat.js';
 import { abbreviate, formatNumber, truncate } from './trendsFormat.js';
 
 const CHART_COLORS = 8;
@@ -145,6 +145,67 @@ export function buildFunnelOption({ steps, theme, reducedMotion, description, co
                 barMaxWidth: 44,
                 itemStyle: { color: theme.series[0] },
                 label: { show: true, position: 'right', color: theme.fg, formatter: (point) => barLabel(steps[point.dataIndex], compact) },
+                emphasis: { focus: 'series' },
+            },
+        ],
+    };
+}
+
+/**
+ * The option of the average retention curve: one line over the periods 0..N, the share of a cohort that is active in that
+ * period (0 to 100%, always the whole scale, so two tables can be compared by eye). A period without an average is a gap in the
+ * line, never a drop to zero. One colour (the first chart colour); the numbers are in the table under the chart.
+ *
+ * @param {object} input
+ * @param {string[]} input.labels one per period, unique ("Week 0")
+ * @param {(number|null)[]} input.points the pooled share per period (0..1), null where there is none
+ * @param {string} input.name the series name ("Average retention"), in the tooltip
+ * @param {ReturnType<typeof readChartTheme>} input.theme
+ * @param {boolean} input.reducedMotion
+ * @param {string} input.description the accessible summary
+ */
+export function buildRetentionOption({ labels, points, name, theme, reducedMotion, description }) {
+    return {
+        animation: !reducedMotion,
+        color: [theme.series[0]],
+        textStyle: { color: theme.fg, fontFamily: theme.fontFamily },
+        aria: { enabled: true, label: { enabled: true, description } },
+        grid: { left: 8, right: 24, top: 16, bottom: 8, containLabel: true },
+        tooltip: {
+            trigger: 'axis',
+            confine: true,
+            backgroundColor: theme.surface,
+            borderColor: theme.lineStrong,
+            textStyle: { color: theme.fg, fontFamily: theme.fontFamily },
+            axisPointer: { type: 'line', lineStyle: { color: theme.lineStrong } },
+            valueFormatter: (value) => formatRate(value),
+        },
+        xAxis: {
+            type: 'category',
+            data: labels,
+            boundaryGap: false,
+            axisLabel: { color: theme.muted, hideOverlap: true },
+            axisLine: { lineStyle: { color: theme.lineStrong } },
+            axisTick: { alignWithLabel: true, lineStyle: { color: theme.lineStrong } },
+        },
+        yAxis: {
+            type: 'value',
+            min: 0,
+            max: 1,
+            interval: 0.25,
+            axisLabel: { color: theme.muted, formatter: (value) => formatRate(value) },
+            splitLine: { lineStyle: { color: theme.line } },
+        },
+        series: [
+            {
+                type: 'line',
+                name,
+                data: points,
+                connectNulls: false,
+                itemStyle: { color: theme.series[0] },
+                lineStyle: { width: 2, color: theme.series[0] },
+                showSymbol: labels.length <= 40,
+                symbolSize: 6,
                 emphasis: { focus: 'series' },
             },
         ],
