@@ -1,10 +1,9 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
-    "name": "laravel/laravel",
+    "name": "tahaknd/post4",
     "type": "project",
-    "description": "The skeleton application for the Laravel framework.",
-    "keywords": ["laravel", "framework"],
-    "license": "MIT",
+    "description": "Self-hosted product analytics: a PostHog-compatible capture API on Laravel, with Kafka and ClickHouse.",
+    "keywords": ["analytics", "product-analytics", "posthog", "self-hosted", "laravel", "clickhouse", "kafka"],
     "require": {
         "php": "^8.4.1",
         "inertiajs/inertia-laravel": "^3.5",
