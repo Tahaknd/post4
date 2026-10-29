@@ -19,6 +19,12 @@ services:
       - /app/vendor
       - app-storage:/app/storage
       - ./docker/zz-app.ini:/usr/local/etc/php/conf.d/zz-app.ini:ro
+  identity:
+    volumes:
+      - .:/app
+      - /app/vendor
+      - app-storage:/app/storage
+      - ./docker/zz-app.ini:/usr/local/etc/php/conf.d/zz-app.ini:ro
 
   # Vite dev server with HMR. Opt-in profile, so a plain `docker compose up` never starts it:
   #   docker compose --profile dev up -d vite

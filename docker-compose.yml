@@ -104,6 +104,10 @@ x-app: &app
     CLICKHOUSE_RO_TIMEOUT:
     CLICKHOUSE_RO_SELECT_RETRIES:
     CLICKHOUSE_RO_SELECT_RETRY_BACKOFF_MS:
+    IDENTITY_CONSUMER_GROUP:
+    IDENTITY_MAX_MEMORY_MB:
+    IDENTITY_ROWS_TOPIC:
+    IDENTITY_DLQ_TOPIC:
     INERTIA_ENCRYPT_HISTORY:
     INSIGHTS_CACHE_STORE:
     INSIGHTS_CACHE_TTL_SECONDS:
@@ -192,6 +196,29 @@ services:
     depends_on:
       app: { condition: service_healthy }
       redis-sessions: { condition: service_healthy }
+
+  # The identity consumer: a long-lived `identity:consume` that reads the events topic as consumer group `identity`
+  # (the ClickHouse consumer has its own group and is untouched), applies $identify / $create_alias /
+  # $merge_dangerously to persons and person_distinct_ids in Postgres, and writes one row per changed distinct id to
+  # the person_distinct_ids topic (events it cannot process go to events_dlq). It is the only writer of those tables.
+  # Starts after the app is healthy (that means: migrations ran, postgres and kafka-init are done), restarts on a
+  # crash (restart: unless-stopped; a failure that outlasts its retry budget exits 1 on purpose and comes back), and
+  # on `docker compose stop` / SIGTERM finishes the message it works on, commits and exits 0 within the grace period.
+  # Memory: it exits 0 by itself above IDENTITY_MAX_MEMORY_MB (default 192; PHP's limit is 256M) and restarts fresh;
+  # the container limit leaves room for the librdkafka buffers. Health: `docker compose logs identity` shows one
+  # summary line every 30 s; `php artisan capture:status` shows its lag and the DLQ depth.
+  identity:
+    <<: *app
+    command: ["php", "artisan", "identity:consume"]
+    mem_limit: ${IDENTITY_MEM_LIMIT:-384m}
+    stop_grace_period: 30s
+    healthcheck:
+      disable: true
+    depends_on:
+      app: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
 
   postgres:
     image: postgres:17-alpine
