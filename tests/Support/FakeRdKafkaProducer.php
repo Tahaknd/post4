@@ -2,6 +2,7 @@
 
 namespace Tests\Support;
 
+use RdKafka\Exception;
 use RdKafka\Producer;
 use RdKafka\ProducerTopic;
 use RdKafka\TopicConf;
@@ -18,11 +19,17 @@ final class FakeRdKafkaProducer extends Producer
     /** @var list<string> Names of the calls the producer made, in order (poll, newTopic, produce, flush, purge). */
     public array $calls = [];
 
+    /** @var list<array{topic: string, payload: ?string, key: ?string}> What was produced, in order. */
+    public array $messages = [];
+
     /** @var list<int> Delivery report error codes waiting for the next poll()/flush(). */
     public array $pendingReports = [];
 
     /** @var int Error code the delivery report of every message produced from now on carries. */
     public int $deliverWith = RD_KAFKA_RESP_ERR_NO_ERROR;
+
+    /** @var ?Exception Thrown by every produce() while set (a full queue, an unknown topic). */
+    public ?Exception $produceFails = null;
 
     /** @var int What flush() returns. */
     public int $flushResult = RD_KAFKA_RESP_ERR_NO_ERROR;
@@ -45,7 +52,7 @@ final class FakeRdKafkaProducer extends Producer
     {
         $this->calls[] = 'newTopic';
 
-        return new FakeRdKafkaProducerTopic($this);
+        return new FakeRdKafkaProducerTopic($this, $topic_name);
     }
 
     public function poll(int $timeout_ms): int
