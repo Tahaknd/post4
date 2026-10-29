@@ -1,3 +1,12 @@
+x-logging: &logging
+  # Container logs are kept by Docker's json-file driver with NO limit by default: a chatty service fills the
+  # disk (the Docker VM already ran out once). 3 files of 10 MB per container, oldest rotated away. Applies on
+  # the next recreate of a service (`docker compose up -d`); a running container keeps its old setting.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 x-app: &app
   image: ${APP_IMAGE:-post4-app}
   # app has `build: .`, worker and scheduler share its image and have no build section. `never` stops all
@@ -7,6 +16,7 @@ x-app: &app
   pull_policy: never
   init: true
   restart: unless-stopped
+  logging: *logging
   environment: &app-env
     APP_NAME: ${APP_NAME:-post4}
     APP_ENV: ${APP_ENV:-production}
@@ -132,6 +142,13 @@ services:
     <<: *app
     build: .
     command: ["sh", "docker/start-app.sh"]
+    # Memory limits (hard ceilings, not reservations; the sum of the defaults below is far above what the
+    # stack uses, so a 4 GB host works). Measured with `docker stats` while the full default suite and the
+    # clickhouse group ran in the app container: app peaked at about 480 MiB (Octane: 4 workers, PHP
+    # memory_limit 256M each, so 1500m is the worst case plus headroom for a test run), worker 316 MiB,
+    # scheduler 39 MiB. An exceeded limit OOM-kills the container, `restart: unless-stopped` brings it back.
+    # Limits apply on the next recreate: `docker compose up -d` (no -V needed).
+    mem_limit: ${APP_MEM_LIMIT:-1500m}
     ports:
       - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"
     depends_on:
@@ -150,6 +167,7 @@ services:
   worker:
     <<: *app
     command: ["php", "artisan", "horizon"]
+    mem_limit: ${WORKER_MEM_LIMIT:-768m}
     stop_grace_period: 70s
     healthcheck:
       disable: true
@@ -160,6 +178,7 @@ services:
   scheduler:
     <<: *app
     command: ["php", "artisan", "schedule:work"]
+    mem_limit: ${SCHEDULER_MEM_LIMIT:-256m}
     healthcheck:
       disable: true
     depends_on:
@@ -169,6 +188,9 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    logging: *logging
+    # Idle usage is about 45 MiB with the stock 128 MB shared_buffers; 512m leaves room for a few connections.
+    mem_limit: ${POSTGRES_MEM_LIMIT:-512m}
     environment:
       POSTGRES_DB: posthog
       POSTGRES_USER: posthog
@@ -204,6 +226,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *logging
+    # maxmemory (REDIS_MAXMEMORY, default 256mb) plus fork copy-on-write and client buffers: raise this limit
+    # together with REDIS_MAXMEMORY (keep it about 1.5x).
+    mem_limit: ${REDIS_MEM_LIMIT:-400m}
     command:
       - redis-server
       - --maxmemory
@@ -228,6 +254,9 @@ services:
   redis-sessions:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *logging
+    # maxmemory 128mb (REDIS_SESSIONS_MAXMEMORY), no persistence and so no fork.
+    mem_limit: ${REDIS_SESSIONS_MEM_LIMIT:-200m}
     command:
       - redis-server
       - --maxmemory
@@ -247,6 +276,10 @@ services:
   kafka:
     image: apache/kafka:3.9.0
     restart: unless-stopped
+    logging: *logging
+    # JVM heap is capped at 512m by KAFKA_HEAP_OPTS below; off-heap, metaspace and the page cache of the log
+    # segments come on top (about 465 MiB seen under the test suites). Keep the limit well above the heap.
+    mem_limit: ${KAFKA_MEM_LIMIT:-1g}
     stop_grace_period: 30s
     environment:
       CLUSTER_ID: IeU-rb80TW2CSiQdR3txfA
@@ -275,6 +308,7 @@ services:
   kafka-init:
     image: apache/kafka:3.9.0
     restart: "no"
+    logging: *logging
     depends_on:
       kafka: { condition: service_healthy }
     entrypoint: ["/bin/sh", "-c"]
@@ -288,6 +322,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:25.8
     restart: unless-stopped
+    logging: *logging
     stop_grace_period: 30s
     environment:
       CLICKHOUSE_DB: posthog
