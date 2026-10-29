@@ -58,7 +58,9 @@ Route::middleware(['auth', 'auth.session', 'api.no-store'])
     ->prefix('api/projects/{project}/insights')
     ->name('api.insights.')
     ->group(function (): void {
+        // One POST per registered insight type (App\Domain\Insights\InsightTypes), the same throttle and the same flow.
         Route::post('/trends', [InsightController::class, 'trends'])->name('trends')->middleware('throttle.user:insights.run');
+        Route::post('/funnel', [InsightController::class, 'funnel'])->name('funnel')->middleware('throttle.user:insights.run');
         // The event names of the picker: interactive, cached per project, one global ClickHouse slot of its own.
         Route::get('/events', InsightEventsController::class)->name('events')->middleware('throttle.user:insights.events');
         Route::get('/runs/{run}', [InsightController::class, 'show'])->name('runs.show')

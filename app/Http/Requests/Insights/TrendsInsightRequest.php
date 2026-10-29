@@ -164,28 +164,7 @@ class TrendsInsightRequest extends InsightRequest
             }
         }
 
-        $filters = $input['filters'] ?? [];
-        if (is_array($filters)) {
-            if (! array_is_list($filters)) {
-                $validator->errors()->add('filters', 'Provide a list of at most '.TrendsQuery::MAX_FILTERS.' filters.');
-            }
-            foreach ($filters as $i => $filter) {
-                if (! is_array($filter) || ! is_int($i)) {
-                    continue;
-                }
-                if (array_diff(array_keys($filter), ['key', 'operator', 'value']) !== []) {
-                    $validator->errors()->add("filters.{$i}", 'Each filter must be an object with key, operator and value.');
-
-                    continue;
-                }
-                $operator = is_string($filter['operator'] ?? null) ? FilterOperator::tryFrom($filter['operator']) : null;
-                if ($operator !== null && $operator->needsValue() !== (($filter['value'] ?? null) !== null)) {
-                    $validator->errors()->add("filters.{$i}.value", $operator->needsValue()
-                        ? 'This filter operator needs a value.'
-                        : 'The is_set operator takes no value.');
-                }
-            }
-        }
+        $this->checkFilterShapes($validator, $input['filters'] ?? [], 'filters', 'Provide a list of at most '.TrendsQuery::MAX_FILTERS.' filters.');
 
         $this->checkDateShape($validator, $input);
     }

@@ -10,8 +10,11 @@ use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
+use App\Models\Project;
+use App\Models\User;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
+use Illuminate\Support\Facades\Cache;
 use Tests\Support\ClickHouseIntegration as CH;
 use Tests\Support\FunnelFixtures as F;
 
@@ -441,4 +444,31 @@ it('agrees with an independent PHP computation on a seeded random dataset, mappe
     // not vacuous: eighteen comparisons, and most of them have both converted and dropped people
     expect($checked)->toBe(18)->and($nonTrivial)->toBeGreaterThanOrEqual(8);
     $this->ch->deleteRowsOf([$project]);
+});
+
+it('answers the funnel through the whole API chain: request, queue job, scoped reads, poll, and keeps the tenants apart', function () {
+    config(['insights.cache_store' => 'array', 'insights.cache_ttl_seconds' => 60, 'queue.default' => 'sync']);
+    Cache::store('array')->flush();
+    app()->instance(InsightRunner::class, new InsightRunner($this->ch->reader, Cache::store('array')));
+    $a = Project::factory()->create(['id' => CH::FUNNEL_A, 'timezone' => 'UTC']);
+    $b = Project::factory()->create(['id' => CH::FUNNEL_B, 'timezone' => 'UTC']);
+    $memberA = User::factory()->create();
+    $memberB = User::factory()->create();
+    $a->users()->attach($memberA);
+    $b->users()->attach($memberB);
+    $body = ['steps' => [['event' => 'view'], ['event' => 'cart'], ['event' => 'buy']], 'window' => ['value' => 1, 'unit' => 'day'], 'date_from' => '2026-03-10', 'date_to' => '2026-03-12'];
+
+    $post = $this->actingAs($memberA)->postJson("/api/projects/{$a->id}/insights/funnel", $body)->assertStatus(202);
+    $poll = $this->actingAs($memberA)->getJson($post->json('poll_url'))->assertOk();
+    $other = $this->actingAs($memberB)->postJson("/api/projects/{$b->id}/insights/funnel", $body)->assertStatus(202);
+    $otherPoll = $this->actingAs($memberB)->getJson($other->json('poll_url'))->assertOk();
+
+    expect($poll->json('status'))->toBe('done')
+        ->and(array_column($poll->json('result.steps'), 'count'))->toBe([4, 3, 2])
+        ->and($poll->json('result.conversion_rate'))->toBe(0.5)
+        ->and($otherPoll->json('status'))->toBe('done')
+        ->and(array_column($otherPoll->json('result.steps'), 'count'))->toBe([2, 1, 0]);
+    // B's member cannot read A's run
+    $this->actingAs($memberB)->getJson("/api/projects/{$b->id}/insights/runs/".$post->json('run_id'))->assertNotFound();
+    $this->actingAs($memberB)->getJson($post->json('poll_url'))->assertNotFound();
 });

@@ -4,6 +4,7 @@ namespace App\Http\Requests\Insights;
 
 use App\Domain\Insights\Query\DatePreset;
 use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\FilterOperator;
 use DateTimeInterface;
 use DateTimeZone;
 use Illuminate\Foundation\Http\FormRequest;
@@ -81,6 +82,37 @@ abstract class InsightRequest extends FormRequest
         $absolute = array_key_exists('date_from', $input) || array_key_exists('date_to', $input);
         if ($preset === $absolute || ($absolute && ! (array_key_exists('date_from', $input) && array_key_exists('date_to', $input)))) {
             $validator->errors()->add('date_preset', 'Send either a date_preset, or both date_from and date_to.');
+        }
+    }
+
+    /**
+     * The shape rules of a list of property filters that single-field rules cannot say: it is a LIST, each filter has
+     * exactly key, operator and value, and the value is present exactly when the operator takes one. `$path` is where the
+     * list sits in the body (`filters`, `steps.0.filters`), `$listMessage` the fixed sentence for a list that is a map.
+     */
+    protected function checkFilterShapes(Validator $validator, mixed $filters, string $path, string $listMessage): void
+    {
+        if (! is_array($filters)) {
+            return;
+        }
+        if (! array_is_list($filters)) {
+            $validator->errors()->add($path, $listMessage);
+        }
+        foreach ($filters as $i => $filter) {
+            if (! is_array($filter) || ! is_int($i)) {
+                continue;
+            }
+            if (array_diff(array_keys($filter), ['key', 'operator', 'value']) !== []) {
+                $validator->errors()->add("{$path}.{$i}", 'Each filter must be an object with key, operator and value.');
+
+                continue;
+            }
+            $operator = is_string($filter['operator'] ?? null) ? FilterOperator::tryFrom($filter['operator']) : null;
+            if ($operator !== null && $operator->needsValue() !== (($filter['value'] ?? null) !== null)) {
+                $validator->errors()->add("{$path}.{$i}.value", $operator->needsValue()
+                    ? 'This filter operator needs a value.'
+                    : 'The is_set operator takes no value.');
+            }
         }
     }
 
