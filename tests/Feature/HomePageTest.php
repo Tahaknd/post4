@@ -149,13 +149,34 @@ it('keeps the built assets free of external URLs apart from an explicit allow-li
         'http://localhost',
     ];
 
+    // The posthog-js chunk of the demo page (found by its global, not by its hashed file name) carries PostHog's own
+    // defaults and help texts as strings: the cloud hosts it would talk to WITHOUT an `api_host` (the demo always sets
+    // one, and the browser e2e proves every request stays on this origin), the host a typo'd region would use, the
+    // support/billing links of its console warnings, and the list of crawler user agents it ignores. They are pinned for
+    // the version in package.json: an SDK upgrade that adds a host fails here and must be looked at.
+    $sdkAllowed = [
+        'http://yandex.com/bots,',
+        'https://app.posthog.com',
+        'https://us.i.posthog.com',
+        'https://us.posthog.com',
+        'https://posthog.com/',
+        'https://sentry.io/organizations/',
+        'https://${this.region}',
+    ];
+
     $external = [];
+    $sdkChunks = 0;
 
     foreach ($files as $file) {
-        preg_match_all('#https?://[^\s"\'`)\\\\]+#', (string) file_get_contents($file), $found);
+        $source = (string) file_get_contents($file);
+        $isSdk = str_contains($source, '__PosthogExtensions__');
+        $sdkChunks += $isSdk ? 1 : 0;
+        $allowedHere = $isSdk ? [...$allowed, ...$sdkAllowed] : $allowed;
+
+        preg_match_all('#https?://[^\s"\'`)\\\\]+#', $source, $found);
 
         foreach ($found[0] as $url) {
-            $isAllowed = array_filter($allowed, fn (string $prefix) => str_starts_with($url, $prefix)) !== [];
+            $isAllowed = array_filter($allowedHere, fn (string $prefix) => str_starts_with($url, $prefix)) !== [];
 
             if (! $isAllowed) {
                 $external[] = basename($file).': '.$url;
@@ -163,5 +184,7 @@ it('keeps the built assets free of external URLs apart from an explicit allow-li
         }
     }
 
-    expect($external)->toBe([]);
+    expect($external)->toBe([])
+        // The SDK ships as one lazy chunk of its own (never in the main entry).
+        ->and($sdkChunks)->toBe(1);
 });
