@@ -2,6 +2,7 @@
 
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\RoSettings;
+use App\Infrastructure\ClickHouse\ScopedRelations;
 use Tests\Support\ClickHouseIntegration as CH;
 use Tests\Support\MigrationColumns;
 
@@ -210,13 +211,16 @@ it('created the view as a DEFINER view that filters on SQL_project_id', function
         ->and($rows[0]['q'])->toContain("project_id = toUInt32(getSetting('SQL_project_id'))");
 });
 
-it('grants the read-only user the view and nothing on posthog.events', function () {
-    $grants = $this->ch->admin->select('SELECT access_type, database, table FROM system.grants WHERE user_name = {u:String}', ['u' => 'posthog_ro']);
+it('grants the read-only user the scoped views (events and the person mapping) and nothing on posthog.events', function () {
+    $grants = $this->ch->admin->select('SELECT access_type, database, table FROM system.grants WHERE user_name = {u:String} ORDER BY table', ['u' => 'posthog_ro']);
 
-    expect($grants)->toHaveCount(1)
+    // The person view is covered in depth by PersonDistinctIdsClickHouseTest.
+    expect($grants)->toHaveCount(2)
         ->and($grants[0]['access_type'])->toBe('SELECT')
         ->and($grants[0]['database'])->toBe('posthog')
-        ->and($grants[0]['table'])->toBe(ProjectScopedReader::VIEW);
+        ->and($grants[0]['table'])->toBe(ProjectScopedReader::VIEW)
+        ->and($grants[1]['table'])->toBe(ScopedRelations::PERSON_DISTINCT_IDS_VIEW)
+        ->and(array_column($grants, 'table'))->not->toContain('events');
 });
 
 it('prunes the primary key through the real CTE prefix and the view as well', function () {

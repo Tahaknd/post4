@@ -65,6 +65,22 @@ final class ClickHouseIntegration
 
     public const ENRICH_B = 990802;
 
+    /**
+     * Tenants of the person mapping tests (PersonDistinctIdsClickHouseTest): A and B have rows, C never gets one; D is
+     * fed through the real Kafka topic; the two PURGE ids are for the purge job.
+     */
+    public const PERSON_A = 991001;
+
+    public const PERSON_B = 991002;
+
+    public const PERSON_C = 991003;
+
+    public const PERSON_KAFKA = 991004;
+
+    public const PERSON_PURGE_A = 991011;
+
+    public const PERSON_PURGE_B = 991012;
+
     /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
     public const TREND_D = 990204;
 
@@ -173,6 +189,91 @@ final class ClickHouseIntegration
             $params += ["u{$i}" => $m['uuid'], "p{$i}" => $m['project_id'], "e{$i}" => $m['event'], "d{$i}" => $m['distinct_id'], "props{$i}" => $m['properties'], "ts{$i}" => $m['timestamp']];
         }
         $this->admin->execute('INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '.implode(' UNION ALL ', $selects), $params);
+    }
+
+    /** Every project id the person mapping tests write rows for (the tables they clean up). */
+    public const PERSON_IDS = [self::PERSON_A, self::PERSON_B, self::PERSON_C, self::PERSON_KAFKA, self::PERSON_PURGE_A, self::PERSON_PURGE_B];
+
+    private static bool $personTouched = false;
+
+    /**
+     * Inserts rows of person_distinct_ids as the admin, each as its OWN INSERT when $separateParts (so each becomes
+     * its own part, unmerged until a background merge or OPTIMIZE), else all in ONE INSERT.
+     *
+     * @param  list<array{0: int, 1: string, 2: string, 3: int, 4: int, 5: string}>  $rows  project, distinct_id, person uuid, version, is_deleted, created_at (UTC)
+     */
+    public function insertPersonRows(array $rows, bool $separateParts = false): void
+    {
+        self::$personTouched = true;
+        $statements = $separateParts ? array_map(fn (array $row) => [$row], $rows) : [$rows];
+
+        foreach ($statements as $chunk) {
+            $selects = [];
+            $params = [];
+            foreach ($chunk as $i => [$project, $distinct, $person, $version, $deleted, $createdAt]) {
+                $selects[] = "SELECT {p{$i}:UInt32}, {d{$i}:String}, {u{$i}:UUID}, {v{$i}:UInt64}, {x{$i}:UInt8}, parseDateTime64BestEffort({t{$i}:String}, 3, 'UTC')";
+                $params += ["p{$i}" => $project, "d{$i}" => $distinct, "u{$i}" => $person, "v{$i}" => $version, "x{$i}" => $deleted, "t{$i}" => $createdAt];
+            }
+            $this->admin->execute('INSERT INTO posthog.person_distinct_ids (project_id, distinct_id, person_id, version, is_deleted, created_at) '.implode(' UNION ALL ', $selects), $params);
+        }
+    }
+
+    /**
+     * Physical rows of person_distinct_ids for these projects as the admin sees them (rows of one key count twice until merged).
+     *
+     * @param  list<int>  $projectIds
+     */
+    public function personRowCount(array $projectIds): int
+    {
+        $ids = implode(', ', array_map('intval', $projectIds));
+
+        return (int) $this->admin->select("SELECT count() AS n FROM posthog.person_distinct_ids WHERE project_id IN ({$ids})")[0]['n'];
+    }
+
+    /**
+     * Deletes the rows of these projects from person_distinct_ids (asynchronous lightweight delete, then polling until
+     * they are gone) after making sure merges run again, and removes the scratch rows they left in events_errors.
+     *
+     * @param  list<int>  $projectIds
+     */
+    public function deletePersonRowsOf(array $projectIds): void
+    {
+        $ids = implode(', ', array_map('intval', $projectIds));
+        $this->admin->execute('SYSTEM START MERGES posthog.person_distinct_ids');
+        $this->admin->execute("DELETE FROM posthog.person_distinct_ids WHERE project_id IN ({$ids})", settings: ['lightweight_deletes_sync' => 0]);
+
+        $deadline = microtime(true) + 30;
+        while ($this->personRowCount($projectIds) !== 0) {
+            if (microtime(true) > $deadline) {
+                Assert::fail("Rows of projects {$ids} were not deleted from person_distinct_ids within 30 s: remove them by hand");
+            }
+            usleep(200_000);
+        }
+
+        // Rejected messages of the Kafka test: the raw text carries the project id or the marker of a malformed one.
+        $this->admin->execute(
+            "DELETE FROM posthog.events_errors WHERE topic = 'person_distinct_ids' AND (raw LIKE {marker:String} OR raw LIKE {project:String})",
+            ['marker' => '%ch-person-test-%', 'project' => '%"project_id":'.self::PERSON_KAFKA.',%'],
+            settings: ['lightweight_deletes_sync' => 0],
+        );
+    }
+
+    /** For Pest's afterAll(): removes the person mapping tests' rows (and the events they seeded), also after a failed test. */
+    public static function cleanupPersonAfterAll(): void
+    {
+        if (! self::$personTouched) {
+            return;
+        }
+        self::$personTouched = false;
+
+        Http::swap(new Factory);
+        try {
+            $ch = self::connect();
+            $ch->deletePersonRowsOf(self::PERSON_IDS);
+            $ch->deleteRowsOf(self::PERSON_IDS);
+        } finally {
+            Facade::clearResolvedInstances();
+        }
     }
 
     /** Like cleanupAfterAll() for the enrichment tenants. */
