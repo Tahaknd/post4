@@ -35,18 +35,22 @@ arch('the scoped reader is the only class that takes the read-only client as a d
         'App\Providers\AppServiceProvider',
     ]);
 
-it('names the scoped view in no file of app/ except the reader and its docs', function () {
-    // Builders and domain code read project_events (the CTE the reader prepends), never the view or the table.
+it('names the scoped views in no file of app/ except the reader, its relation registry and their docs', function () {
+    // Builders and domain code read project_events / project_person_distinct_ids (the CTEs the reader prepends),
+    // never a view or a table.
     $allowed = [
         'Infrastructure/ClickHouse/ProjectScopedReader.php',
         'Infrastructure/ClickHouse/ReadOnlyClickHouseClient.php',
         'Infrastructure/ClickHouse/RoSettings.php',
+        'Infrastructure/ClickHouse/ScopedRelation.php',
+        'Infrastructure/ClickHouse/ScopedRelations.php',
     ];
     $offenders = [];
     foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(app_path(), FilesystemIterator::SKIP_DOTS)) as $file) {
         $relative = str_replace(app_path().'/', '', $file->getPathname());
+        $source = (string) file_get_contents($file->getPathname());
         if ($file->getExtension() === 'php' && ! in_array($relative, $allowed, true)
-            && str_contains((string) file_get_contents($file->getPathname()), 'project_events_v')) {
+            && (str_contains($source, 'project_events_v') || str_contains($source, 'project_person_distinct_ids_v'))) {
             $offenders[] = $relative;
         }
     }

@@ -3,6 +3,7 @@
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
+use App\Infrastructure\ClickHouse\ScopedRelations;
 use App\Infrastructure\ClickHouse\ScopedViewDriftCheck;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Artisan;
@@ -15,6 +16,24 @@ function commandMigrations(string $name, string $sql): string
     file_put_contents($dir.'/'.$name, $sql);
 
     return $dir;
+}
+
+/**
+ * What DESCRIBE TABLE <relation> answers when every relation is in order; $overrides replaces the columns of one relation
+ * (by the name in the statement).
+ *
+ * @param  array<string, list<string>>  $overrides
+ */
+function describeAnswer(string $body, array $overrides = []): mixed
+{
+    $name = trim(substr($body, strlen('DESCRIBE TABLE ')));
+    $columns = $overrides[$name] ?? match ($name) {
+        'events', 'project_events_v' => ProjectScopedReader::COLUMNS,
+        'person_distinct_ids' => ScopedRelations::personDistinctIds()->tableColumns(),
+        'project_person_distinct_ids_v' => ScopedRelations::PERSON_DISTINCT_IDS_COLUMNS,
+    };
+
+    return Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], $columns)]));
 }
 
 function removeDir(string $dir): void
@@ -30,9 +49,9 @@ it('reports applied migrations', function () {
     $this->app->instance(ClickHouseMigrator::class, new ClickHouseMigrator(new ClickHouseClient('http://ch:8123', 'db', 'u', 'p'), $dir));
     $this->app->instance(ScopedViewDriftCheck::class, new ScopedViewDriftCheck(new ClickHouseClient('http://ch:8123', 'db', 'u', 'p')));
     Http::fake(function ($request) {
-        // the drift check describes events and the view: both complete
+        // the drift check describes every relation and its view: all complete
         return str_starts_with($request->body(), 'DESCRIBE TABLE')
-            ? Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], ProjectScopedReader::COLUMNS)]))
+            ? describeAnswer($request->body())
             : Http::response('{"data":[]}');
     });
 
@@ -46,12 +65,9 @@ it('reports applied migrations', function () {
 it('exits non-zero with a clear message when the scoped view lacks a column of events', function () {
     $dir = commandMigrations('001_a.sql', 'SELECT 1;');
     Http::fake(function ($request) {
-        if (str_starts_with($request->body(), 'DESCRIBE TABLE project_events_v')) {
+        if (str_starts_with($request->body(), 'DESCRIBE TABLE')) {
             // the view was not refreshed after events got a new column
-            return Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], ProjectScopedReader::COLUMNS)]));
-        }
-        if (str_starts_with($request->body(), 'DESCRIBE TABLE events')) {
-            return Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], [...ProjectScopedReader::COLUMNS, 'future_column'])]));
+            return describeAnswer($request->body(), ['events' => [...ProjectScopedReader::COLUMNS, 'future_column']]);
         }
 
         return Http::response('{"data":[]}');
@@ -85,15 +101,14 @@ it('fails loudly when a migration fails', function () {
 });
 
 describe('ScopedViewDriftCheck', function () {
-    function driftCheckWith(array $events, array $view): ScopedViewDriftCheck
+    /**
+     * @param  array<string, list<string>>  $others  columns of the person relation (`person_distinct_ids`, `project_person_distinct_ids_v`)
+     */
+    function driftCheckWith(array $events, array $view, array $others = []): ScopedViewDriftCheck
     {
         // a fresh factory: stubs of an earlier fake() would win over this one
         Http::swap(new Factory);
-        Http::fake(function ($request) use ($events, $view) {
-            $columns = str_starts_with($request->body(), 'DESCRIBE TABLE project_events_v') ? $view : $events;
-
-            return Http::response(json_encode(['data' => array_map(fn ($c) => ['name' => $c], $columns)]));
-        });
+        Http::fake(fn ($request) => describeAnswer($request->body(), ['events' => $events, 'project_events_v' => $view] + $others));
 
         return new ScopedViewDriftCheck(new ClickHouseClient('http://ch:8123', 'db', 'u', 'p'));
     }
@@ -121,5 +136,21 @@ describe('ScopedViewDriftCheck', function () {
         $problems = (new ScopedViewDriftCheck(new ClickHouseClient('http://ch:8123', 'db', 'u', 'p')))->problems();
 
         expect($problems)->toHaveCount(1)->and($problems[0])->toContain('cannot read the columns');
+    });
+
+    it('checks the person relation too: the hidden is_deleted column is expected, anything else is drift', function () {
+        $table = ScopedRelations::personDistinctIds()->tableColumns();
+        $view = ScopedRelations::PERSON_DISTINCT_IDS_COLUMNS;
+
+        $ok = driftCheckWith(ProjectScopedReader::COLUMNS, ProjectScopedReader::COLUMNS, ['person_distinct_ids' => $table, 'project_person_distinct_ids_v' => $view])->problems();
+        $newColumn = driftCheckWith(ProjectScopedReader::COLUMNS, ProjectScopedReader::COLUMNS, ['person_distinct_ids' => [...$table, 'merged_at'], 'project_person_distinct_ids_v' => $view])->problems();
+        $viewMissing = driftCheckWith(ProjectScopedReader::COLUMNS, ProjectScopedReader::COLUMNS, ['person_distinct_ids' => $table, 'project_person_distinct_ids_v' => ['project_id', 'distinct_id', 'person_id']])->problems();
+        $leaksHidden = driftCheckWith(ProjectScopedReader::COLUMNS, ProjectScopedReader::COLUMNS, ['person_distinct_ids' => $table, 'project_person_distinct_ids_v' => [...$view, 'is_deleted']])->problems();
+
+        expect($ok)->toBe([])
+            ->and($newColumn[0])->toContain('person_distinct_ids table has columns ScopedRelations::PERSON_DISTINCT_IDS_COLUMNS does not list: merged_at')
+            ->and($viewMissing[0])->toContain('view project_person_distinct_ids_v lacks')->toContain('version, created_at')
+            ->and($leaksHidden[0])->toContain('view project_person_distinct_ids_v has columns')->toContain('is_deleted')
+            ->and(end($leaksHidden))->toContain('clickhouse:view-sql');
     });
 });

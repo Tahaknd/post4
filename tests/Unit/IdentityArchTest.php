@@ -48,11 +48,20 @@ it('writes persons and their distinct ids only inside the identity resolver', fu
     // (a query builder call, raw SQL, a model) would bypass all three. Deleting a project removes both tables'
     // rows through the foreign key, which needs no write here.
     $offenders = [];
+    // These name the CLICKHOUSE table of the same name (the registry of scoped relations, the project purge jobs
+    // that delete a deleted project's rows there): they never touch the Postgres tables.
+    $clickHouseSide = [
+        'Infrastructure/ClickHouse/ScopedRelations.php',
+        'Jobs/PurgeProjectRows.php',
+        'Jobs/PurgeProjectEvents.php',
+        'Jobs/PurgeProjectPersonDistinctIds.php',
+        'Infrastructure/ClickHouse/PersonDistinctIdProjectIds.php',
+    ];
 
     foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator(app_path(), FilesystemIterator::SKIP_DOTS)) as $file) {
         $relative = str_replace(app_path().'/', '', $file->getPathname());
 
-        if ($file->getExtension() !== 'php' || $relative === 'Domain/Identity/IdentityResolver.php') {
+        if ($file->getExtension() !== 'php' || $relative === 'Domain/Identity/IdentityResolver.php' || in_array($relative, $clickHouseSide, true)) {
             continue;
         }
 

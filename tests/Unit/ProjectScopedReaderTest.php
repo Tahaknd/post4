@@ -3,6 +3,7 @@
 use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
+use App\Infrastructure\ClickHouse\ScopedRelations;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\Support\MigrationColumns;
@@ -278,4 +279,93 @@ it('refuses a setting outside the read-only allow-list', function () {
     expect(fn () => $this->reader->select(1, 'SELECT 1 FROM project_events', [], ['session_id' => 'x']))
         ->toThrow(InvalidArgumentException::class, 'session_id');
     Http::assertNothingSent();
+});
+
+// --- the relation registry: the person mapping next to events ------------------------------------------------
+
+/** The prefix of SQL that names the person alias too. */
+function personScopedPrefix(): string
+{
+    return 'WITH project_events AS (SELECT '.implode(', ', ProjectScopedReader::COLUMNS).' FROM posthog.project_events_v), '
+        .'project_person_distinct_ids AS (SELECT '.implode(', ', ScopedRelations::PERSON_DISTINCT_IDS_COLUMNS).' FROM posthog.project_person_distinct_ids_v) ';
+}
+
+it('registers the events relation and the person mapping, events first, over their own views', function () {
+    $all = ScopedRelations::all();
+
+    expect(array_map(fn ($r) => $r->alias, $all))->toBe(['project_events', 'project_person_distinct_ids'])
+        ->and(array_map(fn ($r) => $r->view, $all))->toBe(['project_events_v', 'project_person_distinct_ids_v'])
+        ->and(array_map(fn ($r) => $r->table, $all))->toBe(['events', 'person_distinct_ids'])
+        ->and($all[0]->columns)->toBe(ProjectScopedReader::COLUMNS)
+        ->and($all[1]->columns)->toBe(['project_id', 'distinct_id', 'person_id', 'version', 'created_at'])
+        ->and($all[1]->hiddenColumns)->toBe(['is_deleted'])
+        ->and($all[1]->cteDefinition())->not->toContain('*');
+});
+
+it('leaves existing builder SQL byte-identical: only the events CTE, whatever else the registry holds', function (string $sql) {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    $this->reader->select(3, $sql);
+
+    Http::assertSent(fn (Request $r) => $r->body() === scopedPrefix().$sql);
+})->with([
+    'plain count' => 'SELECT count() FROM project_events',
+    'distinct_id column' => 'SELECT uniqExact(distinct_id) AS d, person_id_like FROM project_events',
+    'a word that only contains the alias' => 'SELECT 1 FROM project_events WHERE event = {e:String} AND distinct_id != {not_project_person_distinct_ids_x:String}',
+]);
+
+it('prepends the person CTE after the events CTE only when builder SQL names its alias', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+    $sql = 'SELECT count() FROM project_events AS e INNER JOIN project_person_distinct_ids AS p ON e.distinct_id = p.distinct_id';
+
+    $this->reader->select(9, $sql);
+    $this->reader->select(9, 'SELECT count() FROM project_person_distinct_ids');
+
+    Http::assertSent(fn (Request $r) => $r->body() === personScopedPrefix().$sql);
+    Http::assertSent(fn (Request $r) => $r->body() === personScopedPrefix().'SELECT count() FROM project_person_distinct_ids');
+    expect(ScopedRelations::prefixFor('SELECT 1 FROM project_events'))->toBe(ProjectScopedReader::cte());
+});
+
+it('sets SQL_project_id for a query over the person mapping exactly as for events', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    $this->reader->select(9, 'SELECT person_id FROM project_person_distinct_ids WHERE distinct_id = {d:String}', ['d' => 'x']);
+
+    Http::assertSent(fn (Request $r) => scopedQuery($r)['SQL_project_id'] === '9' && scopedQuery($r)['log_comment'] === 'project:9' && scopedQuery($r)['param_d'] === 'x');
+});
+
+it('rejects the views and base tables of the person relation and every bypass shape, and sends nothing', function (string $sql, string $needle) {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    expect(fn () => $this->reader->select(1, $sql))->toThrow(InvalidArgumentException::class, $needle);
+    Http::assertNothingSent();
+})->with([
+    'the person view' => ['SELECT 1 FROM project_person_distinct_ids_v', 'project_person_distinct_ids_v'],
+    'the person view upper case' => ['SELECT 1 FROM PROJECT_PERSON_DISTINCT_IDS_V', 'project_person_distinct_ids_v'],
+    'the person base table' => ['SELECT 1 FROM person_distinct_ids', 'person_distinct_ids'],
+    'the person base table in a join' => ['SELECT 1 FROM project_events e JOIN person_distinct_ids p ON e.distinct_id = p.distinct_id', 'person_distinct_ids'],
+    'the kafka table' => ['SELECT 1 FROM kafka_person_distinct_ids', 'kafka_person_distinct_ids'],
+    'the kafka table upper case' => ['SELECT 1 FROM KAFKA_PERSON_DISTINCT_IDS', 'kafka_person_distinct_ids'],
+    'qualified person table' => ['SELECT 1 FROM posthog.person_distinct_ids', 'posthog'],
+    'settings override next to the person alias' => ['SELECT 1 FROM project_person_distinct_ids SETTINGS SQL_project_id = 2', 'SETTINGS'],
+    'settings override in a join' => ['SELECT 1 FROM project_events e JOIN project_person_distinct_ids p ON e.distinct_id = p.distinct_id settings SQL_project_id = 2', 'SETTINGS'],
+    'person alias with a comment' => ['SELECT 1 FROM project_person_distinct_ids -- x', '--'],
+    'person alias with a string literal' => ["SELECT 1 FROM project_person_distinct_ids WHERE distinct_id = 'a'", 'string literal'],
+    'person table assembled by concat' => ["SELECT 1 FROM project_person_distinct_ids WHERE distinct_id = concat('per', 'son')", 'string literal'],
+    'mergeTreeIndex on the person table' => ["SELECT * FROM mergeTreeIndex(currentDatabase(), concat('person_', 'distinct_ids'))", 'mergeTreeIndex'],
+    'a semicolon after the person alias' => ['SELECT 1 FROM project_person_distinct_ids; SELECT 2', ';'],
+]);
+
+it('refuses a caller SQL_project_id setting on a query over the person mapping', function () {
+    Http::fake(['*' => Http::response('{"data":[]}')]);
+
+    expect(fn () => $this->reader->select(1, 'SELECT 1 FROM project_person_distinct_ids', [], ['SQL_project_id' => 2]))
+        ->toThrow(InvalidArgumentException::class, 'SQL_');
+    Http::assertNothingSent();
+});
+
+it('keeps the person alias and its column list equal to what the migrations leave in the scoped view', function () {
+    expect(ScopedRelations::PERSON_DISTINCT_IDS_COLUMNS)->toBe(['project_id', 'distinct_id', 'person_id', 'version', 'created_at'])
+        ->and(ScopedRelations::personDistinctIds()->cteDefinition())
+        ->toBe('project_person_distinct_ids AS (SELECT project_id, distinct_id, person_id, version, created_at FROM posthog.project_person_distinct_ids_v)');
 });

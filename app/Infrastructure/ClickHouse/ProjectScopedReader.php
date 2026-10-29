@@ -5,7 +5,14 @@ namespace App\Infrastructure\ClickHouse;
 use InvalidArgumentException;
 
 /**
- * The ONLY way to read events: query builders read `events` through this class and nowhere else.
+ * The ONLY way to read events (and the person mapping): query builders read them through this class and nowhere else.
+ *
+ * RELATIONS. Builder SQL reads `project_events` (always prepended, see below) and, when it names that alias, also
+ * `project_person_distinct_ids` (the deduplicated distinct id -> person mapping, Milestone 4): each is a CTE over its own
+ * DEFINER view, listed with its columns in {@see ScopedRelations}. Everything below holds for every relation: the
+ * read-only user has no privilege on any base table, each view filters on `SQL_project_id`, the reader sets that
+ * setting, and the lint refuses the view and table names. A relation other than events is prepended only when
+ * the SQL names its alias, so a query that does not use it is byte-identical to what it was before.
  *
  * TWO LAYERS
  *
@@ -41,7 +48,8 @@ use InvalidArgumentException;
  *    against them on the server), and it mechanically enforces the contract of the builder SQL (only
  *    `project_events`).
  *
- * 2) ERGONOMIC CONTRACT (second layer): builder SQL selects ONLY from the CTE named `project_events`. The
+ * 2) ERGONOMIC CONTRACT (second layer): builder SQL selects ONLY from the CTEs `project_events` and
+ * `project_person_distinct_ids` (the latter only when it names it). The
  * reader itself (see {@see self::cte()}) prepends
  *   WITH project_events AS (SELECT <COLUMNS> FROM posthog.project_events_v)
  * (an explicit column list, not `*`) and sets the `SQL_project_id` setting itself; callers cannot pass an
@@ -58,8 +66,9 @@ use InvalidArgumentException;
  *    with `concat('ev','ents')`; values go through `{name:Type}` parameters, e.g. the breakdown 'other'
  *    bucket `{other:String}`) or `$` (heredoc string literal);
  *  - must not contain the table function names of FORBIDDEN_FUNCTIONS nor the words `SETTINGS`, `FORMAT`,
- *    `INTO`, `posthog`, `system`, `events`, `project_events_v` (on word boundaries, any case)
- *    (`project_events` is allowed).
+ *    `INTO`, `posthog`, `system`, `events`, `project_events_v`, `project_person_distinct_ids_v`, `person_distinct_ids`,
+ *    `kafka_person_distinct_ids` (on word boundaries, any case) (the aliases `project_events` and
+ *    `project_person_distinct_ids` are allowed).
  * The lint is NOT an SQL parser and the forbidden list is a BLACKLIST: when ClickHouse adds a new table
  * function (version upgrade), review the list. The real protection is the view and the grants on the server.
  *
@@ -67,7 +76,7 @@ use InvalidArgumentException;
  */
 class ProjectScopedReader
 {
-    /** The only relation builder SQL can read. */
+    /** The CTE of the events relation (always prepended); see {@see ScopedRelations} for the others. */
     public const CTE_NAME = 'project_events';
 
     /**
@@ -112,8 +121,21 @@ class ProjectScopedReader
         'viewIfPermitted', 'loop', 'information_schema',
     ];
 
-    /** Words that are forbidden on word boundaries, any case. */
-    private const FORBIDDEN_WORDS = ['SETTINGS', 'FORMAT', 'INTO', 'posthog', 'system', 'events', self::VIEW];
+    /**
+     * Words that are forbidden on word boundaries, any case: the SQL keywords that could change the query shape, the
+     * databases, and EVERY view and base table of the relations (builders reach them only through the CTE alias;
+     * `\b` does not match inside `project_events` or `project_person_distinct_ids`, so the aliases stay allowed).
+     */
+    private const FORBIDDEN_WORDS = [
+        'SETTINGS', 'FORMAT', 'INTO', 'posthog', 'system', 'events', self::VIEW,
+        ScopedRelations::PERSON_DISTINCT_IDS_VIEW, ScopedRelations::PERSON_DISTINCT_IDS_TABLE, ScopedRelations::KAFKA_PERSON_DISTINCT_IDS_TABLE,
+    ];
+
+    /** Forbidden words that name a database or a relation (the hint says to use the CTE alias instead). */
+    private const RELATION_WORDS = [
+        'events', 'posthog', self::VIEW,
+        ScopedRelations::PERSON_DISTINCT_IDS_VIEW, ScopedRelations::PERSON_DISTINCT_IDS_TABLE, ScopedRelations::KAFKA_PERSON_DISTINCT_IDS_TABLE,
+    ];
 
     /** Forbidden plain-text fragments => the name shown in the error message. */
     private const FORBIDDEN_TOKENS = [
@@ -154,10 +176,10 @@ class ProjectScopedReader
         $settings += [RoSettings::LOG_COMMENT => 'project:'.$projectId];
         $settings[RoSettings::SQL_PROJECT_ID] = $projectId;
 
-        return $this->client->select(self::cte().$sql, $params, $settings, $timeout);
+        return $this->client->select(ScopedRelations::prefixFor($sql).$sql, $params, $settings, $timeout);
     }
 
-    /** `WITH project_events AS (SELECT <COLUMNS> FROM posthog.project_events_v) `. */
+    /** `WITH project_events AS (SELECT <COLUMNS> FROM posthog.project_events_v) `: the prefix of SQL that names no other relation. */
     public static function cte(): string
     {
         return 'WITH '.self::CTE_NAME.' AS (SELECT '.implode(', ', self::COLUMNS).' FROM posthog.'.self::VIEW.') ';
@@ -178,7 +200,7 @@ class ProjectScopedReader
         foreach (self::FORBIDDEN_WORDS as $word) {
             if (preg_match('/\b'.$word.'\b/i', $sql) === 1) {
                 $shown = strtoupper($word) === $word ? $word : "'{$word}'";
-                $hint = in_array($word, ['events', 'posthog', self::VIEW], true) ? ' (the table is only reachable through '.self::CTE_NAME.')' : '';
+                $hint = in_array($word, self::RELATION_WORDS, true) ? ' (relations are only reachable through their CTE: '.self::CTE_NAME.', '.ScopedRelations::PERSON_DISTINCT_IDS_ALIAS.')' : '';
                 throw new InvalidArgumentException("Project scoped SQL must not contain the word {$shown}{$hint}");
             }
         }
