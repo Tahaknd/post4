@@ -4,7 +4,8 @@ namespace App\Domain\Capture;
 
 use Illuminate\Http\Request;
 
-final class PayloadDecoder
+/** Not final only so a test can spy on whether a request was decoded (tests/Feature/SdkStubsTest.php). */
+class PayloadDecoder
 {
     /**
      * @param  int  $maxDecodedBytes  Upper bound for a gunzipped body. json_decode amplifies memory

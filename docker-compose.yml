@@ -51,6 +51,9 @@ x-app: &app
     CAPTURE_PROJECT_EVENTS_PER_MINUTE: ${CAPTURE_PROJECT_EVENTS_PER_MINUTE:-60000}
     CAPTURE_AUTH_FAIL_LIMIT: ${CAPTURE_AUTH_FAIL_LIMIT:-120}
     CAPTURE_AUTH_FAIL_WINDOW_SECONDS: ${CAPTURE_AUTH_FAIL_WINDOW_SECONDS:-60}
+    CAPTURE_BLOCKED_DECODE_MAX_BYTES: ${CAPTURE_BLOCKED_DECODE_MAX_BYTES:-16384}
+    CAPTURE_STUB_MAX_BODY_BYTES: ${CAPTURE_STUB_MAX_BODY_BYTES:-65536}
+    CAPTURE_STUB_CALLS_PER_MINUTE: ${CAPTURE_STUB_CALLS_PER_MINUTE:-600}
     # Enrichment (browser/os/device from the User-Agent, optional GeoIP). Explicit defaults on purpose: an empty
     # value would be read as false/0. CAPTURE_STORE_IP=false is the privacy default: `$ip` is used for the GeoIP
     # lookup and then dropped (PostHog keeps it).

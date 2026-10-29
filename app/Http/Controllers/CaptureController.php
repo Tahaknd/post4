@@ -12,7 +12,7 @@ use App\Domain\Capture\ProducerUnavailable;
 use App\Domain\Capture\ProjectRateLimiter;
 use App\Domain\Capture\ProjectResolver;
 use App\Domain\Capture\TooManyEvents;
-use App\Http\Controllers\Concerns\AnswersCaptureErrors;
+use App\Http\Controllers\Concerns\AnswersSdkRequests;
 use App\Support\RateLimit\LimiterOutage;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
@@ -22,7 +22,7 @@ use Illuminate\Support\Facades\Log;
 
 final class CaptureController extends Controller
 {
-    use AnswersCaptureErrors;
+    use AnswersSdkRequests;
 
     /** Per-hour drop counters read by `capture:status`: capture-dropped:{project_id}:{YmdH} (UTC). */
     public const DROPPED_KEY_PREFIX = 'capture-dropped:';
@@ -43,9 +43,10 @@ final class CaptureController extends Controller
         FailureLimiter $failures,
         ProjectRateLimiter $projectLimiter,
     ): JsonResponse {
-        // 1. Body size.
-        if ($this->bodyTooLarge($request)) {
-            return $this->error(413, 'payload_too_large', 'Request body is too large');
+        // 1. Body size, and a bare 429 for a blocked ip's big body (before anything is decoded).
+        $rejected = $this->guardBody($request, $failures, (int) config('capture.max_body_bytes'));
+        if ($rejected !== null) {
+            return $rejected;
         }
 
         // Per-IP limiter for UNAUTHENTICATED outcomes only; the policy is in FailureLimiter's docblock.
@@ -66,15 +67,9 @@ final class CaptureController extends Controller
         }
 
         // 4. Authenticate before normalizing or producing anything.
-        try {
-            $projectId = $payload->apiKey !== null ? $projects->resolve($payload->apiKey) : null;
-        } catch (\Throwable $e) {
-            Log::error('capture project lookup failed', ['exception' => $e::class]);
-
-            return $this->unavailable('service_unavailable', 'Project lookup is unavailable, retry later', 5);
-        }
-        if ($projectId === null) {
-            return $this->unauthenticated($failures, $clientIp, 401, 'invalid_api_key', 'API key is missing or invalid');
+        $projectId = $this->authenticate($request, $payload->apiKey, $projects, $failures);
+        if ($projectId instanceof JsonResponse) {
+            return $projectId;
         }
 
         // 5. Reserve the project's event budget before any normalising work, so a spent project costs

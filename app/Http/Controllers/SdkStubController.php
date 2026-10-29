@@ -3,90 +3,93 @@
 namespace App\Http\Controllers;
 
 use App\Domain\Capture\FailureLimiter;
+use App\Domain\Capture\FlagEvaluation;
+use App\Domain\Capture\FlagEvaluator;
+use App\Domain\Capture\FlagRequest;
 use App\Domain\Capture\InvalidPayload;
 use App\Domain\Capture\PayloadDecoder;
 use App\Domain\Capture\ProjectResolver;
 use App\Domain\Capture\SdkStubs;
-use App\Http\Controllers\Concerns\AnswersCaptureErrors;
+use App\Domain\Capture\StubCallLimiter;
+use App\Http\Controllers\Concerns\AnswersSdkRequests;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
-use Illuminate\Support\Facades\Log;
 
 /**
- * STUBS for the posthog-js endpoints that are not implemented yet: remote config and feature flags (answers and the
- * verified SDK behaviour: App\Domain\Capture\SdkStubs). Milestone 7 replaces `flags`/`decide` with real flag
- * evaluation; the project id they resolve here is the input it needs.
+ * The posthog-js endpoints that are not fully implemented yet: remote config (a stub, App\Domain\Capture\SdkStubs) and
+ * feature flags (`/flags`, `/decide`: thin presenters over the FlagEvaluator, which answers "no flags" until
+ * Milestone 7). The M7 plug-in point is documented on FlagEvaluator; the project id resolved here is its input.
  *
- * Like capture they run with no middleware at all (routes/capture.php): no session, no cookie, no CSRF. They are
- * public, so the token is checked against ProjectResolver (its cache first, a database read only for an unknown
- * token) and a failed check counts against the same per-ip FailureLimiter as capture. They are not events: the
- * per-project budget (ProjectRateLimiter) is never consumed.
+ * Like capture they run with no middleware at all (routes/capture.php): no session, cookie or CSRF. They are public, so
+ * the token is checked against ProjectResolver (its cache first, a database read only for an unknown token) and a
+ * failed check counts against the same per-ip FailureLimiter as capture. Their bodies are capped at
+ * `capture.stub_max_body_bytes` and an ip may make `capture.stub_calls_per_minute` successful calls (StubCallLimiter).
+ * They are not events: the per-project budget (ProjectRateLimiter) is never consumed.
  */
 final class SdkStubController extends Controller
 {
-    use AnswersCaptureErrors;
+    use AnswersSdkRequests;
 
     /**
      * GET /array/{token}/config: the remote config as JSON. Cacheable for a minute by the browser only (`private`):
      * the answer is the same for every valid token, and it tells nothing but "this token exists", which the asker
      * already knows. Never stored by shared caches, so a deleted project is not served from a proxy.
      */
-    public function config(Request $request, string $token, ProjectResolver $projects, FailureLimiter $failures): JsonResponse
+    public function config(Request $request, string $token, ProjectResolver $projects, FailureLimiter $failures, StubCallLimiter $calls): JsonResponse
     {
-        $failure = $this->rejectUnknownToken($request, $token, $projects, $failures);
-        if ($failure !== null) {
-            return $failure;
+        $projectId = $this->admit($request, $token, $projects, $failures, $calls);
+        if ($projectId instanceof JsonResponse) {
+            return $projectId;
         }
 
-        return response()->json(SdkStubs::remoteConfig($token))
+        return response()->json(SdkStubs::remoteConfig($projectId, $token))
             ->header('Cache-Control', 'private, max-age=60')
             ->header('X-Content-Type-Options', 'nosniff');
     }
 
     /** GET /array/{token}/config.js: the same config as the script the SDK loads first. */
-    public function configScript(Request $request, string $token, ProjectResolver $projects, FailureLimiter $failures): Response|JsonResponse
+    public function configScript(Request $request, string $token, ProjectResolver $projects, FailureLimiter $failures, StubCallLimiter $calls): Response|JsonResponse
     {
-        $failure = $this->rejectUnknownToken($request, $token, $projects, $failures);
-        if ($failure !== null) {
-            return $failure;
+        $projectId = $this->admit($request, $token, $projects, $failures, $calls);
+        if ($projectId instanceof JsonResponse) {
+            return $projectId;
         }
 
-        return response(SdkStubs::remoteConfigScript($token), 200, [
+        return response(SdkStubs::remoteConfigScript($projectId, $token), 200, [
             'Content-Type' => 'application/javascript; charset=utf-8',
             'Cache-Control' => 'private, max-age=60',
             'X-Content-Type-Options' => 'nosniff',
         ]);
     }
 
-    /** POST /flags (also /flags/): the answer of the current SDKs, no flag exists. */
-    public function flags(Request $request, PayloadDecoder $decoder, ProjectResolver $projects, FailureLimiter $failures): JsonResponse
+    /** POST /flags (also /flags/): the answer of the current SDKs. */
+    public function flags(Request $request, PayloadDecoder $decoder, ProjectResolver $projects, FailureLimiter $failures, StubCallLimiter $calls, FlagEvaluator $evaluator): JsonResponse
     {
-        return $this->answerFlagRequest($request, $decoder, $projects, $failures, SdkStubs::flags(...));
+        return $this->answerFlagRequest($request, $decoder, $projects, $failures, $calls, $evaluator, SdkStubs::flags(...));
     }
 
-    /** POST /decide (also /decide/): the answer of SDKs that predate /flags, no flag exists. */
-    public function decide(Request $request, PayloadDecoder $decoder, ProjectResolver $projects, FailureLimiter $failures): JsonResponse
+    /** POST /decide (also /decide/): the answer of SDKs that predate /flags. */
+    public function decide(Request $request, PayloadDecoder $decoder, ProjectResolver $projects, FailureLimiter $failures, StubCallLimiter $calls, FlagEvaluator $evaluator): JsonResponse
     {
-        return $this->answerFlagRequest($request, $decoder, $projects, $failures, SdkStubs::decide(...));
+        return $this->answerFlagRequest($request, $decoder, $projects, $failures, $calls, $evaluator, SdkStubs::decide(...));
     }
 
     /**
-     * @param  callable(): array<string, mixed>  $answer
+     * @param  callable(FlagEvaluation): array<string, mixed>  $present
      */
-    private function answerFlagRequest(Request $request, PayloadDecoder $decoder, ProjectResolver $projects, FailureLimiter $failures, callable $answer): JsonResponse
+    private function answerFlagRequest(Request $request, PayloadDecoder $decoder, ProjectResolver $projects, FailureLimiter $failures, StubCallLimiter $calls, FlagEvaluator $evaluator, callable $present): JsonResponse
     {
-        // The ip is the trusted proxy aware one (`$request->ip()`), never a raw X-Forwarded-For.
-        $clientIp = (string) $request->ip();
-
-        if ($this->bodyTooLarge($request)) {
-            return $this->error(413, 'payload_too_large', 'Request body is too large');
+        $rejected = $this->guardBody($request, $failures, (int) config('capture.stub_max_body_bytes'))
+            ?? $this->overCallBudget($request, $calls);
+        if ($rejected !== null) {
+            return $rejected;
         }
 
         try {
             $body = $decoder->decodeObject($request);
         } catch (InvalidPayload $e) {
-            return $this->unauthenticated($failures, $clientIp, 400, 'invalid_payload', $e->getMessage());
+            return $this->unauthenticated($failures, (string) $request->ip(), 400, 'invalid_payload', $e->getMessage());
         }
 
         // posthog-js sends `token`; server SDKs and old clients send `api_key`.
@@ -98,34 +101,37 @@ final class SdkStubController extends Controller
             }
         }
 
-        $failure = $this->rejectUnknownToken($request, $token, $projects, $failures);
-        if ($failure !== null) {
-            return $failure;
+        $projectId = $this->authenticate($request, $token, $projects, $failures);
+        if ($projectId instanceof JsonResponse) {
+            return $projectId;
         }
+        $calls->hit((string) $request->ip());
 
-        return response()->json($answer())
+        return response()->json($present($evaluator->evaluate(FlagRequest::fromBody($projectId, $body))))
             ->header('Cache-Control', 'no-store')
             ->header('X-Content-Type-Options', 'nosniff');
     }
 
-    /**
-     * Null when the token belongs to a project, otherwise the answer to give: 401 (counted against the ip), 429 when
-     * the ip is blocked, 503 when the lookup itself failed.
-     */
-    private function rejectUnknownToken(Request $request, ?string $token, ProjectResolver $projects, FailureLimiter $failures): ?JsonResponse
+    /** The GET endpoints: no body to decode, the same gates and the same token check. */
+    private function admit(Request $request, string $token, ProjectResolver $projects, FailureLimiter $failures, StubCallLimiter $calls): int|JsonResponse
     {
-        try {
-            $projectId = $token !== null ? $projects->resolve($token) : null;
-        } catch (\Throwable $e) {
-            Log::error('sdk stub project lookup failed', ['exception' => $e::class]);
-
-            return $this->unavailable('service_unavailable', 'Project lookup is unavailable, retry later', 5);
+        $rejected = $this->overCallBudget($request, $calls);
+        if ($rejected !== null) {
+            return $rejected;
         }
 
-        if ($projectId === null) {
-            return $this->unauthenticated($failures, (string) $request->ip(), 401, 'invalid_api_key', 'API key is missing or invalid');
+        $projectId = $this->authenticate($request, $token, $projects, $failures);
+        if (! $projectId instanceof JsonResponse) {
+            $calls->hit((string) $request->ip());
         }
 
-        return null;
+        return $projectId;
+    }
+
+    private function overCallBudget(Request $request, StubCallLimiter $calls): ?JsonResponse
+    {
+        $retryAfter = $calls->exceededFor((string) $request->ip());
+
+        return $retryAfter === null ? null : $this->unavailable('too_many_requests', 'Too many requests, retry later', $retryAfter, 429);
     }
 }

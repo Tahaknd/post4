@@ -22,6 +22,22 @@ return [
     'auth_fail_window_seconds' => (int) env('CAPTURE_AUTH_FAIL_WINDOW_SECONDS', 60),
 
     /*
+     * A body above this many bytes from an ip that is blocked by the failure limiter is answered with a bare 429
+     * without decoding it (env CAPTURE_BLOCKED_DECODE_MAX_BYTES). Smaller bodies are decoded as usual, so a valid key
+     * behind a shared address keeps working. See AnswersSdkRequests::guardBody().
+     */
+    'blocked_decode_max_bytes' => (int) env('CAPTURE_BLOCKED_DECODE_MAX_BYTES', 16384),
+
+    /*
+     * The SDK stubs (remote config, /flags, /decide): body cap in bytes (env CAPTURE_STUB_MAX_BODY_BYTES, over it 413;
+     * a flag request is a few kB) and the most SUCCESSFUL calls per client ip and minute, config, flags and decide
+     * together (env CAPTURE_STUB_CALLS_PER_MINUTE; over it 429 + Retry-After; 0 disables). Failed calls are bounded by
+     * the failure limiter above, not by this one.
+     */
+    'stub_max_body_bytes' => (int) env('CAPTURE_STUB_MAX_BODY_BYTES', 65536),
+    'stub_calls_per_minute' => (int) env('CAPTURE_STUB_CALLS_PER_MINUTE', 600),
+
+    /*
      * Interim per-project ingest cap: producible events accepted per fixed one-minute window (env
      * CAPTURE_PROJECT_EVENTS_PER_MINUTE). The public key is readable from any web page, so without it
      * a valid key can post unlimited events. 0 or negative disables the cap.

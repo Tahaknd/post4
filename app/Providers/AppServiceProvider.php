@@ -6,7 +6,9 @@ use App\Domain\Capture\Enricher;
 use App\Domain\Capture\Enrichment\MmdbGeoLookup;
 use App\Domain\Capture\Enrichment\UserAgentParser;
 use App\Domain\Capture\EventProducer;
+use App\Domain\Capture\FlagEvaluator;
 use App\Domain\Capture\KafkaLagProbe;
+use App\Domain\Capture\NoFlagsEvaluator;
 use App\Domain\Capture\PayloadDecoder;
 use App\Domain\Insights\Events\EventNames;
 use App\Domain\Insights\InsightRunner;
@@ -108,6 +110,9 @@ class AppServiceProvider extends ServiceProvider
             (bool) config('capture.store_raw_user_agent'),
             (int) config('capture.enrichment.max_ua_parses_per_request'),
         ));
+
+        // Milestone 7 binds the real flag evaluation here (see FlagEvaluator).
+        $this->app->bind(FlagEvaluator::class, NoFlagsEvaluator::class);
 
         $this->app->singleton(PayloadDecoder::class, fn () => new PayloadDecoder(
             (int) config('capture.max_decoded_bytes'),

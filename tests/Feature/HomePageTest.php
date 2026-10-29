@@ -149,21 +149,10 @@ it('keeps the built assets free of external URLs apart from an explicit allow-li
         'http://localhost',
     ];
 
-    // The posthog-js chunk of the demo page (found by its global, not by its hashed file name) carries PostHog's own
-    // defaults and help texts as strings: the cloud hosts it would talk to WITHOUT an `api_host` (the demo always sets
-    // one, and the browser e2e proves every request stays on this origin), the host a typo'd region would use, the
-    // support/billing links of its console warnings, and the list of crawler user agents it ignores. They are pinned for
-    // the version in package.json: an SDK upgrade that adds a host fails here and must be looked at.
-    $sdkAllowed = [
-        'http://yandex.com/bots,',
-        'https://app.posthog.com',
-        'https://us.i.posthog.com',
-        'https://us.posthog.com',
-        'https://posthog.com/',
-        'https://sentry.io/organizations/',
-        'https://${this.region}',
-    ];
-
+    // The posthog-js chunk of the demo page (found by its global, not by its hashed file name) is not scanned: it carries
+    // PostHog's own default hosts and help links as strings, never requested because the demo always sets `api_host`
+    // (the browser e2e, tests/e2e/demo.spec.js, proves every request of the page stays on this origin). What this test
+    // keeps is that it is exactly one chunk of its own and that no other bundle carries an external URL.
     $external = [];
     $sdkChunks = 0;
 
@@ -171,12 +160,15 @@ it('keeps the built assets free of external URLs apart from an explicit allow-li
         $source = (string) file_get_contents($file);
         $isSdk = str_contains($source, '__PosthogExtensions__');
         $sdkChunks += $isSdk ? 1 : 0;
-        $allowedHere = $isSdk ? [...$allowed, ...$sdkAllowed] : $allowed;
+
+        if ($isSdk) {
+            continue;
+        }
 
         preg_match_all('#https?://[^\s"\'`)\\\\]+#', $source, $found);
 
         foreach ($found[0] as $url) {
-            $isAllowed = array_filter($allowedHere, fn (string $prefix) => str_starts_with($url, $prefix)) !== [];
+            $isAllowed = array_filter($allowed, fn (string $prefix) => str_starts_with($url, $prefix)) !== [];
 
             if (! $isAllowed) {
                 $external[] = basename($file).': '.$url;

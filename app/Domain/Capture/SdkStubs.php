@@ -2,13 +2,11 @@
 
 namespace App\Domain\Capture;
 
-use Illuminate\Support\Str;
-
 /**
- * The answers of the posthog-js SDK endpoints that this server does not implement yet: remote config
- * (`/array/{token}/config`, `config.js`) and feature flags (`/flags`, `/decide`). They are STUBS: every project gets
- * the same "nothing enabled" answer. Milestone 7 replaces the flag answers with real evaluation (the token is already
- * resolved to a project id by SdkStubController, so the evaluator plugs in there).
+ * The answers of the posthog-js SDK endpoints that this server only partly implements: remote config
+ * (`/array/{token}/config`, `config.js`) and feature flags (`/flags`, `/decide`). The config is a STUB: every project
+ * gets the same "nothing enabled" answer. The flag answers are PRESENTERS: they only shape a FlagEvaluation, which
+ * comes from the bound FlagEvaluator (NoFlagsEvaluator until Milestone 7, see FlagEvaluator for the plug-in point).
  *
  * Verified against posthog-js 1.438.24 (@posthog/browser-common 0.9.12), the version resources/js pins:
  *  - RemoteConfigLoader asks for `/array/{token}/config.js` (a script tag, `crossorigin=anonymous`) when the bundle has
@@ -27,8 +25,9 @@ final class SdkStubs
     /**
      * @return array<string, mixed>
      */
-    public static function remoteConfig(string $token): array
+    public static function remoteConfig(int $projectId, string $token): array
     {
+        // $projectId is unused until Milestone 7 makes `hasFeatureFlags` (and the product switches) depend on the project.
         return [
             'token' => $token,
             // `gzip-js`: the capture endpoints gunzip bodies (PayloadDecoder). Without this key the SDK sends events uncompressed.
@@ -53,48 +52,48 @@ final class SdkStubs
     }
 
     /** The script variant: what `window._POSTHOG_REMOTE_CONFIG[token]` is read from. */
-    public static function remoteConfigScript(string $token): string
+    public static function remoteConfigScript(int $projectId, string $token): string
     {
         $flags = JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
         $key = json_encode($token, $flags);
-        $value = json_encode(['config' => self::remoteConfig($token), 'siteApps' => []], $flags);
+        $value = json_encode(['config' => self::remoteConfig($projectId, $token), 'siteApps' => []], $flags);
 
         return "window._POSTHOG_REMOTE_CONFIG = window._POSTHOG_REMOTE_CONFIG || {};\nwindow._POSTHOG_REMOTE_CONFIG[{$key}] = {$value};\n";
     }
 
     /**
-     * Answer of `/flags`: no flag exists. `requestId` is a fresh UUID per answer, as PostHog sends it.
+     * Answer of `/flags` (the v2 shape of posthog-js) for an evaluation. The maps are always JSON objects, also when empty.
      *
      * @return array<string, mixed>
      */
-    public static function flags(): array
+    public static function flags(FlagEvaluation $evaluation): array
     {
         return [
             'config' => ['enable_collect_everything' => true],
             'toolbarParams' => (object) [],
             'isAuthenticated' => false,
             'supportedCompression' => ['gzip-js'],
-            'flags' => (object) [],
-            'errorsWhileComputingFlags' => false,
-            'quotaLimited' => [],
-            'requestId' => (string) Str::uuid(),
+            'flags' => (object) $evaluation->flags,
+            'errorsWhileComputingFlags' => $evaluation->errorsWhileComputingFlags,
+            'quotaLimited' => array_values($evaluation->quotaLimited),
+            'requestId' => $evaluation->requestId,
         ];
     }
 
     /**
-     * Answer of the legacy `/decide`: the same "nothing enabled", with the config keys older SDKs read from it.
+     * Answer of the legacy `/decide`: the same evaluation, with the config keys older SDKs read from it.
      *
      * @return array<string, mixed>
      */
-    public static function decide(): array
+    public static function decide(FlagEvaluation $evaluation): array
     {
         return [
             'config' => ['enable_collect_everything' => true],
-            'featureFlags' => (object) [],
-            'featureFlagPayloads' => (object) [],
-            'flags' => (object) [],
-            'errorsWhileComputingFlags' => false,
-            'quotaLimited' => [],
+            'featureFlags' => (object) $evaluation->featureFlags,
+            'featureFlagPayloads' => (object) $evaluation->featureFlagPayloads,
+            'flags' => (object) $evaluation->flags,
+            'errorsWhileComputingFlags' => $evaluation->errorsWhileComputingFlags,
+            'quotaLimited' => array_values($evaluation->quotaLimited),
             'sessionRecording' => false,
             'surveys' => false,
             'heatmaps' => false,
