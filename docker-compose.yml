@@ -8,6 +8,8 @@ x-logging: &logging
     max-file: "3"
 
 x-app: &app
+  # The default tag is shared by every checkout on this machine: give a second checkout its own APP_IMAGE (see
+  # .env.example), otherwise building it retags this one's image.
   image: ${APP_IMAGE:-post4-app}
   # app has `build: .`, worker and scheduler share its image and have no build section. `never` stops all
   # three from trying to pull `post4-app` from a registry on a fresh clone (it does not exist there, and
