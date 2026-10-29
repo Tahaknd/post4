@@ -110,6 +110,11 @@ jobs:
       - name: Postgres group
         run: docker compose exec -T -e POSTGRES_INTEGRATION_HOST=postgres app php artisan test --group=postgres
 
+      # Starts the throwaway postgres-test service (profile `test`, tmpfs), runs tests/Integration with
+      # phpunit.pgsql.xml in the app container and removes the service again.
+      - name: Postgres integration suite (identity)
+        run: scripts/test-postgres.sh
+
       # The geoip group needs a licensed MaxMind database (GEOIP_TEST_DB=/path/to/file.mmdb): skipped on purpose.
 
       - name: Capture smoke test (HTTP -> Kafka -> ClickHouse)

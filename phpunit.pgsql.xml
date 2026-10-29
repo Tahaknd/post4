@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Opt-in suite against a REAL Postgres: advisory locks, jsonb and concurrent sessions do not exist in SQLite.
+  Runs only tests/Integration; the default phpunit.xml never does.
+
+    scripts/test-postgres.sh        starts the postgres-test service (compose profile `test`, tmpfs), runs
+                                    vendor/bin/pest -c phpunit.pgsql.xml in the app container, removes the service
+
+  Every database setting is force-pinned, in <env> AND <server> (Laravel reads either), to the throwaway service of
+  docker-compose.yml. tests/TestCase.php refuses to run unless the connection is exactly this one: TESTS_ALLOW_PGSQL=1,
+  host `postgres-test`, a database name ending in `_test`, no DB_URL. Do not point these at any other server: the
+  suite truncates every table and runs migrate:fresh on it.
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+    <php>
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4"/>
+        <env name="BROADCAST_CONNECTION" value="null"/>
+        <env name="CACHE_STORE" value="array" force="true"/>
+        <env name="DB_CONNECTION" value="pgsql" force="true"/>
+        <env name="DB_HOST" value="postgres-test" force="true"/>
+        <env name="DB_PORT" value="5432" force="true"/>
+        <env name="DB_DATABASE" value="posthog_test" force="true"/>
+        <env name="DB_USERNAME" value="posthog_test" force="true"/>
+        <env name="DB_PASSWORD" value="posthog_test" force="true"/>
+        <env name="TESTS_ALLOW_PGSQL" value="1" force="true"/>
+        <env name="DB_URL" value="" force="true"/>
+        <env name="REDIS_URL" value="" force="true"/>
+        <env name="REDIS_HOST" value="127.0.0.1" force="true"/>
+        <env name="REDIS_PORT" value="6399" force="true"/>
+        <env name="CLICKHOUSE_URL" value="http://127.0.0.1:1" force="true"/>
+        <env name="KAFKA_BROKERS" value="127.0.0.1:1" force="true"/>
+        <env name="LOG_CHANNEL" value="null" force="true"/>
+        <env name="CAPTURE_PROJECT_EVENTS_PER_MINUTE" value="60000" force="true"/>
+        <env name="CAPTURE_AUTH_FAIL_LIMIT" value="120" force="true"/>
+        <env name="CAPTURE_AUTH_FAIL_WINDOW_SECONDS" value="60" force="true"/>
+        <env name="OCTANE_WORKERS" value="4" force="true"/>
+        <env name="OCTANE_MAX_REQUESTS" value="500" force="true"/>
+        <env name="CLICKHOUSE_RO_PASSWORD" value="posthog_ro" force="true"/>
+        <env name="APP_KEY" value="base64:Ce5G4GmiUVXannm654GanbHgZ1SueerpQTjdyJxXfoI=" force="true"/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <env name="SESSION_DRIVER" value="array" force="true"/>
+        <env name="PULSE_ENABLED" value="false"/>
+        <env name="TELESCOPE_ENABLED" value="false"/>
+        <env name="NIGHTWATCH_ENABLED" value="false"/>
+        <server name="APP_ENV" value="testing" force="true"/>
+        <server name="CACHE_STORE" value="array" force="true"/>
+        <server name="DB_CONNECTION" value="pgsql" force="true"/>
+        <server name="DB_HOST" value="postgres-test" force="true"/>
+        <server name="DB_PORT" value="5432" force="true"/>
+        <server name="DB_DATABASE" value="posthog_test" force="true"/>
+        <server name="DB_USERNAME" value="posthog_test" force="true"/>
+        <server name="DB_PASSWORD" value="posthog_test" force="true"/>
+        <server name="TESTS_ALLOW_PGSQL" value="1" force="true"/>
+        <server name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <server name="SESSION_DRIVER" value="array" force="true"/>
+        <server name="DB_URL" value="" force="true"/>
+        <server name="REDIS_URL" value="" force="true"/>
+        <server name="REDIS_HOST" value="127.0.0.1" force="true"/>
+        <server name="REDIS_PORT" value="6399" force="true"/>
+        <server name="CLICKHOUSE_URL" value="http://127.0.0.1:1" force="true"/>
+        <server name="KAFKA_BROKERS" value="127.0.0.1:1" force="true"/>
+        <server name="LOG_CHANNEL" value="null" force="true"/>
+        <server name="CAPTURE_PROJECT_EVENTS_PER_MINUTE" value="60000" force="true"/>
+        <server name="CAPTURE_AUTH_FAIL_LIMIT" value="120" force="true"/>
+        <server name="CAPTURE_AUTH_FAIL_WINDOW_SECONDS" value="60" force="true"/>
+        <server name="OCTANE_WORKERS" value="4" force="true"/>
+        <server name="OCTANE_MAX_REQUESTS" value="500" force="true"/>
+        <server name="CLICKHOUSE_RO_PASSWORD" value="posthog_ro" force="true"/>
+        <server name="APP_KEY" value="base64:Ce5G4GmiUVXannm654GanbHgZ1SueerpQTjdyJxXfoI=" force="true"/>
+    </php>
+</phpunit>

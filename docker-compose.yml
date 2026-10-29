@@ -211,6 +211,38 @@ services:
       timeout: 3s
       retries: 20
 
+  # Opt-in test database (profile `test`: a plain `docker compose up` never starts it). The identity tests need
+  # a real Postgres (advisory locks, jsonb, concurrent sessions), which SQLite cannot provide, and they must never
+  # run against the live `postgres` service above. Everything about this one is different on purpose, so a
+  # mistaken environment cannot connect the two: host `postgres-test`, database `posthog_test`, its own user and
+  # password (fixed, because the service is not published on any port and is gone when it stops), data on tmpfs
+  # (nothing survives a stop, nothing is written to a volume), durability switched off for speed.
+  # tests/TestCase.php accepts a Postgres connection only for exactly this host (see tests/Support/TestDatabaseGuard).
+  # Run the suite with scripts/test-postgres.sh, which starts the service, runs
+  #   docker compose exec -T app vendor/bin/pest -c phpunit.pgsql.xml
+  # and removes the service again; the equivalent by hand is
+  #   docker compose --profile test up -d --wait postgres-test
+  #   docker compose exec -T app vendor/bin/pest -c phpunit.pgsql.xml
+  #   docker compose --profile test rm -sfv postgres-test
+  postgres-test:
+    profiles: ["test"]
+    image: postgres:17-alpine
+    restart: "no"
+    logging: *logging
+    mem_limit: 384m
+    environment:
+      POSTGRES_DB: posthog_test
+      POSTGRES_USER: posthog_test
+      POSTGRES_PASSWORD: posthog_test
+    tmpfs:
+      - /var/lib/postgresql/data:size=256m
+    command: ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off", "-c", "max_connections=60"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U posthog_test -d posthog_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Main Redis: database 0 = queues and Horizon, 1 = cache and limiters. Sessions are NOT here any more (see
   # redis-sessions). maxmemory is per instance, so the policy has to suit both databases:
   #   volatile-ttl evicts only keys that have an expiry, soonest-expiring first, and never touches the
