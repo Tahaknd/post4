@@ -5,6 +5,7 @@ use App\Domain\Insights\Query\FilterOperator;
 use App\Domain\Insights\Query\PropertyFilter;
 use App\Domain\Insights\Sql\Params;
 use App\Domain\Insights\Sql\ParamType;
+use App\Domain\Insights\Sql\PersonSource;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\Interval;
@@ -134,9 +135,9 @@ describe('person based unique users', function () {
         $sql = (new TrendsSqlBuilder)->build(T::sample(['metric' => Metric::UniqueUsers, 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser, 3)]))->sql;
 
         // both the top N (which ranks by the same unique count) and the rows subquery read the joined source
-        expect(substr_count($sql, TrendsSqlBuilder::PERSON_SOURCE))->toBe(2)
-            ->and($sql)->toContain('AS c FROM '.TrendsSqlBuilder::PERSON_SOURCE.' WHERE ')
-            ->and($sql)->toContain('(SELECT event AS series, timestamp, uuid, distinct_id, m_person, m_mapped, if(empty(toString(browser)), {none:String}, toString(browser)) AS bd FROM '.TrendsSqlBuilder::PERSON_SOURCE.' WHERE ')
+        expect(substr_count($sql, PersonSource::SQL))->toBe(2)
+            ->and($sql)->toContain('AS c FROM '.PersonSource::SQL.' WHERE ')
+            ->and($sql)->toContain('(SELECT event AS series, timestamp, uuid, distinct_id, m_person, m_mapped, if(empty(toString(browser)), {none:String}, toString(browser)) AS bd FROM '.PersonSource::SQL.' WHERE ')
             ->and(substr_count($sql, 'uniqExactIf(m_person, m_mapped = 1) + uniqExactIf(distinct_id, m_mapped = 0)'))->toBe(2)
             ->and($sql)->not->toContain('uniqExact(uuid)');
     });
@@ -148,8 +149,8 @@ describe('person based unique users', function () {
 
         expect($sql)->toBe('uniqExactIf(m_person, m_mapped = 1) + uniqExactIf(distinct_id, m_mapped = 0)')
             ->and(preg_match_all('/m_person/', $sql))->toBe(1)
-            ->and(TrendsSqlBuilder::PERSON_SOURCE)->toContain('ifNull(m.m_found, 0) AS m_mapped')
-            ->and(TrendsSqlBuilder::PERSON_SOURCE)->toContain('1 AS m_found')
+            ->and(PersonSource::SQL)->toContain('ifNull(m.m_found, 0) AS m_mapped')
+            ->and(PersonSource::SQL)->toContain('1 AS m_found')
             ->and(Metric::TotalEvents->needsPersons())->toBeFalse()->and(Metric::UniqueUsers->needsPersons())->toBeTrue();
     });
 

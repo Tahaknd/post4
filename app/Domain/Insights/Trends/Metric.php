@@ -2,6 +2,8 @@
 
 namespace App\Domain\Insights\Trends;
 
+use App\Domain\Insights\Sql\PersonSource;
+
 /** What a series counts. The aggregate is a fixed SQL fragment, never built from input. */
 enum Metric: string
 {
@@ -10,12 +12,12 @@ enum Metric: string
 
     /**
      * Distinct PERSONS (Milestone 4): an event counts for the person its distinct id is mapped to, and for the distinct
-     * id itself when that id has no mapping. See {@see TrendsSqlBuilder} for the join and the semantics.
+     * id itself when that id has no mapping. See {@see PersonSource} for the join and the semantics.
      */
     case UniqueUsers = 'unique_users';
 
     /**
-     * Whether the aggregate reads the person columns of {@see TrendsSqlBuilder::PERSON_SOURCE}. Only then does the
+     * Whether the aggregate reads the person columns of {@see PersonSource::SQL}. Only then does the
      * query join the mapping; the total-events SQL never pays for it.
      */
     public function needsPersons(): bool
