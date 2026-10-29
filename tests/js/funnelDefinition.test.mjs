@@ -309,8 +309,18 @@ test('round-trips a definition through the query string; defaults are omitted', 
     assert.deepEqual(back.range, { mode: 'custom', preset: 'last_30_days', from: '2026-03-01', to: '2026-03-07' });
 
     const plain = encodeDefinition(filled('a', 'b'), props);
-    assert.equal(new URLSearchParams(plain).getAll('s').length, 2);
+    assert.deepEqual([...new URLSearchParams(plain).keys()], ['s1', 's2'], 'one key per step, none repeated');
     assert.equal(new URLSearchParams(plain).has('wv') || new URLSearchParams(plain).has('o') || new URLSearchParams(plain).has('p'), false, 'defaults are left out');
+});
+
+test('survives the normalised address the server hands the page: keys sorted and a repeated key reduced to its last value', () => {
+    const query = encodeDefinition(filled('a', 'b', 'c'), props);
+    // what Request::fullUrl() gives back: parse_str keeps the last of a repeated key, then the keys are sorted
+    const normalised = new URLSearchParams(query);
+    normalised.sort();
+
+    assert.deepEqual(decodeDefinition(normalised.toString(), props).steps.map((step) => step.event), ['a', 'b', 'c']);
+    assert.equal(new Set([...new URLSearchParams(query).keys()]).size, [...new URLSearchParams(query).keys()].length, 'no key is repeated');
 });
 
 test('keeps blank steps and their positions, and the order of the steps', () => {
@@ -321,7 +331,7 @@ test('keeps blank steps and their positions, and the order of the steps', () => 
 });
 
 test('never trusts the URL: every bad field is dropped and the rest is kept', () => {
-    const encoded = (steps) => steps.map((step) => `s=${encodeURIComponent(step)}`).join('&');
+    const encoded = (steps) => steps.map((step, index) => `s${index + 1}=${encodeURIComponent(step)}`).join('&');
     const back = decodeDefinition([
         encoded(['["a",[]]', 'not json', '{}', '["b"]', '[1,[]]', '["c",[["k","likes","v"],["k2","equals","ok"],["k3","equals",5],["", "equals","x"]]]', `["${'x'.repeat(201)}",[]]`, '["d",[]]']),
         'wv=abc&wu=day', 'o=sideways', 'p=forever', 'from=2026-02-30&to=2026-03-01',
@@ -335,20 +345,20 @@ test('never trusts the URL: every bad field is dropped and the rest is kept', ()
 });
 
 test('fills a short list of steps up to the minimum and cuts a long one at the maximum', () => {
-    assert.equal(decodeDefinition('s=%5B%22a%22%2C%5B%5D%5D', props).steps.length, 2);
-    assert.equal(decodeDefinition('s=garbage', props).steps.length, 2);
+    assert.equal(decodeDefinition('s1=%5B%22a%22%2C%5B%5D%5D', props).steps.length, 2);
+    assert.equal(decodeDefinition('s1=garbage', props).steps.length, 2);
 
-    const many = Array.from({ length: 12 }, (_, i) => `s=${encodeURIComponent(JSON.stringify([`e${i}`, []]))}`).join('&');
+    const many = Array.from({ length: 12 }, (_, i) => `s${i + 1}=${encodeURIComponent(JSON.stringify([`e${i}`, []]))}`).join('&');
     assert.deepEqual(decodeDefinition(many, props).steps.map((step) => step.event), ['e0', 'e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7']);
 });
 
 test('reads at most the allowed filters per step and in all from a link', () => {
     const rows = Array.from({ length: 9 }, (_, i) => [`k${i}`, 'equals', 'v']);
-    const query = Array.from({ length: 4 }, (_, i) => `s=${encodeURIComponent(JSON.stringify([`e${i}`, rows]))}`).join('&');
+    const query = Array.from({ length: 4 }, (_, i) => `s${i + 1}=${encodeURIComponent(JSON.stringify([`e${i}`, rows]))}`).join('&');
     const back = decodeDefinition(query, props);
 
     assert.deepEqual(back.steps.map((step) => step.filters.length), [5, 5, 5, 5]);
-    const fiveSteps = decodeDefinition(Array.from({ length: 5 }, (_, i) => `s=${encodeURIComponent(JSON.stringify([`e${i}`, rows]))}`).join('&'), props);
+    const fiveSteps = decodeDefinition(Array.from({ length: 5 }, (_, i) => `s${i + 1}=${encodeURIComponent(JSON.stringify([`e${i}`, rows]))}`).join('&'), props);
     assert.equal(fiveSteps.steps.reduce((sum, step) => sum + step.filters.length, 0), 20, 'the total limit holds too');
 });
 

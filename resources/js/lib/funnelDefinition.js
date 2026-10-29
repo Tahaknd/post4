@@ -249,9 +249,13 @@ export function mapServerErrors(serverErrors, definition) {
 // ---------------------------------------------------------------- shareable query string
 
 /**
- * The query string (without `?`) of a definition, defaults omitted. Every step is one `s`: the JSON of
+ * The query string (without `?`) of a definition, defaults omitted. Step number n is `s<n>`: the JSON of
  * `[event, [[key, operator, value], ...]]` (blank steps too, so positions survive); the window `wv` + `wu`, the order `o`,
  * the range `p` or `from` + `to`. A definition that is still the untouched default gives an empty string.
+ *
+ * Every step has a key of its own, never a repeated one: the server hands the page its address in a normalised form
+ * (Request::fullUrl() sorts the keys and keeps only the LAST of a repeated key), and the browser's address bar is rewritten
+ * to it when the page opens, so a repeated `s` would lose all its steps but one on the first reload.
  */
 export function encodeDefinition(definition, props) {
     const { defaults, limits } = props;
@@ -259,9 +263,9 @@ export function encodeDefinition(definition, props) {
 
     const untouched = definition.steps.length === limits.min_steps && definition.steps.every((step) => step.event === '' && activeFilterRows(step.filters).length === 0);
     if (!untouched) {
-        for (const step of definition.steps) {
-            params.append('s', JSON.stringify([step.event, activeFilterRows(step.filters).map(filterTuple)]));
-        }
+        definition.steps.forEach((step, index) => {
+            params.set(`s${index + 1}`, JSON.stringify([step.event, activeFilterRows(step.filters).map(filterTuple)]));
+        });
     }
 
     const value = String(definition.window.value);
@@ -294,11 +298,9 @@ export function decodeDefinition(search, props) {
 
     const steps = [];
     let filters = 0;
-    for (const raw of params.getAll('s')) {
-        if (steps.length >= limits.max_steps) {
-            break;
-        }
-        const step = decodeStep(raw, props, limits.max_filters - filters);
+    for (let n = 1; n <= limits.max_steps; n++) {
+        const raw = params.get(`s${n}`);
+        const step = raw === null ? null : decodeStep(raw, props, limits.max_filters - filters);
         if (step !== null) {
             filters += step.filters.length;
             steps.push(step);
