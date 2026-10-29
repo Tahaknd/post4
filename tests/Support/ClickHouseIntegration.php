@@ -93,6 +93,21 @@ final class ClickHouseIntegration
 
     public const PTREND_IDS = [self::PTREND_A, self::PTREND_B, self::PTREND_C];
 
+    /**
+     * Tenants of the funnel tests (FunnelClickHouseTest): A has every scenario, B reuses A's distinct ids and event names
+     * with other timings and another mapping, C has no row at all, D holds the seeded random dataset of the oracle check.
+     */
+    public const FUNNEL_A = 991201;
+
+    public const FUNNEL_B = 991202;
+
+    public const FUNNEL_C = 991203;
+
+    /** The randomized dataset of the oracle comparison. */
+    public const FUNNEL_D = 991204;
+
+    public const FUNNEL_IDS = [self::FUNNEL_A, self::FUNNEL_B, self::FUNNEL_C, self::FUNNEL_D];
+
     /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
     public const TREND_D = 990204;
 
@@ -283,6 +298,24 @@ final class ClickHouseIntegration
             $ch->admin->execute('SYSTEM START MERGES posthog.person_distinct_ids');
             $ch->deletePersonRowsOf(self::PTREND_IDS);
             $ch->deleteRowsOf(self::PTREND_IDS);
+        } finally {
+            Facade::clearResolvedInstances();
+        }
+    }
+
+    /** For Pest's afterAll(): removes the funnel tests' events and mapping rows, also after a failed test. */
+    public static function cleanupFunnelAfterAll(): void
+    {
+        if (! self::$personTouched) {
+            return;
+        }
+
+        Http::swap(new Factory);
+        try {
+            $ch = self::connect();
+            $ch->admin->execute('SYSTEM START MERGES posthog.person_distinct_ids');
+            $ch->deletePersonRowsOf(self::FUNNEL_IDS);
+            $ch->deleteRowsOf(self::FUNNEL_IDS);
         } finally {
             Facade::clearResolvedInstances();
         }
