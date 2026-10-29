@@ -70,9 +70,9 @@ export function describeFunnel(result) {
     return `Horizontal bar chart of a funnel with ${result.steps.length} steps. ${steps}. Overall conversion ${formatRate(result.conversion_rate)} within ${formatDuration(result.window_seconds)}.`;
 }
 
-/** The text of a data label on a bar: the count and the share of everyone who started. */
-export function barLabel(step) {
-    return `${formatNumber(step.count)} · ${formatRate(step.conversion_from_first)}`;
+/** The text of a data label on a bar: the count and the share of everyone who started (the count alone when `compact`). */
+export function barLabel(step, compact = false) {
+    return compact ? formatNumber(step.count) : `${formatNumber(step.count)} · ${formatRate(step.conversion_from_first)}`;
 }
 
 /**

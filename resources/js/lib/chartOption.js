@@ -105,14 +105,15 @@ export function buildChartOption({ labels, series, chartType, theme, reducedMoti
  * @param {ReturnType<typeof readChartTheme>} input.theme
  * @param {boolean} input.reducedMotion
  * @param {string} input.description the accessible summary
+ * @param {boolean} [input.compact] a narrow screen: shorter step labels and less room for the bar labels (the table has it all)
  */
-export function buildFunnelOption({ steps, theme, reducedMotion, description }) {
+export function buildFunnelOption({ steps, theme, reducedMotion, description, compact = false }) {
     return {
         animation: !reducedMotion,
         color: [theme.series[0]],
         textStyle: { color: theme.fg, fontFamily: theme.fontFamily },
         aria: { enabled: true, label: { enabled: true, description } },
-        grid: { left: 8, right: 130, top: 8, bottom: 8, containLabel: true },
+        grid: { left: 8, right: compact ? 84 : 130, top: 8, bottom: 8, containLabel: true },
         tooltip: {
             trigger: 'axis',
             confine: true,
@@ -131,8 +132,8 @@ export function buildFunnelOption({ steps, theme, reducedMotion, description }) 
         yAxis: {
             type: 'category',
             inverse: true,
-            data: steps.map((step) => stepLabel(step)),
-            axisLabel: { color: theme.fg, width: 180, overflow: 'truncate' },
+            data: steps.map((step) => stepLabel(step, compact ? 14 : 32)),
+            axisLabel: { color: theme.fg, width: compact ? 96 : 180, overflow: 'truncate' },
             axisLine: { lineStyle: { color: theme.lineStrong } },
             axisTick: { show: false },
         },
@@ -143,7 +144,7 @@ export function buildFunnelOption({ steps, theme, reducedMotion, description }) 
                 data: steps.map((step) => step.count),
                 barMaxWidth: 44,
                 itemStyle: { color: theme.series[0] },
-                label: { show: true, position: 'right', color: theme.fg, formatter: (point) => barLabel(steps[point.dataIndex]) },
+                label: { show: true, position: 'right', color: theme.fg, formatter: (point) => barLabel(steps[point.dataIndex], compact) },
                 emphasis: { focus: 'series' },
             },
         ],

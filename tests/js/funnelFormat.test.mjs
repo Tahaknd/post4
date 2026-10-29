@@ -29,6 +29,8 @@ const RESULT = {
     order: 'ordered',
 };
 
+const theme = { fg: '#111', muted: '#555', line: '#ddd', lineStrong: '#888', surface: '#fff', fontFamily: 'sans-serif', series: ['#0072b2', '#e69f00'] };
+
 const NOBODY = {
     steps: RESULT.steps.map((step) => ({ ...step, count: 0, dropped_off: 0, conversion_from_previous: step.index === 1 ? null : null, conversion_from_first: null })),
     entrants: 0, converted: 0, conversion_rate: null, window_seconds: 86400, order: 'strict_order',
@@ -101,6 +103,16 @@ test('labels a bar with its count and its share of the entrants', () => {
     assert.equal(barLabel(NOBODY.steps[0]), '0 · —');
 });
 
+test('a compact bar label is the count alone, and a compact option has shorter labels and less room', () => {
+    assert.equal(barLabel(RESULT.steps[1], true), '3');
+    const wide = buildFunnelOption({ steps: RESULT.steps, theme: { ...theme }, reducedMotion: false, description: 'D' });
+    const narrow = buildFunnelOption({ steps: RESULT.steps, theme: { ...theme }, reducedMotion: false, description: 'D', compact: true });
+
+    assert.ok(narrow.grid.right < wide.grid.right);
+    assert.ok(narrow.yAxis.axisLabel.width < wide.yAxis.axisLabel.width);
+    assert.equal(narrow.series[0].label.formatter({ dataIndex: 2 }), '1');
+});
+
 test('gives help for a funnel that was too large or too slow, and nothing for other errors', () => {
     assert.match(failureHelp({ kind: 'memory_limit' }), /shorter date range or window/);
     assert.equal(failureHelp({ kind: 'too_many_rows' }), failureHelp({ kind: 'memory_limit' }));
@@ -109,7 +121,6 @@ test('gives help for a funnel that was too large or too slow, and nothing for ot
     assert.equal(failureHelp(null), null);
 });
 
-const theme = { fg: '#111', muted: '#555', line: '#ddd', lineStrong: '#888', surface: '#fff', fontFamily: 'sans-serif', series: ['#0072b2', '#e69f00'] };
 
 test('builds one horizontal bar series: step 1 on top, one colour, a label per bar, an accessible description', () => {
     const option = buildFunnelOption({ steps: RESULT.steps, theme, reducedMotion: false, description: 'D' });

@@ -15,8 +15,8 @@ const noRate = (step) => (step.index === 1 ? 'Not applicable' : 'No rate: nobody
 </script>
 
 <template>
-    <div role="group" :aria-label="`${caption}, table`" tabindex="0" class="overflow-auto rounded-md border border-line">
-        <table class="w-full border-collapse text-sm" data-testid="funnel-table">
+    <div role="group" :aria-label="`${caption}, table`" tabindex="0" class="relative overflow-auto rounded-md border border-line">
+        <table class="w-full min-w-[34rem] border-collapse text-sm" data-testid="funnel-table">
             <caption class="px-3 py-2 text-left text-muted">{{ caption }}</caption>
             <thead class="bg-surface">
                 <tr class="border-b border-line-strong">
@@ -31,7 +31,7 @@ const noRate = (step) => (step.index === 1 ? 'Not applicable' : 'No rate: nobody
                 <tr v-for="step in steps" :key="step.index" class="border-b border-line">
                     <th scope="row" class="px-3 py-1.5 text-left font-normal">
                         <span class="tabular-nums text-muted">{{ step.index }}.</span>
-                        <span class="ml-1 break-all">{{ step.event }}</span>
+                        <span class="ml-1 break-words">{{ step.event }}</span>
                     </th>
                     <td class="px-3 py-1.5 text-right tabular-nums">{{ formatNumber(step.count) }}</td>
                     <td class="px-3 py-1.5 text-right tabular-nums">{{ formatNumber(step.dropped_off) }}</td>
