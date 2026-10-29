@@ -17,6 +17,7 @@
             <group>redis</group>
             <group>postgres</group>
             <group>pgsql-integration</group>
+            <group>kafka-identity</group>
             <group>clickhouse</group>
             <group>slow</group>
             <group>geoip</group>

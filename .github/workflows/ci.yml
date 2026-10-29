@@ -116,6 +116,11 @@ jobs:
       - name: Postgres integration suite (identity)
         run: scripts/test-postgres.sh
 
+      # The identity consumer end to end on the live stack (/batch/ -> Kafka -> identity:consume -> Postgres and the
+      # person_distinct_ids topic, replay, dead letter): stops the identity service while it runs and starts it again.
+      - name: Identity consumer end to end (kafka-identity group)
+        run: scripts/test-identity.sh
+
       # The geoip group needs a licensed MaxMind database (GEOIP_TEST_DB=/path/to/file.mmdb): skipped on purpose.
 
       - name: Capture smoke test (HTTP -> Kafka -> ClickHouse)
