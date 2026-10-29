@@ -241,7 +241,8 @@ describe('fromCanonical', function () {
 
         expect(fn () => TrendsQuery::fromCanonical($mutate($data)))->toThrow(InvalidTrendsQuery::class);
     })->with([
-        'unknown version' => [fn ($d) => ['v' => 2] + $d],
+        'previous version' => [fn ($d) => ['v' => TrendsQuery::VERSION - 1] + $d],
+        'future version' => [fn ($d) => ['v' => TrendsQuery::VERSION + 1] + $d],
         'missing key' => [function ($d) {
             unset($d['filters']);
 

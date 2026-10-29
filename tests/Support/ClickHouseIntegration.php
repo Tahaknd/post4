@@ -81,6 +81,18 @@ final class ClickHouseIntegration
 
     public const PERSON_PURGE_B = 991012;
 
+    /**
+     * Tenants of the person based unique users tests (TrendsPersonsClickHouseTest): A has events and a mapping with moves and
+     * tombstones, B reuses A's distinct ids with a DIFFERENT mapping, C has events and no mapping at all.
+     */
+    public const PTREND_A = 991101;
+
+    public const PTREND_B = 991102;
+
+    public const PTREND_C = 991103;
+
+    public const PTREND_IDS = [self::PTREND_A, self::PTREND_B, self::PTREND_C];
+
     /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
     public const TREND_D = 990204;
 
@@ -258,6 +270,24 @@ final class ClickHouseIntegration
         );
     }
 
+    /** For Pest's afterAll(): removes the person based trends tests' events and mapping rows, also after a failed test. */
+    public static function cleanupPersonTrendsAfterAll(): void
+    {
+        if (! self::$personTouched) {
+            return;
+        }
+
+        Http::swap(new Factory);
+        try {
+            $ch = self::connect();
+            $ch->admin->execute('SYSTEM START MERGES posthog.person_distinct_ids');
+            $ch->deletePersonRowsOf(self::PTREND_IDS);
+            $ch->deleteRowsOf(self::PTREND_IDS);
+        } finally {
+            Facade::clearResolvedInstances();
+        }
+    }
+
     /** For Pest's afterAll(): removes the person mapping tests' rows (and the events they seeded), also after a failed test. */
     public static function cleanupPersonAfterAll(): void
     {
@@ -377,8 +407,9 @@ final class ClickHouseIntegration
      *
      * @param  list<array{0: int, 1: string, 2: string, 3: string, 4: string}>  $rows
      */
-    private function insertRows(array $rows): void
+    public function insertRows(array $rows): void
     {
+        self::$personTouched = true;   // the person based trends tests clean up their events through the same flag
         $selects = [];
         $params = [];
         foreach ($rows as $i => [$project, $event, $distinct, $props, $ts]) {

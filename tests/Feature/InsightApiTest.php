@@ -348,7 +348,7 @@ it('defaults metric, interval and zone, and takes the project zone', function ()
     apiPost($this->member, $project, ['events' => ['a'], 'date_from' => '2026-03-01', 'date_to' => '2026-03-02'])->assertStatus(202);
 
     expect(Queue::pushed(RunTrendsInsight::class)->last()->canonical)->toBe([
-        'v' => 1, 'events' => ['a'], 'metric' => 'total_events',
+        'v' => TrendsQuery::VERSION, 'events' => ['a'], 'metric' => 'total_events',
         'range' => ['from' => '2026-02-28T21:00:00.000Z', 'to' => '2026-03-02T21:00:00.000Z'],
         'interval' => 'day', 'timezone' => 'Europe/Istanbul', 'breakdown' => null, 'filters' => [],
     ]);

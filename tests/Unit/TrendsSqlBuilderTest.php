@@ -12,6 +12,7 @@ use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
+use App\Infrastructure\ClickHouse\ScopedRelations;
 use Tests\Support\ScriptedReads;
 use Tests\Support\TrendsFixtures as T;
 
@@ -31,10 +32,11 @@ describe('SQL snapshots', function () {
         ]);
     });
 
-    it('uses uniqExact(distinct_id) for unique users and one fixed fragment per interval', function (Interval $interval, string $fragment) {
+    it('counts persons for unique users and keeps one fixed interval fragment per interval', function (Interval $interval, string $fragment) {
         $sql = (new TrendsSqlBuilder)->build(T::sample(['metric' => Metric::UniqueUsers, 'interval' => $interval]))->sql;
 
-        expect($sql)->toContain('uniqExact(distinct_id) AS value')->and($sql)->toContain("toStartOfInterval(timestamp, {$fragment}, {tz:String})");
+        expect($sql)->toContain('uniqExactIf(m_person, m_mapped = 1) + uniqExactIf(distinct_id, m_mapped = 0) AS value')
+            ->and($sql)->toContain("toStartOfInterval(timestamp, {$fragment}, {tz:String})");
     })->with([
         [Interval::Hour, 'INTERVAL 1 HOUR'], [Interval::Day, 'INTERVAL 1 DAY'], [Interval::Week, 'INTERVAL 1 WEEK'], [Interval::Month, 'INTERVAL 1 MONTH'],
     ]);
@@ -75,7 +77,7 @@ describe('SQL snapshots', function () {
         $sql = (new TrendsSqlBuilder)->build($q)->sql;
 
         expect($sql)->toContain('timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}')
-            ->and($sql)->toContain('GROUP BY')->and($sql)->toContain('uniqExact(')->and($sql)->toEndWith('LIMIT '.(TrendsQuery::MAX_ROWS + 1));
+            ->and($sql)->toContain('GROUP BY')->and($sql)->toContain('uniqExact')->and($sql)->toEndWith('LIMIT '.(TrendsQuery::MAX_ROWS + 1));
     })->with([
         'plain' => fn () => T::sample(),
         'breakdown' => fn () => T::sample(['breakdown' => Breakdown::byColumn(BreakdownColumn::Event)]),
@@ -88,6 +90,93 @@ it('asks for one row more than the cap and stays under the profile result limit'
 
     expect(TrendsQuery::MAX_ROWS + 1)->toBe(10001)->and($sql)->toEndWith('LIMIT 10001')
         ->and(TrendsQuery::MAX_ROWS + 1)->toBeLessThan(20000);
+});
+
+describe('person based unique users', function () {
+    it('joins the scoped mapping for unique users with a snapshot of the whole statement', function () {
+        $built = (new TrendsSqlBuilder)->build(T::sample(['metric' => Metric::UniqueUsers]));
+
+        expect($built->sql)->toBe(
+            'SELECT event AS series, toUnixTimestamp(toDateTime(toStartOfInterval(timestamp, INTERVAL 1 DAY, {tz:String}), {tz:String})) AS bucket, '
+            .'uniqExactIf(m_person, m_mapped = 1) + uniqExactIf(distinct_id, m_mapped = 0) AS value '
+            .'FROM (SELECT e.*, ifNull(m.m_found, 0) AS m_mapped, m.m_person AS m_person FROM project_events AS e LEFT JOIN '
+            .'(SELECT distinct_id AS m_id, person_id AS m_person, 1 AS m_found FROM project_person_distinct_ids) AS m ON e.distinct_id = m.m_id) '
+            .'WHERE event IN {names:Array(String)} AND timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)} '
+            .'GROUP BY series, bucket ORDER BY bucket ASC, series ASC LIMIT 10001'
+        )->and(T::plain($built->params))->toBe([
+            'names' => ['a', 'b'],
+            'from' => '2026-03-01 00:00:00.000',
+            'to' => '2026-03-08 00:00:00.000',
+            'tz' => 'Europe/Istanbul',
+        ]);
+    });
+
+    it('never joins the mapping for total events: no mention of it, the reader adds only the events CTE', function (array $o) {
+        $sql = (new TrendsSqlBuilder)->build(T::sample($o + ['metric' => Metric::TotalEvents]))->sql;
+
+        expect($sql)->not->toContain('project_person_distinct_ids')->not->toContain('JOIN')->not->toContain('m_person')
+            ->and($sql)->toContain('FROM project_events WHERE')
+            ->and(ScopedRelations::prefixFor($sql))->toBe(ProjectScopedReader::cte());
+    })->with([
+        'plain' => [[]],
+        'column breakdown' => [['breakdown' => Breakdown::byColumn(BreakdownColumn::Browser, 3)]],
+        'property breakdown and a filter' => [['breakdown' => Breakdown::byProperty('plan'), 'filters' => [new PropertyFilter('a', FilterOperator::IsSet)]]],
+    ]);
+
+    it('makes the reader add the mapping CTE (after the events one) exactly for unique users', function () {
+        $sql = (new TrendsSqlBuilder)->build(T::sample(['metric' => Metric::UniqueUsers]))->sql;
+        $prefix = ScopedRelations::prefixFor($sql);
+
+        expect($prefix)->toStartWith(rtrim(ProjectScopedReader::cte()).', project_person_distinct_ids AS (SELECT project_id, distinct_id, person_id, version, created_at FROM posthog.project_person_distinct_ids_v)');
+    });
+
+    it('joins in the person columns of the breakdown subquery and in the top N subquery', function () {
+        $sql = (new TrendsSqlBuilder)->build(T::sample(['metric' => Metric::UniqueUsers, 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser, 3)]))->sql;
+
+        // both the top N (which ranks by the same unique count) and the rows subquery read the joined source
+        expect(substr_count($sql, TrendsSqlBuilder::PERSON_SOURCE))->toBe(2)
+            ->and($sql)->toContain('AS c FROM '.TrendsSqlBuilder::PERSON_SOURCE.' WHERE ')
+            ->and($sql)->toContain('(SELECT event AS series, timestamp, uuid, distinct_id, m_person, m_mapped, if(empty(toString(browser)), {none:String}, toString(browser)) AS bd FROM '.TrendsSqlBuilder::PERSON_SOURCE.' WHERE ')
+            ->and(substr_count($sql, 'uniqExactIf(m_person, m_mapped = 1) + uniqExactIf(distinct_id, m_mapped = 0)'))->toBe(2)
+            ->and($sql)->not->toContain('uniqExact(uuid)');
+    });
+
+    it('guards every use of the joined person with the flag: the nil UUID of an unmatched row is never counted', function () {
+        // m_person is only ever an argument of uniqExactIf(... m_mapped = 1); no other expression reads it but the
+        // projection of the source itself
+        $sql = Metric::UniqueUsers->aggregateSql();
+
+        expect($sql)->toBe('uniqExactIf(m_person, m_mapped = 1) + uniqExactIf(distinct_id, m_mapped = 0)')
+            ->and(preg_match_all('/m_person/', $sql))->toBe(1)
+            ->and(TrendsSqlBuilder::PERSON_SOURCE)->toContain('ifNull(m.m_found, 0) AS m_mapped')
+            ->and(TrendsSqlBuilder::PERSON_SOURCE)->toContain('1 AS m_found')
+            ->and(Metric::TotalEvents->needsPersons())->toBeFalse()->and(Metric::UniqueUsers->needsPersons())->toBeTrue();
+    });
+
+    it('passes the real reader lint for every unique users shape and sends both CTEs', function (TrendsQuery $q) {
+        $fake = new ScriptedReads;
+        $reader = new ProjectScopedReader($fake);
+        $built = (new TrendsSqlBuilder)->build($q);
+
+        $reader->select(7, $built->sql, $built->params);
+
+        expect($fake->calls)->toHaveCount(1)
+            ->and($fake->calls[0]['sql'])->toStartWith('WITH project_events AS (SELECT uuid,')
+            ->and($fake->calls[0]['sql'])->toContain(', project_person_distinct_ids AS (SELECT project_id, distinct_id, person_id, version, created_at FROM posthog.project_person_distinct_ids_v) SELECT ')
+            ->and($built->sql)->not->toContain("'")->not->toContain('$')->not->toContain('--')->not->toContain(';');
+    })->with([
+        'plain' => fn () => T::sample(['metric' => Metric::UniqueUsers]),
+        'column breakdown' => fn () => T::sample(['metric' => Metric::UniqueUsers, 'breakdown' => Breakdown::byColumn(BreakdownColumn::DistinctId, 4)]),
+        'property breakdown and all operators' => fn () => T::sample([
+            'metric' => Metric::UniqueUsers,
+            'breakdown' => Breakdown::byProperty('plan'),
+            'filters' => [
+                new PropertyFilter('a', FilterOperator::Equals, 'x'), new PropertyFilter('b', FilterOperator::NotEquals, 'x'),
+                new PropertyFilter('c', FilterOperator::Contains, 'x'), new PropertyFilter('d', FilterOperator::IsSet),
+            ],
+        ]),
+        'hourly' => fn () => T::sample(['metric' => Metric::UniqueUsers, 'interval' => Interval::Hour, 'to' => '2026-03-02']),
+    ]);
 });
 
 describe('what reaches the reader', function () {

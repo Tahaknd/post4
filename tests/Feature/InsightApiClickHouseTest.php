@@ -203,7 +203,7 @@ it('rebuilds the same definition the runner would run for the posted body', func
 
     expect($record['status'])->toBe('done')
         ->and($record['hash'])->toBe(TrendsQuery::fromCanonical([
-            'v' => 1, 'events' => ['signup'], 'metric' => 'total_events',
+            'v' => TrendsQuery::VERSION, 'events' => ['signup'], 'metric' => 'total_events',
             'range' => ['from' => '2026-03-14T00:00:00.000Z', 'to' => '2026-03-17T00:00:00.000Z'],
             'interval' => 'day', 'timezone' => 'UTC', 'breakdown' => null, 'filters' => [],
         ])->hash());

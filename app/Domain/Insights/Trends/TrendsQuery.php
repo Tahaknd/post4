@@ -32,8 +32,16 @@ final readonly class TrendsQuery
 
     public const MAX_ROWS = 10000;
 
-    /** Bump when the definition or the result format changes: it is part of the cache key. */
-    public const VERSION = 1;
+    /**
+     * Bump when the definition or the result format changes OR the meaning of a result does: it is part of the cache key
+     * (TrendsQuery::hash()) and of the canonical array that queued runs carry.
+     *
+     *  1  unique users = distinct `distinct_id` values
+     *  2  unique users = distinct PERSONS (the mapping is joined at query time; Milestone 4, task 4.4). Results cached
+     *     under version 1 are never served (other hash); a run queued before the upgrade fails once with the generic
+     *     message ("unsupported definition version") and is started again by the client.
+     */
+    public const VERSION = 2;
 
     /** @var list<string> */
     public array $events;
