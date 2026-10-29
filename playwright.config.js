@@ -6,6 +6,12 @@ import { defineConfig, devices } from '@playwright/test';
 //
 //   E2E_BASE_URL   where the app answers: scripts/e2e.sh uses the app container's plain-http address on the compose network
 //   E2E_EMAIL, E2E_PASSWORD   a THROWAWAY administrator (never hardcoded here): the test creates and deletes a project
+//   E2E_BROWSER_CHANNEL       optional: run an installed browser instead of the bundled one (`chrome`), for a host without the
+//                             Playwright image
+//   E2E_BROWSER_ARGS          optional, space separated Chromium flags; `--host-resolver-rules="MAP name 127.0.0.1"` is not
+//                             splittable on spaces, so use E2E_HOST_MAP=name instead (see below)
+//   E2E_HOST_MAP              optional: a host NAME that the browser resolves to 127.0.0.1. Opening the app as http://name:8000
+//                             makes it a plain-http, non-localhost origin (an insecure context) without a container network
 export default defineConfig({
     testDir: './tests/e2e',
     fullyParallel: false,
@@ -20,5 +26,19 @@ export default defineConfig({
         trace: 'retain-on-failure',
         screenshot: 'only-on-failure',
     },
-    projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+    projects: [
+        {
+            name: 'chromium',
+            use: {
+                ...devices['Desktop Chrome'],
+                ...(process.env.E2E_BROWSER_CHANNEL ? { channel: process.env.E2E_BROWSER_CHANNEL } : {}),
+                launchOptions: {
+                    args: [
+                        ...(process.env.E2E_BROWSER_ARGS ? process.env.E2E_BROWSER_ARGS.split(' ').filter(Boolean) : []),
+                        ...(process.env.E2E_HOST_MAP ? [`--host-resolver-rules=MAP ${process.env.E2E_HOST_MAP} 127.0.0.1`] : []),
+                    ],
+                },
+            },
+        },
+    ],
 });

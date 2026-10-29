@@ -14,6 +14,14 @@
 # contexts, App\Http\HistoryEncryption). It is by IP and not by the service name because a host called `app` is forced to
 # https by Chromium (`.app` is an HSTS-preloaded top level domain). Set E2E_BASE_URL to test another address.
 #
+# The specs: trends.spec.js (the Trends page) and demo.spec.js (the real posthog-js on the demo page: remote config, gzip /
+# JSON / base64 bodies, sendBeacon on page close, UTM, no cookies from the SDK endpoints, a clean console, axe). Both create and
+# delete their own project.
+#
+# Without the image (it is about 2 GB) the same specs run from the host against an installed Chrome, see playwright.config.js:
+#   E2E_BROWSER_CHANNEL=chrome E2E_HOST_MAP=app.test E2E_BASE_URL=http://app.test:8000 E2E_EMAIL=... E2E_PASSWORD=... npx playwright test
+# (E2E_HOST_MAP makes the browser resolve that name to 127.0.0.1: a plain-http, non-localhost origin like a LAN install.)
+#
 # PLAYWRIGHT_VERSION is the image tag and MUST equal the pinned @playwright/test of package.json (checked below). The first
 # run pulls the image (about 2 GB); remove it with `docker rmi mcr.microsoft.com/playwright:v1.64.1-noble` when you are done.
 set -eu
