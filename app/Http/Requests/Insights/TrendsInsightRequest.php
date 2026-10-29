@@ -2,16 +2,16 @@
 
 namespace App\Http\Requests\Insights;
 
+use App\Domain\Insights\Query\DatePreset;
+use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\FilterOperator;
+use App\Domain\Insights\Query\InvalidDateSelection;
+use App\Domain\Insights\Query\InvalidInsightQuery;
+use App\Domain\Insights\Query\PropertyFilter;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
-use App\Domain\Insights\Trends\DatePreset;
-use App\Domain\Insights\Trends\DateRange;
-use App\Domain\Insights\Trends\FilterOperator;
 use App\Domain\Insights\Trends\Interval;
-use App\Domain\Insights\Trends\InvalidDateSelection;
-use App\Domain\Insights\Trends\InvalidTrendsQuery;
 use App\Domain\Insights\Trends\Metric;
-use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Models\Project;
 use DateTimeInterface;
@@ -155,7 +155,7 @@ class TrendsInsightRequest extends FormRequest
             $this->trends = TrendsQuery::fromInput($this->validated(), new DateTimeZone($project->timezone), $this->now());
         } catch (InvalidDateSelection) {
             throw ValidationException::withMessages(['date_from' => 'Use real calendar days: the end must not be before the start, and the range can be at most '.DateRange::MAX_DAYS.' days.']);
-        } catch (InvalidTrendsQuery) {
+        } catch (InvalidInsightQuery) {
             // The exception text names the broken rule but is not shown: one fixed sentence per request.
             throw ValidationException::withMessages(['definition' => 'This combination is not allowed. Use at most '.TrendsQuery::MAX_SERIES.' series, a smaller breakdown, or a shorter range or larger interval (a result may have at most '.TrendsQuery::MAX_ROWS.' rows).']);
         }

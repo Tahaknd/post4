@@ -1,6 +1,6 @@
 <?php
 
-use App\Domain\Insights\Trends\DateRange;
+use App\Domain\Insights\Query\DateRange;
 use App\Domain\Insights\Trends\Interval;
 use Tests\Support\AxisOracle;
 use Tests\Support\ClickHouseIntegration as CH;

@@ -1,7 +1,7 @@
 <?php
 
-use App\Domain\Insights\Trends\InvalidDateSelection;
-use App\Domain\Insights\Trends\InvalidTrendsQuery;
+use App\Domain\Insights\Query\InvalidDateSelection;
+use App\Domain\Insights\Query\InvalidInsightQuery;
 use App\Domain\Insights\Trends\TrendsQuery;
 use Illuminate\Support\Carbon;
 
@@ -45,8 +45,8 @@ it('names the date problems with their own exception type', function (array $inp
     'only one end' => [['date_from' => '2026-03-01']],
 ]);
 
-it('rejects everything else through the constructor rules as InvalidTrendsQuery, never a TypeError', function (array $input) {
-    expect(fn () => fromInput(['events' => ['a'], 'date_preset' => 'last_7_days', ...$input]))->toThrow(InvalidTrendsQuery::class);
+it('rejects everything else through the constructor rules as InvalidInsightQuery, never a TypeError', function (array $input) {
+    expect(fn () => fromInput(['events' => ['a'], 'date_preset' => 'last_7_days', ...$input]))->toThrow(InvalidInsightQuery::class);
 })->with([
     'no events' => [['events' => []]],
     'zone' => [['timezone' => 'Mars/Base']],

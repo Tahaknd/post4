@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Domain\Insights\Trends;
+namespace App\Domain\Insights\Query;
 
 use DateTimeImmutable;
 use DateTimeInterface;

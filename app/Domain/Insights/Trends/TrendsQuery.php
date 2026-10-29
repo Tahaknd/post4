@@ -2,7 +2,13 @@
 
 namespace App\Domain\Insights\Trends;
 
-use DateTimeImmutable;
+use App\Domain\Insights\Query\Canonical;
+use App\Domain\Insights\Query\DatePreset;
+use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\EventName;
+use App\Domain\Insights\Query\InvalidDateSelection;
+use App\Domain\Insights\Query\InvalidInsightQuery;
+use App\Domain\Insights\Query\PropertyFilter;
 use DateTimeInterface;
 use DateTimeZone;
 
@@ -12,7 +18,7 @@ use DateTimeZone;
  * and typed `{name:Type}` placeholders; every value here (event names, property keys, filter values, the
  * zone, the dates) is bound as a parameter, so a hostile value cannot change the shape of the query.
  *
- * Rules (violations throw {@see InvalidTrendsQuery}):
+ * Rules (violations throw {@see InvalidTrendsQuery}, or {@see InvalidInsightQuery} for the shared ones: events, filters, range):
  *  - 1..{@see self::MAX_SERIES} distinct, non-empty event names of at most {@see self::MAX_EVENT_LENGTH} characters;
  *  - the date range is required and at most {@see DateRange::MAX_DAYS} days;
  *  - the time zone is a PHP identifier (DateTimeZone::listIdentifiers(), `UTC` included);
@@ -28,7 +34,7 @@ final readonly class TrendsQuery
 
     public const MAX_FILTERS = 10;
 
-    public const MAX_EVENT_LENGTH = 200;
+    public const MAX_EVENT_LENGTH = EventName::MAX_LENGTH;
 
     public const MAX_ROWS = 10000;
 
@@ -68,9 +74,7 @@ final readonly class TrendsQuery
             throw new InvalidTrendsQuery('A trends query needs between 1 and '.self::MAX_SERIES.' events');
         }
         foreach ($events as $event) {
-            if (! is_string($event) || $event === '' || mb_strlen($event) > self::MAX_EVENT_LENGTH || ! mb_check_encoding($event, 'UTF-8')) {
-                throw new InvalidTrendsQuery('Event names must be 1 to '.self::MAX_EVENT_LENGTH.' characters of valid UTF-8');
-            }
+            EventName::assertValid($event);
         }
         if (count(array_unique($events)) !== count($events)) {
             throw new InvalidTrendsQuery('Event names must be distinct');
@@ -133,14 +137,14 @@ final readonly class TrendsQuery
     /**
      * The inverse of {@see self::canonical()}: rebuilds a definition from its canonical array (what a queued job
      * or a stored insight carries instead of a serialized object). Strict: unknown or missing keys, wrong types
-     * or an unknown version throw {@see InvalidTrendsQuery} (never a TypeError), and every value goes through the
+     * or an unknown version throw {@see InvalidInsightQuery} (never a TypeError), and every value goes through the
      * constructor rules like any other definition, so hostile input cannot build an invalid query.
      *
      * @param  array<array-key, mixed>  $data
      */
     public static function fromCanonical(array $data): self
     {
-        self::expectKeys($data, ['v', 'events', 'metric', 'range', 'interval', 'timezone', 'breakdown', 'filters'], 'definition');
+        Canonical::expectKeys($data, ['v', 'events', 'metric', 'range', 'interval', 'timezone', 'breakdown', 'filters'], 'definition');
         if ($data['v'] !== self::VERSION) {
             throw new InvalidTrendsQuery('Unsupported definition version');
         }
@@ -154,11 +158,11 @@ final readonly class TrendsQuery
         return new self(
             $data['events'],
             $metric,
-            self::rangeFrom($data['range']),
+            DateRange::fromCanonical($data['range']),
             $interval,
             $data['timezone'],
             self::breakdownFrom($data['breakdown']),
-            self::filtersFrom($data['filters']),
+            PropertyFilter::listFromCanonical($data['filters']),
         );
     }
 
@@ -171,12 +175,12 @@ final readonly class TrendsQuery
      * The result goes through {@see self::fromCanonical()}, so every constructor rule applies.
      *
      * The caller validates the SHAPE of the input first (types, lengths, unknown keys); this method still never
-     * trusts it: a value of the wrong kind is an {@see InvalidTrendsQuery}, never a TypeError.
+     * trusts it: a value of the wrong kind is an {@see InvalidInsightQuery}, never a TypeError.
      *
      * @param  array<array-key, mixed>  $input  keys: events, metric, interval, timezone, date_preset, date_from, date_to, breakdown, filters
      *
      * @throws InvalidDateSelection the date part is unusable
-     * @throws InvalidTrendsQuery any other rule is violated
+     * @throws InvalidInsightQuery any other rule is violated
      */
     public static function fromInput(array $input, DateTimeZone $defaultZone, DateTimeInterface $now): self
     {
@@ -186,26 +190,11 @@ final readonly class TrendsQuery
         }
         $zone = new DateTimeZone($timezone);
 
-        if (isset($input['date_preset'])) {
-            $preset = is_string($input['date_preset']) ? DatePreset::tryFrom($input['date_preset']) : null;
-            $range = ($preset ?? throw new InvalidDateSelection('Unknown date preset'))->resolve($now, $zone);
-        } elseif (is_string($input['date_from'] ?? null) && is_string($input['date_to'] ?? null)) {
-            try {
-                $range = DateRange::localDays($input['date_from'], $input['date_to'], $zone);
-            } catch (InvalidTrendsQuery $e) {
-                throw new InvalidDateSelection($e->getMessage(), previous: $e);
-            }
-        } else {
-            throw new InvalidDateSelection('A date range needs a preset, or both a first and a last day');
-        }
+        $range = DateRange::fromInput($input, $zone, $now);
 
         $breakdown = $input['breakdown'] ?? null;
         if ($breakdown !== null && ! is_array($breakdown)) {
             throw new InvalidTrendsQuery('Malformed breakdown');
-        }
-        $filters = $input['filters'] ?? [];
-        if (! is_array($filters) || ! array_is_list($filters)) {
-            throw new InvalidTrendsQuery('Malformed filters');
         }
 
         return self::fromCanonical([
@@ -220,42 +209,8 @@ final readonly class TrendsQuery
                 'property' => $breakdown['property'] ?? null,
                 'top_n' => $breakdown['top_n'] ?? Breakdown::DEFAULT_TOP_N,
             ],
-            'filters' => array_map(
-                fn (mixed $f) => is_array($f) ? ['key' => $f['key'] ?? null, 'operator' => $f['operator'] ?? null, 'value' => $f['value'] ?? null] : $f,
-                $filters,
-            ),
+            'filters' => PropertyFilter::canonicalListFromInput($input['filters'] ?? null),
         ]);
-    }
-
-    /** @param  array<array-key, mixed>  $data */
-    private static function expectKeys(array $data, array $keys, string $what): void
-    {
-        $actual = array_keys($data);
-        sort($actual);
-        $expected = $keys;
-        sort($expected);
-        if ($actual !== $expected) {
-            throw new InvalidTrendsQuery("Malformed {$what}: unexpected or missing keys");
-        }
-    }
-
-    private static function rangeFrom(mixed $range): DateRange
-    {
-        if (! is_array($range)) {
-            throw new InvalidTrendsQuery('Malformed date range');
-        }
-        self::expectKeys($range, ['from', 'to'], 'date range');
-
-        $parse = function (mixed $value): DateTimeImmutable {
-            $date = is_string($value) ? DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:s.v\Z', $value, new DateTimeZone('UTC')) : false;
-            if ($date === false || $date->format('Y-m-d\TH:i:s.v\Z') !== $value) {
-                throw new InvalidTrendsQuery('Dates must look like 2026-03-01T00:00:00.000Z');
-            }
-
-            return $date;
-        };
-
-        return new DateRange($parse($range['from']), $parse($range['to']));
     }
 
     private static function breakdownFrom(mixed $breakdown): ?Breakdown
@@ -266,7 +221,7 @@ final readonly class TrendsQuery
         if (! is_array($breakdown)) {
             throw new InvalidTrendsQuery('Malformed breakdown');
         }
-        self::expectKeys($breakdown, ['column', 'property', 'top_n'], 'breakdown');
+        Canonical::expectKeys($breakdown, ['column', 'property', 'top_n'], 'breakdown');
         if (! is_int($breakdown['top_n']) || (($breakdown['column'] === null) === ($breakdown['property'] === null))) {
             throw new InvalidTrendsQuery('A breakdown has a top N and exactly one of column and property');
         }
@@ -281,30 +236,6 @@ final readonly class TrendsQuery
         }
 
         return Breakdown::byProperty($breakdown['property'], $breakdown['top_n']);
-    }
-
-    /** @return list<PropertyFilter> */
-    private static function filtersFrom(mixed $filters): array
-    {
-        if (! is_array($filters) || ! array_is_list($filters)) {
-            throw new InvalidTrendsQuery('Malformed filters');
-        }
-
-        return array_map(function (mixed $filter): PropertyFilter {
-            if (! is_array($filter)) {
-                throw new InvalidTrendsQuery('Malformed filter');
-            }
-            self::expectKeys($filter, ['key', 'operator', 'value'], 'filter');
-            if (! is_string($filter['key']) || ! is_string($filter['operator']) || ($filter['value'] !== null && ! is_string($filter['value']))) {
-                throw new InvalidTrendsQuery('Malformed filter');
-            }
-
-            return new PropertyFilter(
-                $filter['key'],
-                FilterOperator::tryFrom($filter['operator']) ?? throw new InvalidTrendsQuery('Unknown filter operator'),
-                $filter['value'],
-            );
-        }, $filters);
     }
 
     /** sha256 of the canonical JSON (the cache key component). */

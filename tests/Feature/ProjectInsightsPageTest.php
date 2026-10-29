@@ -1,14 +1,14 @@
 <?php
 
 use App\Domain\Insights\Events\EventNamesSqlBuilder;
+use App\Domain\Insights\Query\DatePreset;
+use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\FilterOperator;
+use App\Domain\Insights\Query\PropertyFilter;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
-use App\Domain\Insights\Trends\DatePreset;
-use App\Domain\Insights\Trends\DateRange;
-use App\Domain\Insights\Trends\FilterOperator;
 use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
-use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Models\Project;
 use App\Models\User;

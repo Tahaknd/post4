@@ -2,13 +2,13 @@
 
 use App\Domain\Insights\InsightFailed;
 use App\Domain\Insights\InsightRunner;
+use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\FilterOperator;
+use App\Domain\Insights\Query\PropertyFilter;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
-use App\Domain\Insights\Trends\DateRange;
-use App\Domain\Insights\Trends\FilterOperator;
 use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
-use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsSqlBuilder;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;

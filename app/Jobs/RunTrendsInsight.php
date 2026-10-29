@@ -4,9 +4,9 @@ namespace App\Jobs;
 
 use App\Domain\Insights\InsightFailed;
 use App\Domain\Insights\InsightRunner;
+use App\Domain\Insights\Query\InvalidInsightQuery;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
-use App\Domain\Insights\Trends\InvalidTrendsQuery;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsResult;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
@@ -156,7 +156,7 @@ class RunTrendsInsight implements ShouldQueue
 
         try {
             $query = TrendsQuery::fromCanonical($this->canonical);
-        } catch (InvalidTrendsQuery) {
+        } catch (InvalidInsightQuery) {
             Log::warning('insight run has an invalid definition', ['project_id' => $this->projectId, 'run_id' => $this->runId]);
             $this->endFailed($runs, $gate, ClickHouseErrorKind::Unknown);
 

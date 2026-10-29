@@ -2,6 +2,7 @@
 
 namespace App\Domain\Insights\Trends;
 
+use App\Domain\Insights\Query\DateRange;
 use DateTimeImmutable;
 use DateTimeZone;
 

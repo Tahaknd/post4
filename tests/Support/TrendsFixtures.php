@@ -3,8 +3,8 @@
 namespace Tests\Support;
 
 use App\Domain\Insights\InsightRunner;
+use App\Domain\Insights\Query\DateRange;
 use App\Domain\Insights\Trends\Breakdown;
-use App\Domain\Insights\Trends\DateRange;
 use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\TrendsQuery;

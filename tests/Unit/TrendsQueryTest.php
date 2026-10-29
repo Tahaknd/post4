@@ -1,14 +1,14 @@
 <?php
 
+use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\FilterOperator;
+use App\Domain\Insights\Query\InvalidInsightQuery;
+use App\Domain\Insights\Query\PropertyFilter;
 use App\Domain\Insights\Trends\Breakdown;
 use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\BucketAxis;
-use App\Domain\Insights\Trends\DateRange;
-use App\Domain\Insights\Trends\FilterOperator;
 use App\Domain\Insights\Trends\Interval;
-use App\Domain\Insights\Trends\InvalidTrendsQuery;
 use App\Domain\Insights\Trends\Metric;
-use App\Domain\Insights\Trends\PropertyFilter;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use Tests\Support\TrendsFixtures as T;
@@ -21,7 +21,7 @@ describe('definition rules', function () {
     });
 
     it('requires between 1 and 10 distinct event names', function (array $events) {
-        expect(fn () => T::query(['events' => $events]))->toThrow(InvalidTrendsQuery::class);
+        expect(fn () => T::query(['events' => $events]))->toThrow(InvalidInsightQuery::class);
     })->with([
         'none' => [[]],
         'eleven' => [array_map(fn ($i) => "e{$i}", range(1, 11))],
@@ -38,9 +38,9 @@ describe('definition rules', function () {
     });
 
     it('requires an end after the start and at most 366 days', function () {
-        expect(fn () => new DateRange(new DateTimeImmutable('2026-03-02'), new DateTimeImmutable('2026-03-02')))->toThrow(InvalidTrendsQuery::class)
-            ->and(fn () => new DateRange(new DateTimeImmutable('2026-03-02'), new DateTimeImmutable('2026-03-01')))->toThrow(InvalidTrendsQuery::class)
-            ->and(fn () => new DateRange(new DateTimeImmutable('2025-01-01'), new DateTimeImmutable('2026-01-03')))->toThrow(InvalidTrendsQuery::class, '366');
+        expect(fn () => new DateRange(new DateTimeImmutable('2026-03-02'), new DateTimeImmutable('2026-03-02')))->toThrow(InvalidInsightQuery::class)
+            ->and(fn () => new DateRange(new DateTimeImmutable('2026-03-02'), new DateTimeImmutable('2026-03-01')))->toThrow(InvalidInsightQuery::class)
+            ->and(fn () => new DateRange(new DateTimeImmutable('2025-01-01'), new DateTimeImmutable('2026-01-03')))->toThrow(InvalidInsightQuery::class, '366');
         // exactly 366 days is fine
         expect((new DateRange(new DateTimeImmutable('2025-01-01 UTC'), new DateTimeImmutable('2026-01-02 UTC')))->to->format('Y-m-d'))->toBe('2026-01-02');
     });
@@ -55,15 +55,15 @@ describe('definition rules', function () {
         $r = DateRange::localDays('2026-03-14', '2026-03-15', new DateTimeZone('Europe/Istanbul'));
 
         expect($r->from->format('c'))->toBe('2026-03-13T21:00:00+00:00')->and($r->to->format('c'))->toBe('2026-03-15T21:00:00+00:00');
-        expect(fn () => DateRange::localDays('2026-02-30', '2026-03-01', new DateTimeZone('UTC')))->toThrow(InvalidTrendsQuery::class)
-            ->and(fn () => DateRange::localDays('nope', '2026-03-01', new DateTimeZone('UTC')))->toThrow(InvalidTrendsQuery::class);
+        expect(fn () => DateRange::localDays('2026-02-30', '2026-03-01', new DateTimeZone('UTC')))->toThrow(InvalidInsightQuery::class)
+            ->and(fn () => DateRange::localDays('nope', '2026-03-01', new DateTimeZone('UTC')))->toThrow(InvalidInsightQuery::class);
     });
 
     it('accepts only PHP time zone identifiers', function (string $tz, bool $ok) {
         if ($ok) {
             expect(T::query(['timezone' => $tz])->timezone())->toBe($tz);
         } else {
-            expect(fn () => T::query(['timezone' => $tz]))->toThrow(InvalidTrendsQuery::class, 'time zone');
+            expect(fn () => T::query(['timezone' => $tz]))->toThrow(InvalidInsightQuery::class, 'time zone');
         }
     })->with([
         ['UTC', true], ['Europe/Istanbul', true], ['Asia/Kolkata', true], ['America/St_Johns', true],
@@ -74,12 +74,12 @@ describe('definition rules', function () {
         $ok = array_map(fn ($i) => new PropertyFilter("k{$i}", FilterOperator::IsSet), range(1, 10));
 
         expect(T::query(['filters' => $ok])->filters)->toHaveCount(10)
-            ->and(fn () => T::query(['filters' => [...$ok, new PropertyFilter('k11', FilterOperator::IsSet)]]))->toThrow(InvalidTrendsQuery::class)
-            ->and(fn () => T::query(['filters' => ['not a filter']]))->toThrow(InvalidTrendsQuery::class);
+            ->and(fn () => T::query(['filters' => [...$ok, new PropertyFilter('k11', FilterOperator::IsSet)]]))->toThrow(InvalidInsightQuery::class)
+            ->and(fn () => T::query(['filters' => ['not a filter']]))->toThrow(InvalidInsightQuery::class);
     });
 
     it('validates filters', function (callable $make) {
-        expect($make)->toThrow(InvalidTrendsQuery::class);
+        expect($make)->toThrow(InvalidInsightQuery::class);
     })->with([
         'empty key' => [fn () => new PropertyFilter('', FilterOperator::Equals, 'x')],
         'long key' => [fn () => new PropertyFilter(str_repeat('k', 201), FilterOperator::Equals, 'x')],
@@ -96,7 +96,7 @@ describe('definition rules', function () {
     });
 
     it('validates the breakdown', function (callable $make) {
-        expect($make)->toThrow(InvalidTrendsQuery::class);
+        expect($make)->toThrow(InvalidInsightQuery::class);
     })->with([
         'top 0' => [fn () => Breakdown::byColumn(BreakdownColumn::Browser, 0)],
         'top 26' => [fn () => Breakdown::byProperty('plan', 26)],
@@ -117,8 +117,8 @@ describe('definition rules', function () {
         $year = T::window('2026-01-01', '2026-12-31');
 
         expect(count(T::query(['range' => $year, 'interval' => Interval::Hour])->buckets()))->toBeGreaterThan(8000);
-        expect(fn () => T::query(['range' => $year, 'interval' => Interval::Hour, 'events' => ['a', 'b']]))->toThrow(InvalidTrendsQuery::class, 'rows');
-        expect(fn () => T::query(['range' => T::window('2026-01-01', '2026-03-01'), 'interval' => Interval::Hour, 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]))->toThrow(InvalidTrendsQuery::class);
+        expect(fn () => T::query(['range' => $year, 'interval' => Interval::Hour, 'events' => ['a', 'b']]))->toThrow(InvalidInsightQuery::class, 'rows');
+        expect(fn () => T::query(['range' => T::window('2026-01-01', '2026-03-01'), 'interval' => Interval::Hour, 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)]))->toThrow(InvalidInsightQuery::class);
         // the same breakdown at day granularity is fine: 31 x 1 x 11
         expect(T::query(['range' => T::window('2026-01-01', '2026-02-01'), 'breakdown' => Breakdown::byColumn(BreakdownColumn::Browser)])->buckets())->toHaveCount(31);
     });
@@ -236,10 +236,10 @@ describe('fromCanonical', function () {
         'sub second range' => fn () => T::query(['range' => new DateRange(new DateTimeImmutable('2026-03-01 00:00:00.123 UTC'), new DateTimeImmutable('2026-03-02 00:00:00.456 UTC'))]),
     ]);
 
-    it('rejects malformed or hostile canonical arrays with InvalidTrendsQuery, never a TypeError', function (callable $mutate) {
+    it('rejects malformed or hostile canonical arrays with InvalidInsightQuery, never a TypeError', function (callable $mutate) {
         $data = T::query(['breakdown' => Breakdown::byProperty('p'), 'filters' => [new PropertyFilter('k', FilterOperator::Equals, 'v')]])->canonical();
 
-        expect(fn () => TrendsQuery::fromCanonical($mutate($data)))->toThrow(InvalidTrendsQuery::class);
+        expect(fn () => TrendsQuery::fromCanonical($mutate($data)))->toThrow(InvalidInsightQuery::class);
     })->with([
         'previous version' => [fn ($d) => ['v' => TrendsQuery::VERSION - 1] + $d],
         'future version' => [fn ($d) => ['v' => TrendsQuery::VERSION + 1] + $d],

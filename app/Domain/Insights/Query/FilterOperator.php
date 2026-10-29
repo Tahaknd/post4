@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Domain\Insights\Trends;
+namespace App\Domain\Insights\Query;
 
 /**
  * Property filter operators. Values are compared as TEXT through JSONExtractString, which on ClickHouse 25.8

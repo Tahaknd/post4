@@ -2,10 +2,10 @@
 
 namespace App\Domain\Insights\Trends;
 
-use InvalidArgumentException;
+use App\Domain\Insights\Query\InvalidInsightQuery;
 
 /**
- * A TrendsQuery definition that violates a rule (limits, allow lists, shape). The message names the rule and
- * the limit, never echoes the offending value, so it is safe to show to the user who typed it.
+ * A TrendsQuery definition that violates a rule of the trends type (series, breakdown, row cap, version, shape).
+ * Same contract as {@see InvalidInsightQuery}: the message names the rule, never the offending value.
  */
-class InvalidTrendsQuery extends InvalidArgumentException {}
+class InvalidTrendsQuery extends InvalidInsightQuery {}

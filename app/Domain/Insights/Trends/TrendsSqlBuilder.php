@@ -3,6 +3,8 @@
 namespace App\Domain\Insights\Trends;
 
 use App\Domain\Insights\BuiltQuery;
+use App\Domain\Insights\Query\FilterOperator;
+use App\Domain\Insights\Query\PropertyFilter;
 use App\Domain\Insights\Sql\Params;
 use App\Domain\Insights\Sql\ParamType;
 

@@ -2,8 +2,8 @@
 
 namespace Tests\Support;
 
+use App\Domain\Insights\Query\DateRange;
 use App\Domain\Insights\Trends\BucketAxis;
-use App\Domain\Insights\Trends\DateRange;
 use App\Domain\Insights\Trends\Interval;
 use App\Infrastructure\ClickHouse\ClickHouseClient;
 use DateTimeZone;

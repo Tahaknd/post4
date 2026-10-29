@@ -1,6 +1,6 @@
 <?php
 
-use App\Domain\Insights\Trends\DatePreset;
+use App\Domain\Insights\Query\DatePreset;
 use Illuminate\Support\Carbon;
 
 /** Resolves a preset at a UTC instant in a zone and returns the window as `from|to` in UTC. */
