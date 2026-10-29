@@ -1,25 +1,25 @@
-# Dokümanlar ve Postman: en son kullanım talimatıyla birlikte eklenecek
+# Docs and Postman: added last, together with the usage instructions
 /docs/
 /postman/
 *.postman_collection.json
 *.postman_environment.json
 
-# Gizli bilgiler
+# Secrets
 .env
 .env.*
 !.env.example
 !.env.local.example
 
-# Bağımlılıklar ve build çıktıları
+# Dependencies and build output
 /vendor/
 /node_modules/
 /public/build/
 /public/hot
 
-# Docker veri dizinleri
+# Docker data directories
 /docker/data/
 
-# Araç ve editör dosyaları
+# Tool and editor files
 .DS_Store
 .idea/
 .vscode/
@@ -27,7 +27,7 @@
 .phpunit.result.cache
 .phpunit.cache
 
-# Laravel varsayılan sqlite dosyası
+# Laravel default sqlite file
 /database/*.sqlite
 /database/*.sqlite-*
 

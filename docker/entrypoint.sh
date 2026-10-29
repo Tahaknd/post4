@@ -9,7 +9,7 @@ if [ -z "$APP_KEY" ]; then
     umask 077
     tmp="$(mktemp "$KEY_FILE.XXXXXX")"
     php -r 'echo "base64:" . base64_encode(random_bytes(32));' > "$tmp"
-    # Atomik yayın: hard link hedef varsa başarısız olur, ilk yazan kazanır.
+    # Atomic publish: the hard link fails if the target exists, the first writer wins.
     ln "$tmp" "$KEY_FILE" 2>/dev/null || true
     rm -f "$tmp"
   fi
