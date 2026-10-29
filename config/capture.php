@@ -106,6 +106,9 @@ return [
      */
     'status' => [
         'kafka_group' => env('CAPTURE_STATUS_KAFKA_GROUP', 'clickhouse_events'),
+        // The ClickHouse consumer of the person_distinct_ids topic (kafka_person_distinct_ids, migration 004); the topic
+        // itself is config identity.rows_topic.
+        'person_kafka_group' => env('CAPTURE_STATUS_PERSON_KAFKA_GROUP', 'clickhouse_person_distinct_ids'),
         'kafka_timeout_ms' => 3000,
         // All ClickHouse queries of one run together (each one is also capped at 20 s).
         'total_time_budget_seconds' => 45,

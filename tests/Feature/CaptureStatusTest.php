@@ -4,6 +4,7 @@ use App\Console\Commands\CaptureStatus;
 use App\Domain\Capture\DlqDepthProbe;
 use App\Domain\Capture\IdentityLagProbe;
 use App\Domain\Capture\KafkaLagProbe;
+use App\Domain\Capture\PersonLagProbe;
 use App\Models\Project;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Scheduling\CallbackEvent;
@@ -31,6 +32,7 @@ beforeEach(function () {
     ClickHouseStatusFake::install();
     $this->app->instance(KafkaLagProbe::class, new FakeKafkaLagProbe);
     $this->app->instance(IdentityLagProbe::class, new FakeKafkaLagProbe);
+    $this->app->instance(PersonLagProbe::class, new FakeKafkaLagProbe);
     $this->app->instance(DlqDepthProbe::class, new FakeDlqDepthProbe);
 });
 
@@ -59,7 +61,7 @@ it('reports OK with exit code 0 for a healthy pipeline and queries every section
         ->toContain('pending mutations:   0')
         ->and($err)->toBe('')
         ->and(array_unique(ClickHouseStatusFake::$seenTags))->toEqualCanonicalizing(
-            ['events', 'events_recent', 'errors_count', 'errors_top', 'consumers', 'too_many_parts', 'disks', 'parts', 'mutations'],
+            ['events', 'events_recent', 'errors_count', 'errors_top', 'consumers', 'person_consumers', 'too_many_parts', 'disks', 'parts', 'mutations'],
         );
 });
 
@@ -302,7 +304,7 @@ describe('--json', function () {
         expect($code)->toBe(1)
             ->and($json['status'])->toBe('WARN')
             ->and($json['reasons'])->toHaveCount(1)
-            ->and($json['events_errors']['top'][0])->toBe(['error' => 'x', 'count' => 1, 'newest_received_at' => '2026-09-21T14:13:20Z']);
+            ->and($json['events_errors']['top'][0])->toBe(['error' => 'x', 'topic' => '', 'count' => 1, 'newest_received_at' => '2026-09-21T14:13:20Z']);
     });
 });
 
@@ -690,6 +692,143 @@ describe('the identity consumer', function () {
         Log::spy();
 
         runStatus(['--log' => true]);
+
+        Log::shouldHaveReceived('info')->once()->with('capture:status', ['status' => 'OK', 'lag_max_partition' => 0, 'disk_free_percent' => 50.0]);
+    });
+});
+
+describe('the person_distinct_ids consumer of ClickHouse', function () {
+    it('has its own section in the text and the JSON key person_consumer, and leaves the existing sections and keys alone', function () {
+        $this->app->instance(PersonLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => 40, 'high' => 47, 'lag' => 7]]));
+
+        [$code, $out, $err] = runStatus();
+        [, $jsonOut] = runStatus(['--json' => true]);
+        $json = json_decode($jsonOut, true, flags: JSON_THROW_ON_ERROR);
+
+        expect($code)->toBe(0)
+            ->and($err)->toBe('')
+            ->and($out)->toContain('Person mapping consumer (system.kafka_consumers, posthog.kafka_person_distinct_ids; group clickhouse_person_distinct_ids, topic person_distinct_ids)')
+            ->toContain('offset sum:          25')
+            ->toContain('total lag:           7')
+            ->toContain('partition 0:         committed 40, high watermark 47, lag 7')
+            // the events consumer section is unchanged
+            ->toContain('Kafka consumer (system.kafka_consumers, posthog.kafka_events)')->toContain('offset sum:          1,447')
+            ->and($json['person_consumer'])->toMatchArray([
+                'table' => 'kafka_person_distinct_ids', 'group' => 'clickhouse_person_distinct_ids', 'topic' => 'person_distinct_ids',
+                'consumers' => 1, 'newest_exception' => null, 'offset_sum' => 25, 'last_poll_age_seconds' => 1,
+            ])
+            ->and($json['person_consumer']['lag'])->toMatchArray(['known' => true, 'total' => 7])
+            ->and($json['person_consumer']['lag']['partitions'])->toBe(['0' => ['committed' => 40, 'high' => 47, 'lag' => 7]])
+            ->and($json['kafka_consumer'])->toMatchArray(['consumers' => 1, 'offset_sum' => 1447])
+            ->and(array_keys($json))->toBe(['status', 'exit_code', 'reasons', 'checked_at', 'events', 'events_errors', 'kafka_consumer', 'kafka_lag', 'clickhouse', 'dropped', 'previous_run', 'identity_consumer', 'person_consumer']);
+    });
+
+    it('is STALLED when it keeps raising the same error with a backlog and no commit, with its own wording', function () {
+        ClickHouseStatusFake::install([
+            'person_consumers' => [ClickHouseStatusFake::consumer(commitAgo: 400, pollAgo: 2, exceptions: [3 => WEDGE_MESSAGE])],
+        ]);
+        $this->app->instance(PersonLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => 10, 'high' => 60, 'lag' => 50]]));
+
+        [$code, $out, $err] = runStatus();
+
+        expect($code)->toBe(2)
+            ->and($out)->toContain('Ingest status: STALLED')->toContain('newest exception:    2026-10-23T11:59:57Z (3 s ago): '.WEDGE_MESSAGE)
+            ->and($err)->toContain('INGEST STALLED: the person_distinct_ids consumer is stalled: it raised "'.WEDGE_MESSAGE.'" 3 s ago')
+            ->and(substr_count($err, 'INGEST STALLED'))->toBe(1);
+    });
+
+    it('is NOT stalled by one recent exception at lag 0 (Kafka restart, cold start), nor by an old one', function (array $exceptions, array $partitions) {
+        ClickHouseStatusFake::install([
+            'person_consumers' => [ClickHouseStatusFake::consumer(commitAgo: 4000, pollAgo: 2, exceptions: $exceptions)],
+        ]);
+        $this->app->instance(PersonLagProbe::class, new FakeKafkaLagProbe($partitions));
+
+        [$code, , $err] = runStatus();
+
+        expect($code)->toBe(0)->and($err)->toBe('');
+    })->with([
+        'recent exception, caught up' => [[10 => 'Local: Broker transport failure'], [0 => ['committed' => 5, 'high' => 5, 'lag' => 0]]],
+        'old exception with a backlog' => [[500 => WEDGE_MESSAGE], [0 => ['committed' => 5, 'high' => 25, 'lag' => 20]]],
+    ]);
+
+    it('is STALLED when its lag stays above 0 while the consumer offsets do not move for 60 s, and not at lag 0', function () {
+        $probe = new FakeKafkaLagProbe([0 => ['committed' => 10, 'high' => 40, 'lag' => 30]]);
+        $this->app->instance(PersonLagProbe::class, $probe);
+
+        [$first] = runStatus();
+        CarbonImmutable::setTestNow('2026-10-23 12:01:05');
+        ClickHouseStatusFake::install();
+        [$second, , $err] = runStatus();
+
+        expect($first)->toBe(0)
+            ->and($second)->toBe(2)
+            ->and($err)->toContain('INGEST STALLED: the person_distinct_ids consumer is stalled: lag is 30')->toContain('not moved for 65 s');
+
+        // caught up: the same frozen offsets two hours later are the normal idle state
+        $probe->partitions = [0 => ['committed' => 40, 'high' => 40, 'lag' => 0]];
+        CarbonImmutable::setTestNow('2026-10-23 14:00:00');
+        ClickHouseStatusFake::install();
+
+        expect(runStatus()[0])->toBe(0);
+    });
+
+    it('keeps the baselines of the two consumers apart (a moving events consumer cannot hide a frozen person one)', function () {
+        $this->app->instance(PersonLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => 10, 'high' => 40, 'lag' => 30]]));
+        $this->app->instance(KafkaLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => 10, 'high' => 40, 'lag' => 30]]));
+        runStatus();
+
+        CarbonImmutable::setTestNow('2026-10-23 12:02:00');
+        // the events consumer's offsets advanced, the person consumer's did not
+        ClickHouseStatusFake::install(['consumers' => [ClickHouseStatusFake::consumer(offsets: [-1001, 2000, -1001])]]);
+        [$code, , $err] = runStatus();
+
+        expect($code)->toBe(2)
+            ->and($err)->toContain('the person_distinct_ids consumer is stalled')
+            ->not->toContain('Kafka is stalled');
+        expect(Cache::get(CaptureStatus::PERSON_SNAPSHOT_KEY))->toMatchArray(['offset_sum' => 25, 'lag' => 30]);
+    });
+
+    it('warns when no consumer is registered for the table, and when its lag is unknown after an exception (older than the stall window)', function () {
+        ClickHouseStatusFake::install(['person_consumers' => []]);
+        [$code, $out, $err] = runStatus();
+
+        expect($code)->toBe(1)
+            ->and($err)->toContain('WARN: no Kafka consumer is registered for posthog.kafka_person_distinct_ids')
+            ->and($out)->toContain('Person mapping consumer')->toContain('consumers:           0');
+
+        ClickHouseStatusFake::install(['person_consumers' => [ClickHouseStatusFake::consumer(commitAgo: 4000, pollAgo: 2, exceptions: [300 => 'Local: Unknown topic'])]]);
+        $this->app->instance(PersonLagProbe::class, new FakeKafkaLagProbe(failWith: new RuntimeException('timeout')));
+        [$code, $out, $err] = runStatus();
+
+        expect($code)->toBe(1)
+            ->and($err)->toContain('NOTE: person_distinct_ids consumer lag is unknown: timeout')
+            ->toContain('WARN: the person_distinct_ids consumer raised "Local: Unknown topic" 300 s ago and its Kafka lag could not be computed')
+            ->and($out)->toContain('total lag:           unknown');
+    });
+
+    it('labels a rejected person message by its topic in Pipeline errors, and keeps events lines as they were', function () {
+        $now = CarbonImmutable::now('UTC')->getTimestamp();
+        ClickHouseStatusFake::install([
+            'errors_count' => [['c' => '6']],
+            'errors_top' => [
+                ['err' => 'rejected: invalid uuid', 'topic' => 'events', 'c' => '4', 'newest_ts' => $now - 20],
+                ['err' => 'rejected: invalid project_id/distinct_id/person_id/is_deleted', 'topic' => 'person_distinct_ids', 'c' => '2', 'newest_ts' => $now - 30],
+            ],
+        ]);
+
+        [, $out] = runStatus();
+        $json = json_decode(runStatus(['--json' => true])[1], true, flags: JSON_THROW_ON_ERROR);
+
+        expect($out)->toContain('    4 x  rejected: invalid uuid  (newest')
+            ->toContain('    2 x  [person_distinct_ids] rejected: invalid project_id/distinct_id/person_id/is_deleted  (newest')
+            ->and(array_column($json['events_errors']['top'], 'topic'))->toBe(['events', 'person_distinct_ids']);
+    });
+
+    it('keeps the one-line --log format: still only status, lag_max_partition and disk_free_percent', function () {
+        $this->app->instance(PersonLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => 1, 'high' => 90, 'lag' => 89]]));
+        Log::spy();
+
+        Artisan::call('capture:status', ['--log' => true], new SplitOutput);
 
         Log::shouldHaveReceived('info')->once()->with('capture:status', ['status' => 'OK', 'lag_max_partition' => 0, 'disk_free_percent' => 50.0]);
     });

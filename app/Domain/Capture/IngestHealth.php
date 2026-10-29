@@ -17,6 +17,10 @@ namespace App\Domain\Capture;
  * The identity consumer (group `identity` on the events topic) has the second signature only, and only with a
  * KNOWN lag > 0 (a consumer that is caught up has nothing to commit, so frozen offsets at lag 0 are the normal state):
  * its committed offsets did not move since a snapshot at least 60 s old that also saw a lag > 0.
+ * The ClickHouse consumer of the person_distinct_ids topic (table kafka_person_distinct_ids, group
+ * clickhouse_person_distinct_ids) gets BOTH signatures with the same rules and thresholds, on its own `person_*` snapshot
+ * keys (a consumer that is caught up has lag 0 and nothing to commit: an exception at lag 0 or frozen offsets at lag 0 are
+ * not a stall; an unknown lag keeps the first signature armed).
  * WARN is everything else worth looking at; OK means nothing was found. Missing snapshot keys mean
  * "unknown" and never raise a reason on their own.
  *
@@ -27,7 +31,9 @@ namespace App\Domain\Capture;
  * pending_mutations (int), dropped_by_project (array<int, int> drops in the last hour per project id),
  * identity_lag (?int, null = unknown), identity_offset_sum (int), identity_previous_offset_sum (?int),
  * identity_previous_age (?int), identity_previous_lag (?int), dlq_depth (?int, null = unknown),
- * dlq_previous_depth (?int).
+ * dlq_previous_depth (?int), and for the person_distinct_ids consumer person_consumers (int), person_exception_message
+ * (?string), person_exception_age (?int), person_commit_age (?int), person_poll_age (?int), person_lag (?int),
+ * person_offset_sum (int), person_previous_offset_sum (?int), person_previous_age (?int), person_previous_lag (?int).
  */
 final class IngestHealth
 {
@@ -75,41 +81,10 @@ final class IngestHealth
      */
     private static function stallReasons(array $s, array $t): array
     {
-        $reasons = [];
-
-        $exceptionAge = self::int($s, 'exception_age');
-        $commitAge = self::int($s, 'commit_age');
-        $pollAge = self::int($s, 'poll_age');
-        $lag = self::int($s, 'lag');
-        if ($exceptionAge !== null && $exceptionAge <= $t['stall_exception_window_seconds']
-            && $lag !== 0
-            && ($commitAge === null || $commitAge > $t['stall_commit_stale_seconds'])
-            && $pollAge !== null && $pollAge < $t['stall_poll_fresh_seconds']) {
-            $reasons[] = sprintf(
-                'the Kafka consumer is stalled: it raised "%s" %d s ago, last committed %s but polled %d s ago, so it keeps retrying a block that never succeeds; %s',
-                self::oneLine((string) ($s['exception_message'] ?? 'unknown error')),
-                $exceptionAge,
-                $commitAge === null ? 'never' : $commitAge.' s ago',
-                $pollAge,
-                self::XML_POINTER,
-            );
-        }
-
-        $baselineAge = self::int($s, 'previous_age');
-        $previousSum = self::int($s, 'previous_offset_sum');
-        $previousLag = self::int($s, 'previous_lag');
-        if ($lag !== null && $lag > 0
-            && $baselineAge !== null && $baselineAge >= $t['stall_min_baseline_age_seconds']
-            && $previousSum !== null && $previousSum === self::int($s, 'offset_sum')
-            && $previousLag !== null && $previousLag > 0) {
-            $reasons[] = sprintf(
-                'Kafka is stalled: lag is %d and the consumer offsets have not moved for %d s (offset sum %d); %s',
-                $lag,
-                $baselineAge,
-                $previousSum,
-                self::XML_POINTER,
-            );
-        }
+        $reasons = [
+            ...self::consumerStallReasons($s, $t, '', 'the Kafka consumer', 'Kafka'),
+            ...self::consumerStallReasons($s, $t, 'person_', 'the person_distinct_ids consumer', 'the person_distinct_ids consumer'),
+        ];
 
         $identityLag = self::int($s, 'identity_lag');
         $identityAge = self::int($s, 'identity_previous_age');
@@ -124,6 +99,58 @@ final class IngestHealth
                 $identityLag,
                 $identityAge,
                 $identityPreviousSum,
+            );
+        }
+
+        return $reasons;
+    }
+
+    /**
+     * The two stall signatures of one ClickHouse Kafka consumer, read from the snapshot keys `<prefix>exception_age`,
+     * `<prefix>commit_age`, ... (prefix '' = the events consumer, `person_` = the person_distinct_ids consumer).
+     *
+     * @param  string  $who  subject of the first reason ("the Kafka consumer"); $second is the subject of the frozen offsets reason ("Kafka")
+     * @param  array<string, mixed>  $s
+     * @param  array<string, int|float>  $t
+     * @return list<string>
+     */
+    private static function consumerStallReasons(array $s, array $t, string $prefix, string $who, string $second): array
+    {
+        $reasons = [];
+
+        $exceptionAge = self::int($s, $prefix.'exception_age');
+        $commitAge = self::int($s, $prefix.'commit_age');
+        $pollAge = self::int($s, $prefix.'poll_age');
+        $lag = self::int($s, $prefix.'lag');
+        if ($exceptionAge !== null && $exceptionAge <= $t['stall_exception_window_seconds']
+            && $lag !== 0
+            && ($commitAge === null || $commitAge > $t['stall_commit_stale_seconds'])
+            && $pollAge !== null && $pollAge < $t['stall_poll_fresh_seconds']) {
+            $reasons[] = sprintf(
+                '%s is stalled: it raised "%s" %d s ago, last committed %s but polled %d s ago, so it keeps retrying a block that never succeeds; %s',
+                $who,
+                self::oneLine((string) ($s[$prefix.'exception_message'] ?? 'unknown error')),
+                $exceptionAge,
+                $commitAge === null ? 'never' : $commitAge.' s ago',
+                $pollAge,
+                self::XML_POINTER,
+            );
+        }
+
+        $baselineAge = self::int($s, $prefix.'previous_age');
+        $previousSum = self::int($s, $prefix.'previous_offset_sum');
+        $previousLag = self::int($s, $prefix.'previous_lag');
+        if ($lag !== null && $lag > 0
+            && $baselineAge !== null && $baselineAge >= $t['stall_min_baseline_age_seconds']
+            && $previousSum !== null && $previousSum === self::int($s, $prefix.'offset_sum')
+            && $previousLag !== null && $previousLag > 0) {
+            $reasons[] = sprintf(
+                '%s is stalled: lag is %d and the consumer offsets have not moved for %d s (offset sum %d); %s',
+                $second,
+                $lag,
+                $baselineAge,
+                $previousSum,
+                self::XML_POINTER,
             );
         }
 
@@ -180,6 +207,20 @@ final class IngestHealth
 
         if (self::int($s, 'consumers') === 0) {
             $reasons[] = 'no Kafka consumer is registered for posthog.kafka_events in system.kafka_consumers';
+        }
+
+        if (self::int($s, 'person_consumers') === 0) {
+            $reasons[] = 'no Kafka consumer is registered for posthog.kafka_person_distinct_ids in system.kafka_consumers (is migration 004 applied?)';
+        }
+
+        $personExceptionAge = self::int($s, 'person_exception_age');
+        if (self::int($s, 'person_lag') === null && $personExceptionAge !== null && $personExceptionAge <= $t['warn_exception_window_seconds']) {
+            $reasons[] = sprintf(
+                'the person_distinct_ids consumer raised "%s" %d s ago and its Kafka lag could not be computed; %s',
+                self::oneLine((string) ($s['person_exception_message'] ?? 'unknown error')),
+                $personExceptionAge,
+                self::XML_POINTER,
+            );
         }
 
         $exceptionAge = self::int($s, 'exception_age');

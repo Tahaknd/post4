@@ -1,7 +1,7 @@
 <script setup>
 import OptionSelect from '@/Components/Insights/OptionSelect.vue';
 
-// What is counted: every event, or the distinct users behind them. `options` is the server's list of metrics.
+// What is counted: every event, or the distinct users (persons) behind them. `options` is the server's list of metrics.
 defineProps({
     options: { type: Array, required: true },
     error: { type: String, default: undefined },

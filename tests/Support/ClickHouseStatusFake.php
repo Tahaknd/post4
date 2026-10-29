@@ -81,6 +81,7 @@ final class ClickHouseStatusFake
             'errors_count' => [['c' => '0']],
             'errors_top' => [],
             'consumers' => [self::consumer()],
+            'person_consumers' => [self::consumer(offsets: [-1001, 25])],
             'too_many_parts' => [],
             'disks' => [['name' => 'default', 'free_space' => '50000000000', 'total_space' => '100000000000']],
             'parts' => [['active' => '120', 'max_parts' => '100000']],

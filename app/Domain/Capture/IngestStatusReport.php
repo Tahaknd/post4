@@ -81,6 +81,7 @@ final class IngestStatusReport
                 'last_hour' => $d['errors_last_hour'],
                 'top' => array_map(fn (array $r): array => [
                     'error' => $r['error'],
+                    'topic' => $r['topic'] ?? '',
                     'count' => $r['count'],
                     'newest_received_at' => IngestStatusFormat::iso($r['newest_ts']),
                 ], $d['errors_top']),
@@ -178,6 +179,69 @@ final class IngestStatusReport
                 'known' => $dlq['known'],
                 'depth' => $dlq['total'],
                 'partitions' => (object) $dlq['partitions'],
+            ],
+        ];
+    }
+
+    /**
+     * The person_distinct_ids consumer part of the health snapshot (see {@see IngestHealth}): the same facts as
+     * {@see self::healthSnapshot()} gives for the events consumer, under a `person_` prefix, for ClickHouse's own consumer
+     * of the person_distinct_ids topic.
+     *
+     * @param  array<string, mixed>  $person  `$data['person']` of IngestStatusQueries::fetch()
+     * @param  array{known: bool, total: ?int, partitions: array}  $lag  lag of group clickhouse_person_distinct_ids
+     * @param  ?array{offset_sum: int, at: int, lag: ?int}  $previous  its stall baseline
+     * @return array<string, mixed>
+     */
+    public static function personSnapshot(array $person, int $clock, array $lag, ?array $previous, int $now): array
+    {
+        $exception = $person['newest_exception'];
+
+        return [
+            'person_consumers' => $person['consumers'],
+            'person_exception_message' => $exception['message'] ?? null,
+            'person_exception_age' => $exception === null ? null : max(0, $clock - $exception['ts']),
+            'person_commit_age' => $person['last_commit_ts'] === null ? null : max(0, $clock - $person['last_commit_ts']),
+            'person_poll_age' => $person['last_poll_ts'] === null ? null : max(0, $clock - $person['last_poll_ts']),
+            'person_lag' => $lag['total'],
+            'person_offset_sum' => $person['offset_sum'],
+            'person_previous_offset_sum' => $previous['offset_sum'] ?? null,
+            'person_previous_age' => $previous === null ? null : max(0, $now - $previous['at']),
+            'person_previous_lag' => $previous['lag'] ?? null,
+        ];
+    }
+
+    /**
+     * The `person_consumer` section of the report: ClickHouse's consumer of the person_distinct_ids topic
+     * (system.kafka_consumers facts and the lag of its group).
+     *
+     * @param  array<string, mixed>  $person  `$data['person']` of IngestStatusQueries::fetch()
+     * @param  array{known: bool, total: ?int, partitions: array<int, array{committed: ?int, high: int, lag: int}>}  $lag
+     * @return array<string, mixed>
+     */
+    public static function personSection(array $person, int $clock, array $lag, string $table, string $group, string $topic): array
+    {
+        $exception = $person['newest_exception'];
+
+        return [
+            'table' => $table,
+            'group' => $group,
+            'topic' => $topic,
+            'consumers' => $person['consumers'],
+            'newest_exception' => $exception === null ? null : [
+                'message' => $exception['message'],
+                'time' => IngestStatusFormat::iso($exception['ts']),
+                'age_seconds' => max(0, $clock - $exception['ts']),
+            ],
+            'last_commit_time' => IngestStatusFormat::iso($person['last_commit_ts']),
+            'last_commit_age_seconds' => $person['last_commit_ts'] === null ? null : max(0, $clock - $person['last_commit_ts']),
+            'last_poll_time' => IngestStatusFormat::iso($person['last_poll_ts']),
+            'last_poll_age_seconds' => $person['last_poll_ts'] === null ? null : max(0, $clock - $person['last_poll_ts']),
+            'offset_sum' => $person['offset_sum'],
+            'lag' => [
+                'known' => $lag['known'],
+                'total' => $lag['total'],
+                'partitions' => (object) $lag['partitions'],
             ],
         ];
     }

@@ -30,7 +30,10 @@ final class IngestStatusRenderer
         $out[] = 'Pipeline errors (posthog.events_errors, last hour)';
         $out[] = '  rows:                '.number_format($r['events_errors']['last_hour']);
         foreach ($r['events_errors']['top'] as $top) {
-            $out[] = sprintf('  %5d x  %s  (newest %s)', $top['count'], $top['error'], $top['newest_received_at']);
+            // Rows of the events topic keep the line they always had; another topic (person_distinct_ids) is named.
+            $topic = (string) ($top['topic'] ?? '');
+            $label = $topic === '' || $topic === 'events' ? '' : "[{$topic}] ";
+            $out[] = sprintf('  %5d x  %s%s  (newest %s)', $top['count'], $label, $top['error'], $top['newest_received_at']);
         }
 
         $d = $r['dropped'];
@@ -94,6 +97,27 @@ final class IngestStatusRenderer
             $out[] = '';
             $out[] = sprintf('Identity dead letters (topic %s)', $i['dlq']['topic']);
             $out[] = '  messages in topic:   '.($i['dlq']['known'] ? number_format((int) $i['dlq']['depth']) : 'unknown');
+        }
+
+        if (isset($r['person_consumer'])) {
+            $p = $r['person_consumer'];
+            $out[] = '';
+            $out[] = sprintf('Person mapping consumer (system.kafka_consumers, posthog.%s; group %s, topic %s)', $p['table'], $p['group'], $p['topic']);
+            $out[] = '  consumers:           '.$p['consumers'];
+            $out[] = '  newest exception:    '.($p['newest_exception'] === null
+                ? 'none'
+                : sprintf('%s (%d s ago): %s', $p['newest_exception']['time'], $p['newest_exception']['age_seconds'], $p['newest_exception']['message']));
+            $out[] = '  last commit:         '.IngestStatusFormat::when($p['last_commit_time'], $p['last_commit_age_seconds'], 'never');
+            $out[] = '  last poll:           '.IngestStatusFormat::when($p['last_poll_time'], $p['last_poll_age_seconds'], 'never');
+            $out[] = '  offset sum:          '.number_format($p['offset_sum']);
+            if (! $p['lag']['known']) {
+                $out[] = '  total lag:           unknown';
+            } else {
+                $out[] = '  total lag:           '.number_format((int) $p['lag']['total']);
+                foreach ((array) $p['lag']['partitions'] as $partition => $part) {
+                    $out[] = sprintf('  partition %d:         committed %s, high watermark %d, lag %d', $partition, $part['committed'] ?? 'none', $part['high'], $part['lag']);
+                }
+            }
         }
 
         return $out;

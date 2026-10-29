@@ -12,6 +12,7 @@ use App\Domain\Capture\IdentityLagProbe;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\NoFlagsEvaluator;
 use App\Domain\Capture\PayloadDecoder;
+use App\Domain\Capture\PersonLagProbe;
 use App\Domain\Insights\Events\EventNames;
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
@@ -29,6 +30,7 @@ use App\Infrastructure\Kafka\Identity\RowWriter;
 use App\Infrastructure\Kafka\KafkaEventProducer;
 use App\Infrastructure\Kafka\RdKafkaIdentityLagProbe;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
+use App\Infrastructure\Kafka\RdKafkaPersonLagProbe;
 use App\Infrastructure\Kafka\RdKafkaTopicDepthProbe;
 use App\Models\Project;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
@@ -121,6 +123,13 @@ class AppServiceProvider extends ServiceProvider
             config('capture.kafka_brokers'),
             config('capture.events_topic'),
             config('identity.group'),
+            (int) config('capture.status.kafka_timeout_ms'),
+        )));
+        // `capture:status`: how far ClickHouse's own group on the person_distinct_ids topic is behind (never the identity group).
+        $this->app->singleton(PersonLagProbe::class, fn () => new RdKafkaPersonLagProbe(new RdKafkaLagProbe(
+            config('capture.kafka_brokers'),
+            config('identity.rows_topic'),
+            config('capture.status.person_kafka_group'),
             (int) config('capture.status.kafka_timeout_ms'),
         )));
         $this->app->singleton(DlqDepthProbe::class, fn () => new RdKafkaTopicDepthProbe(

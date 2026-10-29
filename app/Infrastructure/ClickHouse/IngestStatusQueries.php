@@ -47,8 +47,10 @@ final class IngestStatusQueries
             $recent = null;
         }
         $errorsCount = $q('errors_count', 'SELECT count() AS c FROM posthog.events_errors WHERE received_at > now() - INTERVAL 1 HOUR')[0] ?? [];
-        $errorsTop = $q('errors_top', 'SELECT left(error, 80) AS err, count() AS c, toUnixTimestamp(max(received_at)) AS newest_ts FROM posthog.events_errors WHERE received_at > now() - INTERVAL 1 HOUR GROUP BY err ORDER BY c DESC, newest_ts DESC LIMIT 5');
-        $consumers = $q('consumers', "SELECT toUnixTimestamp(last_commit_time) AS last_commit_ts, toUnixTimestamp(last_poll_time) AS last_poll_ts, arrayMap(t -> toUnixTimestamp(t), `exceptions.time`) AS exception_times, `exceptions.text` AS exception_texts, `assignments.current_offset` AS offsets FROM system.kafka_consumers WHERE database = 'posthog' AND `table` = 'kafka_events'");
+        $errorsTop = $q('errors_top', 'SELECT left(error, 80) AS err, topic, count() AS c, toUnixTimestamp(max(received_at)) AS newest_ts FROM posthog.events_errors WHERE received_at > now() - INTERVAL 1 HOUR GROUP BY err, topic ORDER BY c DESC, newest_ts DESC LIMIT 5');
+        $consumers = $q('consumers', $this->consumersSql('kafka_events'));
+        // The ClickHouse consumer of the person_distinct_ids topic (migration 004): the same facts, its own table.
+        $personConsumers = $q('person_consumers', $this->consumersSql('kafka_person_distinct_ids'));
         $tooManyParts = $q('too_many_parts', "SELECT value, toUnixTimestamp(last_error_time) AS last_error_ts, last_error_message FROM system.errors WHERE name = 'TOO_MANY_PARTS'")[0] ?? null;
         $disks = $q('disks', 'SELECT name, free_space, total_space FROM system.disks WHERE total_space > 0');
         $parts = $q('parts', "SELECT (SELECT count() FROM system.parts WHERE database = 'posthog' AND `table` = 'events' AND active) AS active, (SELECT toUInt64OrZero(value) FROM system.merge_tree_settings WHERE name = 'max_parts_in_total') AS max_parts")[0] ?? [];
@@ -64,6 +66,7 @@ final class IngestStatusQueries
             'errors_last_hour' => (int) ($errorsCount['c'] ?? 0),
             'errors_top' => array_map(fn (array $r): array => [
                 'error' => IngestStatusFormat::oneLine((string) $r['err']),
+                'topic' => IngestStatusFormat::oneLine((string) ($r['topic'] ?? '')),
                 'count' => (int) $r['c'],
                 'newest_ts' => IngestStatusFormat::ts($r['newest_ts'] ?? null),
             ], $errorsTop),
@@ -76,7 +79,14 @@ final class IngestStatusQueries
             'parts_active' => isset($parts['active']) ? (int) $parts['active'] : null,
             'parts_max' => isset($parts['max_parts']) ? (int) $parts['max_parts'] : null,
             'pending_mutations' => (int) ($mutations['c'] ?? 0),
+            'person' => $this->consumerFacts($personConsumers, $nowTs),
         ] + $this->consumerFacts($consumers, $nowTs);
+    }
+
+    /** system.kafka_consumers rows of one Kafka engine table of the `posthog` database (the table name is one of ours, never input). */
+    private function consumersSql(string $table): string
+    {
+        return "SELECT toUnixTimestamp(last_commit_time) AS last_commit_ts, toUnixTimestamp(last_poll_time) AS last_poll_ts, arrayMap(t -> toUnixTimestamp(t), `exceptions.time`) AS exception_times, `exceptions.text` AS exception_texts, `assignments.current_offset` AS offsets FROM system.kafka_consumers WHERE database = 'posthog' AND `table` = '{$table}'";
     }
 
     /**

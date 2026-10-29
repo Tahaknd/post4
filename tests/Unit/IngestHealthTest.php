@@ -265,3 +265,103 @@ describe('the identity consumer', function () {
         'unknown now' => [null, 5, false],
     ]);
 });
+
+describe('the person_distinct_ids consumer of ClickHouse', function () {
+    /** The same wedge signature as wedgedSnapshot(), on the person_ keys. */
+    function personWedged(array $override = []): array
+    {
+        return healthySnapshot(array_replace([
+            'person_consumers' => 1,
+            'person_exception_message' => 'Too many partitions for single INSERT block (more than 1000)',
+            'person_exception_age' => 5,
+            'person_commit_age' => 400,
+            'person_poll_age' => 3,
+            'person_lag' => 150,
+            'person_offset_sum' => 77,
+        ], $override));
+    }
+
+    function personFrozen(array $override = []): array
+    {
+        return healthySnapshot(array_replace([
+            'person_consumers' => 1,
+            'person_lag' => 30,
+            'person_offset_sum' => 500,
+            'person_previous_offset_sum' => 500,
+            'person_previous_age' => 90,
+            'person_previous_lag' => 12,
+        ], $override));
+    }
+
+    it('is STALLED by the exception signature, with its own subject and the XML pointer', function () {
+        $result = IngestHealth::classify(personWedged());
+
+        expect($result['status'])->toBe('STALLED')
+            ->and($result['reasons'])->toHaveCount(1)
+            ->and($result['reasons'][0])->toStartWith('the person_distinct_ids consumer is stalled: it raised "Too many partitions')
+            ->toContain('see the header of docker/clickhouse/users.d/10-ingest-settings.xml');
+    });
+
+    it('is STALLED by the frozen offsets signature with a lag above 0', function () {
+        $result = IngestHealth::classify(personFrozen());
+
+        expect($result['status'])->toBe('STALLED')
+            ->and($result['reasons'][0])->toStartWith('the person_distinct_ids consumer is stalled: lag is 30')->toContain('90 s')->toContain('offset sum 500');
+    });
+
+    it('never raises a stall at lag 0: not by a fresh exception, not by offsets that stayed put for a day', function () {
+        expect(IngestHealth::classify(personWedged(['person_lag' => 0]))['status'])->toBe('OK')
+            ->and(IngestHealth::classify(personFrozen(['person_lag' => 0, 'person_previous_age' => 86_000, 'person_previous_lag' => 0]))['status'])->toBe('OK');
+    });
+
+    it('keeps the exception signature armed when the lag is unknown, exactly like the events consumer', function () {
+        expect(IngestHealth::classify(personWedged(['person_lag' => null]))['status'])->toBe('STALLED')
+            ->and(IngestHealth::classify(wedgedSnapshot(['lag' => null]))['status'])->toBe('STALLED');
+    });
+
+    it('applies the same conditions as the events consumer to each signature', function (array $override) {
+        expect(IngestHealth::classify(personWedged($override))['status'])->toBe('OK');
+    })->with([
+        'old exception' => [['person_exception_age' => 121]],
+        'committed recently' => [['person_commit_age' => 120]],
+        'not polling' => [['person_poll_age' => 60]],
+        'no exception' => [['person_exception_age' => null]],
+    ]);
+
+    it('needs a known lag, a baseline that is old enough with a lag of its own, and offsets that really are the same', function (array $override) {
+        expect(IngestHealth::classify(personFrozen($override))['status'])->toBe('OK');
+    })->with([
+        'unknown lag' => [['person_lag' => null]],
+        'baseline too young' => [['person_previous_age' => 59]],
+        'no baseline' => [['person_previous_age' => null, 'person_previous_offset_sum' => null, 'person_previous_lag' => null]],
+        'the baseline was caught up' => [['person_previous_lag' => 0]],
+        'the offsets moved' => [['person_offset_sum' => 501]],
+    ]);
+
+    it('is independent of the events consumer: a healthy events side does not hide a stalled person side and vice versa', function () {
+        expect(IngestHealth::classify(personFrozen(['lag' => 0, 'offset_sum' => 5]))['status'])->toBe('STALLED')
+            ->and(IngestHealth::classify(wedgedSnapshot(['person_lag' => 0, 'person_consumers' => 1]))['reasons'][0])->toStartWith('the Kafka consumer is stalled');
+    });
+
+    it('leaves the events consumer wording byte for byte as it was', function () {
+        $frozen = healthySnapshot(['lag' => 30, 'offset_sum' => 500, 'previous_offset_sum' => 500, 'previous_age' => 90, 'previous_lag' => 12]);
+
+        expect(IngestHealth::classify(wedgedSnapshot())['reasons'][0])
+            ->toBe('the Kafka consumer is stalled: it raised "Too many partitions for single INSERT block (more than 1000)" 5 s ago, last committed 400 s ago but polled 3 s ago, so it keeps retrying a block that never succeeds; see the header of docker/clickhouse/users.d/10-ingest-settings.xml')
+            ->and(IngestHealth::classify($frozen)['reasons'][0])
+            ->toBe('Kafka is stalled: lag is 30 and the consumer offsets have not moved for 90 s (offset sum 500); see the header of docker/clickhouse/users.d/10-ingest-settings.xml');
+    });
+
+    it('warns when no consumer is registered for its table, and only when the count is really 0', function () {
+        $none = IngestHealth::classify(healthySnapshot(['person_consumers' => 0]));
+
+        expect($none['status'])->toBe('WARN')->and($none['reasons'][0])->toContain('posthog.kafka_person_distinct_ids')
+            ->and(IngestHealth::classify(healthySnapshot(['person_consumers' => 1]))['status'])->toBe('OK');
+    });
+
+    it('warns about an unknown lag after an exception that is too old for a stall but within the hour', function () {
+        $result = IngestHealth::classify(healthySnapshot(['person_lag' => null, 'person_exception_age' => 300, 'person_exception_message' => 'Local: Unknown topic', 'person_poll_age' => 2, 'person_commit_age' => 9000]));
+
+        expect($result['status'])->toBe('WARN')->and($result['reasons'][0])->toContain('the person_distinct_ids consumer raised "Local: Unknown topic" 300 s ago');
+    });
+});

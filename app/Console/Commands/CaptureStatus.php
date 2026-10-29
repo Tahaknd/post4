@@ -9,6 +9,7 @@ use App\Domain\Capture\IngestStatusFormat;
 use App\Domain\Capture\IngestStatusRenderer;
 use App\Domain\Capture\IngestStatusReport;
 use App\Domain\Capture\KafkaLagProbe;
+use App\Domain\Capture\PersonLagProbe;
 use App\Http\Controllers\CaptureController;
 use App\Infrastructure\ClickHouse\IngestStatusQueries;
 use App\Models\Project;
@@ -35,6 +36,9 @@ class CaptureStatus extends Command
 
     /** Baseline of the identity consumer's frozen-offsets check (same mechanics as SNAPSHOT_KEY). */
     public const IDENTITY_SNAPSHOT_KEY = 'capture-status:identity';
+
+    /** Baseline of the person_distinct_ids consumer's frozen-offsets check (same mechanics as SNAPSHOT_KEY). */
+    public const PERSON_SNAPSHOT_KEY = 'capture-status:person';
 
     /** The depth of the dead letter topic at the previous run: a larger one is a WARN. */
     public const DLQ_SNAPSHOT_KEY = 'capture-status:dlq';
@@ -72,9 +76,17 @@ three keys status ("ERROR"), exit_code (2) and reasons (one message).
 lag_max_partition, disk_free_percent): info when OK, warning on WARN, error on STALLED or ERROR. The
 scheduler runs `capture:status --log` every minute, so `docker compose logs scheduler worker app` shows a
 trend and an ingest stall without anybody running the command.
+
+The report also covers the identity side: the identity consumer (group identity: lag, frozen offsets, dead
+letter topic) and, in the JSON key `person_consumer` and the section "Person mapping consumer", ClickHouse's own
+consumer of the person_distinct_ids topic (table kafka_person_distinct_ids, group clickhouse_person_distinct_ids:
+consumers, newest exception, last commit and poll, offset sum, lag). That consumer is judged with the same STALLED
+rules as the events consumer (an exception or frozen offsets only count with a lag above 0, so an idle topic is
+never a stall); its baseline is kept in the cache under capture-status:person. Rejected messages of both topics
+show in "Pipeline errors" (the JSON entries carry `topic`; the text names any topic other than events).
 HELP;
 
-    public function handle(IngestStatusQueries $queries, KafkaLagProbe $probe, IdentityLagProbe $identityProbe, DlqDepthProbe $dlqProbe): int
+    public function handle(IngestStatusQueries $queries, KafkaLagProbe $probe, IdentityLagProbe $identityProbe, DlqDepthProbe $dlqProbe, PersonLagProbe $personProbe): int
     {
         try {
             $data = $queries->fetch($this->budgetSeconds());
@@ -84,22 +96,26 @@ HELP;
 
         $lag = $this->kafkaLag($probe);
         $identityLag = $this->kafkaLag($identityProbe, 'identity consumer lag');
+        $personLag = $this->kafkaLag($personProbe, 'person_distinct_ids consumer lag');
         $dlq = $this->dlqDepth($dlqProbe);
         $dropped = $this->droppedEvents();
         $now = CarbonImmutable::now('UTC')->getTimestamp();
         $previous = $this->readSnapshot();
         $identityPrevious = $this->readSnapshot(self::IDENTITY_SNAPSHOT_KEY);
+        $personPrevious = $this->readSnapshot(self::PERSON_SNAPSHOT_KEY);
         $dlqPrevious = $this->readDlqSnapshot();
 
         $snapshot = IngestStatusReport::healthSnapshot($data, $lag, $previous, $now)
             + ['dropped_by_project' => $dropped['by_project']]
-            + IngestStatusReport::identitySnapshot($identityLag, $dlq, $identityPrevious, $dlqPrevious, $now);
+            + IngestStatusReport::identitySnapshot($identityLag, $dlq, $identityPrevious, $dlqPrevious, $now)
+            + IngestStatusReport::personSnapshot($data['person'], $data['now_ts'], $personLag, $personPrevious, $now);
         $health = IngestHealth::classify($snapshot, [
             'min_free_percent' => (float) config('capture.status.min_free_percent'),
             'min_free_bytes' => (int) config('capture.status.min_free_bytes'),
         ]);
         $this->writeSnapshot($data['offset_sum'], $lag['total'], $previous, $now);
         $this->writeSnapshot(IngestStatusReport::offsetSum($identityLag['partitions']), $identityLag['total'], $identityPrevious, $now, self::IDENTITY_SNAPSHOT_KEY);
+        $this->writeSnapshot($data['person']['offset_sum'], $personLag['total'], $personPrevious, $now, self::PERSON_SNAPSHOT_KEY);
         $this->writeDlqSnapshot($dlq['total']);
 
         $exit = match ($health['status']) {
@@ -115,6 +131,14 @@ HELP;
             (string) config('identity.group'),
             (string) config('capture.events_topic'),
             (string) config('identity.dlq_topic'),
+        );
+        $report['person_consumer'] = IngestStatusReport::personSection(
+            $data['person'],
+            $data['now_ts'],
+            $personLag,
+            'kafka_person_distinct_ids',
+            (string) config('capture.status.person_kafka_group'),
+            (string) config('identity.rows_topic'),
         );
 
         if ($this->option('log')) {
