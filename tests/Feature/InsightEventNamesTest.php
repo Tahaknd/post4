@@ -359,7 +359,7 @@ describe('cache', function () {
         foreach (["'INSIGHTS_EVENTS_CACHE_TTL_SECONDS', 120", "'INSIGHTS_EVENTS_EMPTY_SEARCH_CACHE_TTL_SECONDS', 300", "'INSIGHTS_EVENTS_MAX_EXECUTION_SECONDS', 3", "'INSIGHTS_EVENTS_LOCK_TTL_SECONDS', 15", "'INSIGHTS_EVENTS_WAIT_MS', 1200", "'INSIGHTS_EVENTS_PROJECT_BUDGET_MS', 10000"] as $needle) {
             expect($source)->toContain($needle);
         }
-        $env = file_get_contents(base_path('.env.example'));
+        $env = file_get_contents(base_path('.env.local.example'));
         foreach (['INSIGHTS_EVENTS_CACHE_TTL_SECONDS', 'INSIGHTS_EVENTS_EMPTY_SEARCH_CACHE_TTL_SECONDS', 'INSIGHTS_EVENTS_MAX_EXECUTION_SECONDS', 'INSIGHTS_EVENTS_LOCK_TTL_SECONDS', 'INSIGHTS_EVENTS_WAIT_MS', 'INSIGHTS_EVENTS_PROJECT_BUDGET_MS'] as $name) {
             expect($env)->toContain($name);
         }

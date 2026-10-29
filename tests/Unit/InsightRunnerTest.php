@@ -367,7 +367,7 @@ describe('cache store and outage cost', function () {
 
         expect(file_get_contents(base_path('config/insights.php')))->toContain("env('INSIGHTS_CACHE_STORE', 'redis')")->toContain("env('INSIGHTS_CACHE_TTL_SECONDS', 60)")
             ->and($config['cache_store'])->toBe('redis')
-            ->and(file_get_contents(base_path('.env.example')))->toContain('INSIGHTS_CACHE_STORE')->toContain('INSIGHTS_CACHE_TTL_SECONDS');
+            ->and(file_get_contents(base_path('.env.local.example')))->toContain('INSIGHTS_CACHE_STORE')->toContain('INSIGHTS_CACHE_TTL_SECONDS');
     });
 });
 

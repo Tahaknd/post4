@@ -8,6 +8,7 @@
 .env
 .env.*
 !.env.example
+!.env.local.example
 
 # Bağımlılıklar ve build çıktıları
 /vendor/

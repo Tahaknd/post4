@@ -75,7 +75,7 @@ it('defaults to auto and keeps the Inertia-wide switch off', function () {
     expect(config('inertia.history.mode'))->toBe('auto')
         ->and($config['history']['encrypt'])->toBeFalse()
         ->and(file_get_contents(base_path('config/inertia.php')))->toContain("env('INERTIA_ENCRYPT_HISTORY', 'auto')")
-        ->and(file_get_contents(base_path('.env.example')))->toContain('INERTIA_ENCRYPT_HISTORY=auto');
+        ->and(file_get_contents(base_path('.env.local.example')))->toContain('INERTIA_ENCRYPT_HISTORY=auto');
 });
 
 it('never encrypts the guest pages, wherever they are served', function (string $url) {
