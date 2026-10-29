@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Tests\Support\ProjectCache;
 
@@ -164,6 +165,10 @@ describe('DeleteProject', function () {
         $other = Project::factory()->create();
         $project->users()->attach(User::factory()->create());
         app(ProjectResolver::class)->resolve($project->api_key);
+        $personId = DB::table('persons')->insertGetId(['uuid' => (string) Str::uuid(), 'project_id' => $project->id]);
+        DB::table('person_distinct_ids')->insert(['project_id' => $project->id, 'person_id' => $personId, 'distinct_id' => 'alice']);
+        $otherPersonId = DB::table('persons')->insertGetId(['uuid' => (string) Str::uuid(), 'project_id' => $other->id]);
+        DB::table('person_distinct_ids')->insert(['project_id' => $other->id, 'person_id' => $otherPersonId, 'distinct_id' => 'alice']);
 
         $result = app(DeleteProject::class)->handle($project);
 
@@ -172,6 +177,9 @@ describe('DeleteProject', function () {
             ->and(Project::whereKey($project->id)->exists())->toBeFalse()
             ->and(Project::whereKey($other->id)->exists())->toBeTrue()
             ->and(DB::table('project_user')->count())->toBe(0)
+            // Persons and their distinct ids go with the project; the other project keeps its own.
+            ->and(DB::table('persons')->pluck('project_id')->all())->toBe([$other->id])
+            ->and(DB::table('person_distinct_ids')->pluck('project_id')->all())->toBe([$other->id])
             ->and(ProjectCache::hasPositive($project->api_key))->toBeFalse();
 
         Queue::assertPushed(PurgeProjectEvents::class, 2);
