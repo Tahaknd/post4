@@ -5,7 +5,7 @@ import { SecondaryButtonClass } from '@/Components/Insights/classes';
 
 // The non-chart states of the results area. `kind` is one of: idle (nothing chosen yet), loading (no earlier result to
 // show), empty (every value is zero), failed (a server or client error: `error` has {kind, message, retryable}),
-// expired (the run is gone: run again), blocked (the form has errors, nothing was sent). `noun` names what the page
+// expired (the run is gone: run again), cancelled (the user stopped the run), blocked (the form has errors, nothing was sent). `noun` names what the page
 // shows ("trend", "funnel"). `idleCopy` and `emptyCopy` ({ title, text }) replace the wording of those two states for a
 // page whose insight needs other words than "pick an event" and "no events".
 // Messages from the server are fixed sentences and are shown as text, never as markup.
@@ -15,6 +15,8 @@ const props = defineProps({
     noun: { type: String, default: 'result' },
     idleCopy: { type: Object, default: null },
     emptyCopy: { type: Object, default: null },
+    // What to try after a failure, shown under the server's sentence.
+    help: { type: String, default: null },
 });
 
 const idle = computed(() => props.idleCopy ?? { title: `Pick an event to see its ${props.noun}`, text: 'Choose one or more events above. The chart appears here.' });
@@ -51,8 +53,15 @@ const RELOAD_KINDS = ['unauthenticated', 'page_expired'];
         <button type="button" :class="SecondaryButtonClass" @click="emit('retry')">Run again</button>
     </div>
 
+    <div v-else-if="kind === 'cancelled'" class="space-y-3 rounded-md border border-line bg-surface px-4 py-6" data-testid="state-cancelled">
+        <p class="font-medium">The run was cancelled</p>
+        <p class="text-sm text-muted">Nothing was changed. Run it again when you are ready.</p>
+        <button type="button" :class="SecondaryButtonClass" @click="emit('retry')">Run again</button>
+    </div>
+
     <div v-else-if="kind === 'failed'" class="space-y-3 rounded-md border border-danger px-4 py-6" role="alert" data-testid="state-failed">
         <p class="font-medium text-danger">{{ error?.message ?? 'The query could not be completed. Try again.' }}</p>
+        <p v-if="help" class="text-sm text-muted" data-testid="failure-help">{{ help }}</p>
         <div class="flex flex-wrap gap-3">
             <button v-if="error && RELOAD_KINDS.includes(error.kind)" type="button" :class="SecondaryButtonClass" @click="emit('reload')">Reload the page</button>
             <button v-else-if="error?.retryable !== false" type="button" :class="SecondaryButtonClass" @click="emit('retry')">Try again</button>
