@@ -223,6 +223,7 @@ describe('show', function () {
                 ->where('urls', [
                     'index' => '/projects',
                     'trends' => "/projects/{$mine->id}/insights/trends",
+                    'funnel' => "/projects/{$mine->id}/insights/funnel",
                     'demo' => "/projects/{$mine->id}/demo",
                     'rotate_key' => "/projects/{$mine->id}/api-key",
                     'destroy' => "/projects/{$mine->id}",

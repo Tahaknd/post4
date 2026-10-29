@@ -3,8 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Domain\Insights\Events\EventNamesSqlBuilder;
+use App\Domain\Insights\Funnel\ConversionWindow;
+use App\Domain\Insights\Funnel\FunnelOrder;
+use App\Domain\Insights\Funnel\FunnelQuery;
+use App\Domain\Insights\Funnel\FunnelStep;
+use App\Domain\Insights\Funnel\WindowUnit;
 use App\Domain\Insights\Query\DatePreset;
 use App\Domain\Insights\Query\DateRange;
+use App\Domain\Insights\Query\EventName;
 use App\Domain\Insights\Query\FilterOperator;
 use App\Domain\Insights\Query\PropertyFilter;
 use App\Domain\Insights\Trends\Breakdown;
@@ -18,7 +24,8 @@ use Inertia\Inertia;
 use Inertia\Response;
 
 /**
- * The Trends page: `GET /projects/{project}/insights/trends`. `{project}` is bound through Project::visibleTo(user)
+ * The insight pages: Trends (`GET /projects/{project}/insights/trends`) and Funnel (`GET /projects/{project}/insights/funnel`).
+ * `{project}` is bound through Project::visibleTo(user)
  * (a project the user cannot open is a 404) and the policy `view` is the independent second check.
  *
  * The page does not carry data, it carries what the client needs to build a definition and talk to the JSON API:
@@ -26,7 +33,7 @@ use Inertia\Response;
  * (domain constants, mirrored by the client only for instant feedback; the API stays the source of truth), the
  * defaults, and the API URLs built here with route(). There is no API key: the page talks to the API with the
  * session cookie. The run URL (poll and cancel) comes from the `poll_url` of the 202 answer; `urls.runs` is the base the client
- * checks it against.
+ * checks it against. The Funnel page carries the same kinds of props for its own definition (its steps, window and order).
  */
 class ProjectInsightsController extends Controller
 {
@@ -76,6 +83,51 @@ class ProjectInsightsController extends Controller
         ]);
     }
 
+    public function funnel(Project $project): Response
+    {
+        Gate::authorize('view', $project);
+
+        return Inertia::render('Projects/Insights/Funnel', [
+            'project' => [
+                'id' => $project->id,
+                'name' => $project->name,
+                'timezone' => $project->timezone,
+            ],
+            'options' => [
+                'presets' => array_map(fn (DatePreset $preset) => ['value' => $preset->value, 'label' => self::presetLabel($preset)], DatePreset::cases()),
+                'operators' => array_map(fn (FilterOperator $operator) => ['value' => $operator->value, 'label' => self::operatorLabel($operator), 'needs_value' => $operator->needsValue()], FilterOperator::cases()),
+                'window_units' => array_map(fn (WindowUnit $unit) => ['value' => $unit->value, 'label' => ucfirst($unit->value).'s', 'seconds' => $unit->seconds()], WindowUnit::cases()),
+                'orders' => array_map(fn (FunnelOrder $order) => ['value' => $order->value, 'label' => self::orderLabel($order)], FunnelOrder::cases()),
+            ],
+            'defaults' => [
+                'date_preset' => DatePreset::Last30Days->value,
+                'window' => ConversionWindow::default()->canonical(),
+                'order' => FunnelOrder::Ordered->value,
+            ],
+            'limits' => [
+                'min_steps' => FunnelQuery::MIN_STEPS,
+                'max_steps' => FunnelQuery::MAX_STEPS,
+                'max_event_length' => EventName::MAX_LENGTH,
+                'max_filters_per_step' => FunnelStep::MAX_FILTERS,
+                'max_filters' => FunnelQuery::MAX_FILTERS,
+                'max_filter_key_length' => PropertyFilter::MAX_KEY_LENGTH,
+                'max_filter_value_length' => PropertyFilter::MAX_VALUE_LENGTH,
+                'max_range_days' => DateRange::MAX_DAYS,
+                'min_window_seconds' => ConversionWindow::MIN_SECONDS,
+                'max_window_seconds' => ConversionWindow::MAX_SECONDS,
+                'max_window_value' => ConversionWindow::MAX_VALUE,
+                'max_search_length' => EventNamesSqlBuilder::MAX_SEARCH_LENGTH,
+                'event_window_days' => EventNamesSqlBuilder::WINDOW_DAYS,
+            ],
+            'urls' => [
+                'funnel' => route('api.insights.funnel', $project, absolute: false),
+                'runs' => self::runsBase($project),
+                'events' => route('api.insights.events', $project, absolute: false),
+                'project' => route('projects.show', $project, absolute: false),
+            ],
+        ]);
+    }
+
     /** `/api/projects/{id}/insights/runs/`, taken from the route itself (a run id placeholder is cut off again). */
     private static function runsBase(Project $project): string
     {
@@ -100,6 +152,14 @@ class ProjectInsightsController extends Controller
         return match ($metric) {
             Metric::TotalEvents => 'Total events',
             Metric::UniqueUsers => 'Unique users',
+        };
+    }
+
+    private static function orderLabel(FunnelOrder $order): string
+    {
+        return match ($order) {
+            FunnelOrder::Ordered => 'Ordered',
+            FunnelOrder::StrictOrder => 'Strict order',
         };
     }
 
