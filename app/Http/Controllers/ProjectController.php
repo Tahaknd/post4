@@ -20,7 +20,7 @@ use Inertia\Response;
  * The project pages. `{project}` is bound through Project::visibleTo(user) (see AppServiceProvider), so a project
  * the user cannot open is a 404 for every method here, exactly like one that does not exist.
  *
- * The API key is a page prop of show() ONLY: never a shared prop, never flashed, never in a list. Redirects after a
+ * The API key is a page prop of show() and demo() ONLY (the same people may see it on both): never a shared prop, never flashed, never in a list. Redirects after a
  * write are 303 on purpose (a 302 after POST/PUT/DELETE may be replayed with the same method by some clients).
  */
 class ProjectController extends Controller
@@ -90,8 +90,32 @@ class ProjectController extends Controller
             'urls' => [
                 'index' => route('projects.index', absolute: false),
                 'trends' => route('projects.insights.trends', $project, absolute: false),
+                'demo' => route('projects.demo', $project, absolute: false),
                 'rotate_key' => route('projects.rotate-key', $project, absolute: false),
                 'destroy' => route('projects.destroy', $project, absolute: false),
+            ],
+        ]);
+    }
+
+    /**
+     * The posthog-js test bench: it loads the real SDK in the browser and sends events with this project's key, so the
+     * key is a prop here as on show(). `api_host` is only the configured fallback: the page prefers the origin it was
+     * opened from (window.location.origin), so a LAN or IP address works without touching APP_URL.
+     */
+    public function demo(Project $project): Response
+    {
+        Gate::authorize('view', $project);
+
+        return Inertia::render('Projects/Demo', [
+            'project' => [
+                'id' => $project->id,
+                'name' => $project->name,
+            ],
+            'api_key' => $project->api_key,
+            'api_host' => rtrim((string) config('app.url'), '/'),
+            'urls' => [
+                'show' => route('projects.show', $project, absolute: false),
+                'trends' => route('projects.insights.trends', $project, absolute: false),
             ],
         ]);
     }

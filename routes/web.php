@@ -42,6 +42,7 @@ Route::middleware(['auth', 'auth.session', EncryptHistoryWhenSecure::class])->gr
         Route::get('/create', [ProjectController::class, 'create'])->name('projects.create');
         Route::post('/', [ProjectController::class, 'store'])->name('projects.store')->middleware('throttle.user:projects.create');
         Route::get('/{project}', [ProjectController::class, 'show'])->name('projects.show');
+        Route::get('/{project}/demo', [ProjectController::class, 'demo'])->name('projects.demo');
         Route::get('/{project}/insights/trends', [ProjectInsightsController::class, 'trends'])->name('projects.insights.trends');
         Route::put('/{project}/api-key', [ProjectController::class, 'rotateKey'])->name('projects.rotate-key')->middleware('throttle.user:projects.rotate');
         Route::delete('/{project}', [ProjectController::class, 'destroy'])->name('projects.destroy')->middleware('throttle.user:projects.delete');

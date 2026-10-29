@@ -124,6 +124,17 @@ function destroy() {
             </div>
 
             <div class="space-y-2">
+                <h3 class="font-medium">Try it in this browser</h3>
+                <p class="max-w-prose text-sm text-muted">Load the real posthog-js on a test page and send events with this project's key.</p>
+                <Link
+                    :href="urls.demo"
+                    class="inline-flex items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-fg hover:bg-canvas"
+                >
+                    Send test events
+                </Link>
+            </div>
+
+            <div class="space-y-2">
                 <h3 class="font-medium">Plain HTTP</h3>
                 <pre
                     tabindex="0"

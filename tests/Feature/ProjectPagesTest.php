@@ -3,6 +3,7 @@
 use App\Actions\Projects\QueueEventsPurge;
 use App\Domain\Capture\ProjectResolver;
 use App\Http\Middleware\HandleInertiaRequests;
+use App\Http\ReservedPaths;
 use App\Jobs\PurgeProjectEvents;
 use App\Models\Project;
 use App\Models\User;
@@ -222,6 +223,7 @@ describe('show', function () {
                 ->where('urls', [
                     'index' => '/projects',
                     'trends' => "/projects/{$mine->id}/insights/trends",
+                    'demo' => "/projects/{$mine->id}/demo",
                     'rotate_key' => "/projects/{$mine->id}/api-key",
                     'destroy' => "/projects/{$mine->id}",
                 ]));
@@ -263,6 +265,71 @@ describe('show', function () {
         $this->actingAs(User::factory()->create())->get('/projects/1')
             ->assertNotFound()
             ->assertInertia(fn (AssertableInertia $page) => $page->component('Error')->where('status', 404));
+    });
+});
+
+describe('demo', function () {
+    it('renders the test bench for a member with the key as a page prop and pinned props', function () {
+        [$member, $mine] = memberWithProjects();
+        config(['app.url' => 'https://analytics.example/']);
+
+        $this->actingAs($member)->get("/projects/{$mine->id}/demo")
+            ->assertOk()
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->component('Projects/Demo')
+                ->where('project', ['id' => $mine->id, 'name' => 'Mine'])
+                ->where('api_key', $mine->api_key)
+                ->where('api_host', 'https://analytics.example')
+                ->where('urls', [
+                    'show' => "/projects/{$mine->id}",
+                    'trends' => "/projects/{$mine->id}/insights/trends",
+                ]));
+    });
+
+    it('is named projects.demo and lives under /projects/{project}/demo', function () {
+        expect(route('projects.demo', 7, absolute: false))->toBe('/projects/7/demo');
+    });
+
+    it('carries the key once, in no shared prop', function () {
+        [$member, $mine] = memberWithProjects();
+
+        $props = $this->actingAs($member)->get("/projects/{$mine->id}/demo")->viewData('page')['props'];
+
+        $shared = array_intersect_key($props, array_flip(['app', 'auth', 'projects', 'flash', 'errors']));
+        expect(json_encode($shared))->not->toContain('phc_')
+            ->and(substr_count(json_encode($props), $mine->api_key))->toBe(1);
+    });
+
+    it('is open to an administrator for any project and to a member of that project only', function () {
+        [$member, $mine, $theirs] = memberWithProjects();
+
+        $this->actingAs(User::factory()->admin()->create())->get("/projects/{$theirs->id}/demo")->assertOk();
+        $this->actingAs($member)->get("/projects/{$mine->id}/demo")->assertOk();
+    });
+
+    it('answers 404 to a non-member for an existing project and a missing one alike, without the key', function () {
+        [$member, , $theirs] = memberWithProjects();
+
+        $existing = $this->actingAs($member)->get("/projects/{$theirs->id}/demo");
+        $missing = $this->actingAs($member)->get('/projects/999999/demo');
+
+        $existing->assertNotFound();
+        $missing->assertNotFound();
+        expect($existing->getContent())->not->toContain($theirs->api_key)->not->toContain('phc_');
+    });
+
+    it('redirects a guest to the login page and never starts a session for it', function () {
+        [, $mine] = memberWithProjects();
+
+        $this->get("/projects/{$mine->id}/demo")->assertRedirect("/login?next=%2Fprojects%2F{$mine->id}%2Fdemo");
+    });
+
+    it('answers 404 to ids that are not plain numbers', function (string $id) {
+        $this->actingAs(User::factory()->admin()->create())->get("/projects/{$id}/demo")->assertNotFound();
+    })->with(['letters' => 'abc', 'negative' => '-1', 'beyond bigint' => '99999999999999999999']);
+
+    it('is no capture or SDK path', function () {
+        expect(ReservedPaths::collides('/projects/1/demo'))->toBeFalse();
     });
 });
 
