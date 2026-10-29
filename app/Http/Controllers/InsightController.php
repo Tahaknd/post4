@@ -9,6 +9,7 @@ use App\Domain\Insights\Runs\InsightRunStore;
 use App\Http\ApiErrors;
 use App\Http\InsightErrorResponse;
 use App\Http\Requests\Insights\FunnelInsightRequest;
+use App\Http\Requests\Insights\RetentionInsightRequest;
 use App\Http\Requests\Insights\TrendsInsightRequest;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Jobs\RunInsight;
@@ -54,6 +55,11 @@ class InsightController extends Controller
     }
 
     public function funnel(FunnelInsightRequest $request, Project $project, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
+    {
+        return $this->start($request, $project, $request->definition(), $runner, $runs, $gate);
+    }
+
+    public function retention(RetentionInsightRequest $request, Project $project, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
     {
         return $this->start($request, $project, $request->definition(), $runner, $runs, $gate);
     }

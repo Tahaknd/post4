@@ -4,6 +4,8 @@ namespace App\Domain\Insights;
 
 use App\Domain\Insights\Funnel\FunnelQuery;
 use App\Domain\Insights\Funnel\FunnelResult;
+use App\Domain\Insights\Retention\RetentionQuery;
+use App\Domain\Insights\Retention\RetentionResult;
 use App\Domain\Insights\Trends\TrendsQuery;
 use App\Domain\Insights\Trends\TrendsResult;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
@@ -61,6 +63,15 @@ final class InsightRunner
     {
         $result = $this->run($projectId, $query);
         \assert($result instanceof FunnelResult);
+
+        return $result;
+    }
+
+    /** @throws InsightFailed */
+    public function retention(int $projectId, RetentionQuery $query): RetentionResult
+    {
+        $result = $this->run($projectId, $query);
+        \assert($result instanceof RetentionResult);
 
         return $result;
     }
