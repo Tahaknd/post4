@@ -81,9 +81,14 @@ export function placeFilterError(errors, filter, field, message) {
     errors[filter.id][field === 'operator' ? 'key' : (field ?? 'key')] ??= message;
 }
 
-/** One filter in a query string: a JSON array `[key, operator, value]`. */
+/** One filter as it goes into a query string: `[key, operator, value]`. */
+export function filterTuple(filter) {
+    return [filter.key, filter.operator, filter.value];
+}
+
+/** One filter as a query string value: the JSON of its tuple. */
 export function encodeFilter(filter) {
-    return JSON.stringify([filter.key, filter.operator, filter.value]);
+    return JSON.stringify(filterTuple(filter));
 }
 
 /** The filter a query string value describes, or null for anything that is not a valid one (never trusted). */
@@ -95,6 +100,11 @@ export function decodeFilter(raw, operators, limits) {
         return null;
     }
 
+    return decodeFilterTuple(parsed, operators, limits);
+}
+
+/** The filter that an already parsed `[key, operator, value]` describes, or null (never trusted, like {@see decodeFilter}). */
+export function decodeFilterTuple(parsed, operators, limits) {
     if (!Array.isArray(parsed) || parsed.length !== 3) {
         return null;
     }
