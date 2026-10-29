@@ -99,6 +99,7 @@ export function requestEntry(entry, apiHost, now, key) {
     return {
         at: now,
         kind,
+        status,
         tone: statusTone(status),
         text: withoutKey(`${pathOf(entry.name, apiHost)} ${status === 0 ? 'status unknown' : `HTTP ${status}`}`, key),
         detail: describe({ url: entry.name, initiatorType: entry.initiatorType, responseStatus: entry.responseStatus, transferSize: entry.transferSize, durationMs: Math.round(entry.duration) }, key),

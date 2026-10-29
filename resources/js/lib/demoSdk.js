@@ -9,11 +9,14 @@
 
 let started = 0;
 
+/** The one element of the bench that autocapture may record (Projects/Demo.vue). */
+export const AUTOCAPTURE_TARGET_SELECTOR = '[data-attr="demo-autocapture-target"]';
+
 /**
  * @param {object} options
  * @param {string} options.token       the project key
  * @param {string} options.apiHost     origin of this server
- * @param {boolean} options.autocapture   clicks, form submits and changes of the page become `$autocapture` events
+ * @param {boolean} options.autocapture   clicks on the bench's autocapture target become `$autocapture` events (nothing else does)
  * @param {boolean} options.compression   gzip the request bodies (the default of the SDK); off = plain JSON, and a base64
  *                                        `data=` form for the beacon that is sent when the page is left
  * @param {boolean} options.remoteConfig  fetch `/array/<token>/config.js` (and, if it says so, `/flags`); off = the SDK
@@ -27,7 +30,11 @@ export async function startDemoSdk({ token, apiHost, autocapture, compression, r
         token,
         {
             api_host: apiHost,
-            autocapture,
+            // Only the demo's own target is autocaptured: the page is rendered inside the app (project picker, navigation,
+            // links to other projects), and a click on that chrome must never become an event of this project. The
+            // SDK captures an element only when it or an ancestor matches `css_selector_allowlist`.
+            autocapture: autocapture ? { css_selector_allowlist: [AUTOCAPTURE_TARGET_SELECTOR] } : false,
+            rageclick: false,
             // The bench sends pageviews on request. The pageleave stays on: it is the event that travels by
             // sendBeacon when the tab is closed or navigated away, which is what the bench exists to try.
             capture_pageview: false,

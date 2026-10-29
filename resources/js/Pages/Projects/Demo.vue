@@ -7,11 +7,14 @@ import PrimaryButton from '@/Components/PrimaryButton.vue';
 import SecondaryButton from '@/Components/SecondaryButton.vue';
 import TextField from '@/Components/TextField.vue';
 import { capturedEntry, effectiveApiHost, isSdkRequest, maskKey, pushEntry, requestEntry } from '@/lib/demoLog';
+import { createDemoSession } from '@/lib/demoSession';
 
 // The posthog-js test bench. The project key is a prop here as on the project page (only a member of the project gets
 // this page). posthog-js itself is loaded by lib/demoSdk.js in a chunk of its own, so visitors of other pages never
-// download it. Everything the SDK does shows up in the activity log: the events it is about to send (its own
-// `eventCaptured` hook) and every request it makes to this server with the HTTP status (resource timing).
+// download it; lib/demoSession.js owns its lifecycle (start, restart, stale loads, stop). Everything the SDK does shows
+// up in the activity log: the events it is about to send (its own `eventCaptured` hook) and every request it makes to
+// this server with the HTTP status (resource timing). Each SDK start leaves one dead instance and two window listeners
+// behind until the tab is closed (posthog-js cannot remove them, see demoSession.js); they send nothing.
 const props = defineProps({
     project: { type: Object, required: true },
     api_key: { type: String, required: true },
@@ -22,7 +25,7 @@ const props = defineProps({
 const apiHost = ref(props.api_host);
 const masked = computed(() => maskKey(props.api_key));
 
-// 'loading' | 'ready' | 'failed'
+// 'loading' | 'ready' | 'failed'. Every control is unavailable unless it is 'ready', also while the SDK restarts.
 const status = ref('loading');
 const autocapture = ref(true);
 const remoteConfig = ref(true);
@@ -32,7 +35,11 @@ const distinctId = ref('');
 const sdkVersion = ref('');
 
 const log = shallowRef([]);
-const logEnd = ref(null);
+const logBox = ref(null);
+// One short sentence for screen readers about what the USER just did (the log itself is not announced: it would read
+// out every request, autocapture and config fetch).
+const announcement = ref('');
+let awaitingResult = null;
 
 const eventName = ref('demo_event');
 const propertyKey = ref('');
@@ -40,79 +47,75 @@ const propertyValue = ref('');
 const identifyAs = ref('demo-user');
 const formError = ref('');
 
-let sdk = null;
-let observer = null;
-let disposed = false;
-let generation = 0;
+const sdkOptions = () => ({
+    token: props.api_key,
+    apiHost: apiHost.value,
+    autocapture: autocapture.value,
+    compression: compression.value,
+    remoteConfig: remoteConfig.value,
+    onCaptured: (captured) => push(capturedEntry(captured, props.api_key, Date.now())),
+});
 
-function note(kind, text, detail = '', tone = 'info') {
-    log.value = pushEntry(log.value, { at: Date.now(), kind, text, detail, tone });
-    nextTick(() => logEnd.value?.scrollIntoView?.({ block: 'nearest' }));
-}
+const session = createDemoSession({
+    load: (options) => import('@/lib/demoSdk').then((module) => module.startDemoSdk(options)),
+    onStatus: (next) => (status.value = next),
+    onReady: (sdk) => {
+        sdkVersion.value = sdk.version;
+        refreshState();
+        note('info', `posthog-js ${sdk.version} started (autocapture ${autocapture.value ? 'on' : 'off'}, remote config ${remoteConfig.value ? 'on' : 'off'}, gzip ${compression.value ? 'on' : 'off'})`);
+    },
+    onFailure: (error) => {
+        note('error', `posthog-js could not start: ${error?.message ?? error}`, '', 'error');
+        announce('posthog-js could not start');
+    },
+    onStopFailure: (error) => note('error', `posthog-js did not stop cleanly: ${error?.message ?? error}`, '', 'error'),
+});
+
+let observer = null;
 
 function push(entry) {
+    const box = logBox.value;
+    // Follow the newest line only while the reader is already at the bottom; never move the window.
+    const following = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 8;
+
     log.value = pushEntry(log.value, entry);
-    nextTick(() => logEnd.value?.scrollIntoView?.({ block: 'nearest' }));
+
+    if (entry.kind === 'request' && awaitingResult !== null && /^\/e\//.test(entry.text)) {
+        announce(`${awaitingResult} sent, ${entry.status === 0 ? 'status unknown' : `HTTP ${entry.status}`}`);
+        awaitingResult = null;
+    }
+
+    if (following) {
+        nextTick(() => {
+            if (logBox.value) {
+                logBox.value.scrollTop = logBox.value.scrollHeight;
+            }
+        });
+    }
+}
+
+function note(kind, text, detail = '', tone = 'info') {
+    push({ at: Date.now(), kind, text, detail, tone });
+}
+
+// Cleared first and set on a later tick: a live region announces a change, so the same sentence twice would stay silent.
+function announce(text) {
+    announcement.value = '';
+    nextTick(() => (announcement.value = text));
 }
 
 function refreshState() {
-    if (!sdk) {
-        return;
-    }
+    const sdk = session.current();
 
-    distinctId.value = sdk.distinctId();
-    optedOut.value = sdk.hasOptedOut();
-}
-
-async function start() {
-    const mine = ++generation;
-    status.value = 'loading';
-
-    try {
-        const started = await import('@/lib/demoSdk').then((module) =>
-            module.startDemoSdk({
-                token: props.api_key,
-                apiHost: apiHost.value,
-                autocapture: autocapture.value,
-                compression: compression.value,
-                remoteConfig: remoteConfig.value,
-                onCaptured: (captured) => push(capturedEntry(captured, props.api_key, Date.now())),
-            }),
-        );
-
-        // The page was left, or the options changed again, while the SDK was loading.
-        if (disposed || mine !== generation) {
-            await started.stop();
-
-            return;
-        }
-
-        sdk = started;
-        sdkVersion.value = started.version;
-        status.value = 'ready';
-        refreshState();
-        note('info', `posthog-js ${started.version} started (autocapture ${autocapture.value ? 'on' : 'off'}, remote config ${remoteConfig.value ? 'on' : 'off'}, gzip ${compression.value ? 'on' : 'off'})`);
-    } catch (error) {
-        if (mine === generation) {
-            status.value = 'failed';
-            note('error', `posthog-js could not start: ${error?.message ?? error}`, '', 'error');
-        }
+    if (sdk) {
+        distinctId.value = sdk.distinctId();
+        optedOut.value = sdk.hasOptedOut();
     }
 }
 
-async function stop() {
-    const current = sdk;
-    sdk = null;
-
-    if (current) {
-        await current.stop();
-    }
-}
-
-async function restart(reason) {
+function restart(reason) {
     note('info', reason);
-    await stop();
-    await start();
+    session.restart(sdkOptions).catch(() => {});
 }
 
 watch(autocapture, (on) => restart(`Autocapture ${on ? 'on' : 'off'}: restarting the SDK`));
@@ -138,31 +141,32 @@ onMounted(() => {
         }
     }
 
-    start();
+    session.start(sdkOptions);
 });
 
 onBeforeUnmount(() => {
-    disposed = true;
-    generation++;
     observer?.disconnect();
     observer = null;
-    stop();
+    session.dispose().catch(() => {});
 });
 
 const ready = computed(() => status.value === 'ready');
 
 // posthog-js answers a capture it dropped with nothing: opted out, or a browser it takes for a bot (automation sets
 // `navigator.webdriver`, headless browsers say so in the user agent). Say so instead of leaving the log silent.
-function afterCapture(result) {
+function afterCapture(result, name) {
     if (result === undefined || result === null) {
         note('error', 'The SDK did not capture the event (opted out, or this browser looks like a bot to posthog-js)', '', 'error');
+        announce(`${name} was not captured`);
+    } else {
+        awaitingResult = name;
     }
 
     refreshState();
 }
 
 function pageview() {
-    afterCapture(sdk?.capturePageview());
+    afterCapture(session.current()?.capturePageview(), '$pageview');
 }
 
 function customEvent() {
@@ -176,7 +180,7 @@ function customEvent() {
     }
 
     const key = propertyKey.value.trim();
-    afterCapture(sdk?.capture(name, key === '' ? undefined : { [key]: propertyValue.value }));
+    afterCapture(session.current()?.capture(name, key === '' ? undefined : { [key]: propertyValue.value }), name);
 }
 
 function identify() {
@@ -186,17 +190,21 @@ function identify() {
         return;
     }
 
-    sdk?.identify(id);
+    session.current()?.identify(id);
     refreshState();
+    awaitingResult = '$identify';
 }
 
 function reset() {
-    sdk?.reset();
+    session.current()?.reset();
     refreshState();
     note('info', 'Reset: a new anonymous distinct id was generated');
+    announce('Reset, new anonymous id');
 }
 
 function toggleOptOut() {
+    const sdk = session.current();
+
     if (!sdk) {
         return;
     }
@@ -209,6 +217,7 @@ function toggleOptOut() {
 
     refreshState();
     note('info', optedOut.value ? 'Opted out: the SDK sends nothing until you opt in again' : 'Opted in again');
+    announce(optedOut.value ? 'Opted out' : 'Opted in');
 }
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { timeStyle: 'medium' });
@@ -262,8 +271,7 @@ const snippet = computed(() => `posthog.init('${masked.value}', {\n    api_host:
         </section>
 
         <div class="grid gap-8 lg:grid-cols-2">
-            <!-- ph-no-capture: the controls of the bench are not autocaptured, only the "Autocapture target" is. -->
-            <div class="ph-no-capture space-y-8">
+            <div class="space-y-8">
                 <section aria-labelledby="events-heading" class="space-y-4">
                     <h2 id="events-heading" class="text-lg font-semibold tracking-tight">Events</h2>
 
@@ -336,16 +344,19 @@ const snippet = computed(() => `posthog.init('${masked.value}', {\n    api_host:
                 <section aria-labelledby="log-heading" class="space-y-3">
                     <div class="flex items-center justify-between gap-3">
                         <h2 id="log-heading" class="text-lg font-semibold tracking-tight">Activity</h2>
-                        <button type="button" class="ph-no-capture text-sm text-accent hover:text-accent-hover" @click="log = []">Clear</button>
+                        <button type="button" aria-label="Clear activity log" class="text-sm text-accent hover:text-accent-hover" @click="log = []">Clear</button>
                     </div>
+                    <!-- Not a live region (aria-live off): it would read out every request. The sentence below announces
+                         the result of what the user did. The box stays focusable so it can be scrolled by keyboard. -->
+                    <p class="sr-only" role="status" aria-live="polite" data-testid="demo-announce">{{ announcement }}</p>
                     <div
+                        ref="logBox"
                         role="log"
-                        aria-live="polite"
-                        aria-relevant="additions"
+                        aria-live="off"
                         aria-labelledby="log-heading"
                         tabindex="0"
                         data-testid="demo-log"
-                        class="ph-no-capture max-h-96 overflow-y-auto rounded-md border border-line bg-surface p-3 text-sm"
+                        class="max-h-96 overflow-y-auto rounded-md border border-line bg-surface p-3 text-sm"
                     >
                         <p v-if="log.length === 0" class="text-muted">Nothing yet.</p>
                         <ol v-else class="space-y-2">
@@ -360,7 +371,6 @@ const snippet = computed(() => `posthog.init('${masked.value}', {\n    api_host:
                                 </details>
                             </li>
                         </ol>
-                        <div ref="logEnd" />
                     </div>
                     <p class="text-sm text-muted">
                         See them arrive on the server in <Link :href="urls.trends" class="text-accent underline hover:text-accent-hover">Trends</Link>

@@ -79,7 +79,7 @@ test('shows the path and query of a URL, the raw text when it cannot be parsed',
 test('builds the entry of a finished request, a beacon and an unknown status', () => {
     const base = 'http://h:8000';
     const ok = requestEntry({ name: `${base}/e/?ip=0`, initiatorType: 'fetch', responseStatus: 200, duration: 12.4, transferSize: 300 }, base, 5, KEY);
-    assert.deepEqual([ok.kind, ok.tone, ok.text], ['request', 'ok', '/e/?ip=0 HTTP 200']);
+    assert.deepEqual([ok.kind, ok.tone, ok.text, ok.status], ['request', 'ok', '/e/?ip=0 HTTP 200', 200]);
     assert.match(ok.detail, /"durationMs": 12/);
 
     const config = requestEntry({ name: `${base}/array/${KEY}/config.js`, initiatorType: 'script', responseStatus: 200, duration: 3 }, base, 5, KEY);
