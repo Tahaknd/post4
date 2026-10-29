@@ -1,0 +1,91 @@
+<clickhouse>
+    <!--
+        Small-host profile (one file per concern; mounted as a single file because the image entrypoint
+        writes generated config files into /etc/clickhouse-server/config.d/).
+
+        WHY
+        Stock ClickHouse is sized for a dedicated server. On a 4-8 GB host that also runs the app, Kafka,
+        Postgres and Redis it (1) lets the process grow to 90% of the RAM it sees, (2) keeps 5 GiB of mark
+        cache and 8 GiB of uncompressed cache as ceilings, and (3) writes a dozen system log tables whose
+        background merges alone kept the memory tracker at its cap: system.trace_log reached 3.7 GiB (266
+        million rows) in a week, text_log 460 MiB. The visible symptoms were MEMORY_LIMIT_EXCEEDED (code 241)
+        in unrelated queries and a Docker VM disk that filled up. This profile bounds all three.
+
+        MEMORY CEILING
+        max_server_memory_usage_to_ram_ratio is a fraction of the memory ClickHouse sees: the container
+        limit when one is set (docker-compose.yml: mem_limit ${CLICKHOUSE_MEM_LIMIT:-3g}; ClickHouse reads the
+        cgroup), the host RAM otherwise. 0.7 of the 3 GiB default is about 2.1 GiB (2.25 GB), which leaves the
+        rest of the container limit to allocator overhead, page-cache-backed mmap and the Kafka consumer
+        threads, so the server refuses a query with a clean error long before the kernel could OOM-kill it.
+        Check the effective value with:
+            SELECT value FROM system.server_settings WHERE name = 'max_server_memory_usage'
+        Raising CLICKHOUSE_MEM_LIMIT raises the ceiling proportionally (no edit of this file needed).
+
+        CACHES
+        mark cache 256 MiB (default 5 GiB), index mark cache 64 MiB, uncompressed cache off (default 8 GiB;
+        it only helps repeated small reads of hot data, and the OS page cache serves the same reads). The
+        events table is small compared to these caches, so hit rates do not suffer.
+
+        POOLS AND CONCURRENCY
+        background_schedule_pool_size 16 (the Kafka engine consumers, the materialized view and the mutation
+        machinery use this pool: keep it above the number of Kafka consumers plus a margin).
+        max_concurrent_queries 50 (default 100) is above the app's own limits (insight queries per project)
+        and stops a runaway client from queueing 100 queries on a small host.
+
+        CRASH TRAPS (each one was observed on 25.8 while validating this file: the server exits with code
+        91 or 36 and the container restarts in a loop; check `docker compose logs clickhouse`)
+          * Do NOT lower background_pool_size below the default 16 (a value of 4 aborted startup with exit
+            code 91 when other pool settings were not lowered with it). Leave it alone.
+          * Do NOT give query_log or part_log a custom engine element: it clashes with the default
+            partition_by of the table and the server exits with code 36 (BAD_ARGUMENTS). Use the ttl element
+            below, nothing else.
+          * An element the server does not know is ignored, but a malformed one is fatal: validate any edit
+            in a scratch container (same image, a memory limit of 3g, this file mounted into config.d, no network
+            route to the live Kafka) before recreating the live one.
+
+        SYSTEM LOG TABLES
+        remove="1" switches a log off at startup (nothing is written, nothing is merged). The tables that
+        already exist are NOT dropped automatically: drop them once by hand, one at a time, run
+        DROP TABLE IF EXISTS system.trace_log SYNC and likewise for every table removed below). They are disposable diagnostics, not user data.
+        Kept on purpose: query_log (with a 7-day TTL) because scripts and probes correlate by log_comment, and
+        part_log (7-day TTL) because the merge and mutation history of events helps when ingestion misbehaves.
+        The app itself reads system.mutations, kafka_consumers, parts, disks, tables, settings, row_policies and
+        grants, none of which are log tables.
+
+        HOW TO APPLY
+        This is a SINGLE-FILE bind mount, which follows the inode. Editing the file in place (sed -i, most
+        editors) or `git pull` / checkout (unlink + create) is NOT picked up by `docker compose up -d`. Run:
+            docker compose up -d - -force-recreate clickhouse
+        (read '- -force-recreate' as two hyphens followed by force-recreate: XML comments cannot contain two
+        consecutive hyphens). Existing installs need this once, because the compose file gained new mounts.
+    -->
+    <max_server_memory_usage_to_ram_ratio>0.7</max_server_memory_usage_to_ram_ratio>
+
+    <mark_cache_size>268435456</mark_cache_size>
+    <index_mark_cache_size>67108864</index_mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+
+    <background_schedule_pool_size>16</background_schedule_pool_size>
+    <max_concurrent_queries>50</max_concurrent_queries>
+
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <query_metric_log remove="1"/>
+    <error_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <zookeeper_log remove="1"/>
+    <session_log remove="1"/>
+    <crash_log remove="1"/>
+
+    <query_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </part_log>
+</clickhouse>

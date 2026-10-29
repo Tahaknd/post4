@@ -269,6 +269,27 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Small-host profile (memory ceiling, caches, system log tables off, 7-day TTL on query_log/part_log) and
+      # the query profiler switch. Same single-file mechanics: `docker compose up -d --force-recreate
+      # clickhouse` once on an existing install. The log tables that already exist are not dropped for you:
+      # see the header of config.d/20-small-host.xml.
+      - type: bind
+        source: ./docker/clickhouse/config.d/20-small-host.xml
+        target: /etc/clickhouse-server/config.d/20-small-host.xml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./docker/clickhouse/users.d/30-no-profiler.xml
+        target: /etc/clickhouse-server/users.d/30-no-profiler.xml
+        read_only: true
+        bind:
+          create_host_path: false
+    # Hard container limit. ClickHouse reads the cgroup limit and sizes itself from it (20-small-host.xml sets
+    # max_server_memory_usage to 0.7 of it, so 3g gives about 2.25 GB): it refuses a query with
+    # MEMORY_LIMIT_EXCEEDED before the kernel could OOM-kill the container. Raise it on a bigger host, e.g.
+    # CLICKHOUSE_MEM_LIMIT=6g; 0 removes the limit (the ratio then applies to the host RAM).
+    mem_limit: ${CLICKHOUSE_MEM_LIMIT:-3g}
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     healthcheck:

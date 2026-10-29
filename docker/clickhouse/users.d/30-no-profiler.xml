@@ -1,0 +1,26 @@
+<clickhouse>
+    <!--
+        Query profiler off (one file per concern; single-file bind mount, see 10-ingest-settings.xml).
+
+        WHY
+        By default every query thread samples its stack (real-time and CPU timers, one sample per 1 s each)
+        into system.trace_log. That table is the other half of the log-table problem described in
+        config.d/20-small-host.xml: it grew to 3.7 GiB in a week, with the table itself now removed. With the
+        table gone the samples would be pointless work, so the profiler timers are set to 0 (disabled).
+        This is a profile setting of `default`; the ro_insights profile (20-readonly-user.xml) inherits it.
+
+        TO DEBUG A SLOW QUERY
+        Re-enable per session: SET query_profiler_real_time_period_ns = 10000000 (and put the trace_log table
+        back by deleting the trace_log remove element from 20-small-host.xml), then recreate the container.
+
+        HOW TO APPLY
+        Same single-file mechanics: docker compose up -d - -force-recreate clickhouse (read '- -' as two
+        hyphens).
+    -->
+    <profiles>
+        <default>
+            <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
+            <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
+        </default>
+    </profiles>
+</clickhouse>
