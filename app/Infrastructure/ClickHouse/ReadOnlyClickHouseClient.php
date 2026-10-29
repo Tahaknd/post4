@@ -6,20 +6,21 @@ use InvalidArgumentException;
 use RuntimeException;
 
 /**
- * ClickHouse istemcisi, salt-okunur kullanıcıyla (`posthog_ro`, profil `ro_insights`) bağlanır.
- * Yönetici `ClickHouseClient`'ı GENİŞLETMEZ, onu içinde (özel alan) salt-okunur kimlik bilgileriyle
- * kurar ve yalnızca `select()` sunar: `execute()` hiç yoktur, DDL ve INSERT yönetici istemciye aittir
- * (migrator, altyapı) ve tip sistemi bunu garanti eder. Sorgu ayarları `RoSettings::ALLOWED`
- * listesiyle sınırlıdır. Sunucu da yazmayı reddeder (GRANT yalnızca SELECT ON posthog.project_events_v).
+ * ClickHouse client that connects as the read-only user (`posthog_ro`, profile `ro_insights`).
+ * It does NOT extend the admin `ClickHouseClient`: it builds one inside (a private field) with the read-only
+ * credentials and only offers `select()`: there is no `execute()` at all, DDL and INSERT belong to the admin
+ * client (migrator, infrastructure) and the type system guarantees it. Query settings are limited to the
+ * `RoSettings::ALLOWED` list. The server refuses writes as well (the only GRANT is SELECT ON posthog.project_events_v).
  *
- * Her okuma `SQL_project_id` ayarını taşımalıdır: `posthog.project_events_v` görünümü (ve üzerindeki satır
- * politikası) ayar yoksa sorguyu reddeder, varsa yalnızca o projenin satırlarını gösterir; kullanıcının
- * `posthog.events` üzerinde yetkisi yoktur, bu yüzden ham `select()` bile mergeTreeIndex ile başka projeyi
- * okuyamaz (bkz. `ProjectScopedReader`, kesin sınır orada anlatılır). Bu ayarın değeri 1..4294967295 aralığında bir tamsayı olmalıdır.
+ * Every read must carry the `SQL_project_id` setting: the view `posthog.project_events_v` (and the row policy
+ * on it) rejects the query without the setting and shows only that project's rows with it; the user has no
+ * privilege on `posthog.events`, so even a raw `select()` cannot read another project with mergeTreeIndex
+ * (see `ProjectScopedReader`, the hard limits are described there). The value of this setting must be an
+ * integer in the range 1..4294967295.
  */
 final class ReadOnlyClickHouseClient implements ClickHouseReads
 {
-    /** `events.project_id` UInt32'dir. */
+    /** `events.project_id` is a UInt32. */
     private const MAX_PROJECT_ID = 4294967295;
 
     private readonly ClickHouseClient $client;

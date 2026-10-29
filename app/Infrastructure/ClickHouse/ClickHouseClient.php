@@ -32,9 +32,9 @@ class ClickHouseClient implements ClickHouseReads
     ) {}
 
     /**
-     * Veri döndürmeyen ifade (DDL, INSERT).
+     * A statement that returns no data (DDL, INSERT).
      *
-     * @param  array<string, bool|int|float|string>  $settings  Sorgu başına ClickHouse ayarları, bkz. {@see self::select()}.
+     * @param  array<string, bool|int|float|string>  $settings  Per-query ClickHouse settings, see {@see self::select()}.
      */
     public function execute(string $sql, array $params = [], ?int $timeout = null, array $settings = []): void
     {
@@ -42,22 +42,22 @@ class ClickHouseClient implements ClickHouseReads
     }
 
     /**
-     * `wait_end_of_query=1`: sunucu cevabı tamponlar, sorgu akış ortasında patlarsa
-     * 200 + yarım gövde yerine gerçek bir HTTP 5xx döner.
+     * `wait_end_of_query=1`: the server buffers the answer, so a query that blows up in mid-stream
+     * returns a real HTTP 5xx instead of 200 + a half body.
      *
-     * `$settings` sorgu başına ClickHouse ayarlarıdır (`max_execution_time` vb.) ve `params` gibi URL
-     * argümanı olarak gider. Anahtarlar `/^[a-z][a-z0-9_]*$/` olmalı, değerler skaler (bool 1/0 olur).
-     * Tek istisna özel ayar öneki `SQL_`: tam olarak `/^SQL_[a-z][a-z0-9_]*$/` kabul edilir
-     * (`SQL_project_id`; sunucu tarafı: docker/clickhouse/config.d/10-custom-settings.xml).
-     * Ayarlar ASLA kullanıcı girdisinden gelmez: çağıranlar sabit değer geçer (kullanıcı girdisi
-     * yalnızca `$params` ile bağlanır). İstemcinin kendi argümanlarıyla (`database`, `default_format`,
-     * `wait_end_of_query`, `query`, `param_*`) çakışan adlar `InvalidArgumentException` ile reddedilir.
-     * Sunucu tarafı sınırlar kullanıcının profilindeki constraint'lerle ayrıca korunur.
-     * `$timeout` çağrı başına HTTP zaman aşımıdır (saniye), null ise yapıcıdaki varsayılan.
-     * Yeniden deneme: yalnızca `select()`, yalnızca `ConnectionException` (bağlanılamadı, DNS, bağlantı
-     * sıfırlandı), en fazla `$selectRetries` kez, küçük üstel bekleyişle. cURL 28 (zaman aşımı) YENİDEN
-     * DENENMEZ: sunucu sorguyu hâlâ çalıştırıyor olabilir ve ağır bir sorguyu üç kez koşturmak yükü katlar.
-     * Sunucunun verdiği hatalar (HTTP 4xx/5xx, `exception`) asla yeniden denenmez. Hata {@see ClickHouseException}.
+     * `$settings` are per-query ClickHouse settings (`max_execution_time` etc.) and travel as URL
+     * arguments like `params`. Keys must match `/^[a-z][a-z0-9_]*$/`, values must be scalars (a bool becomes 1/0).
+     * The only exception is the custom setting prefix `SQL_`: exactly `/^SQL_[a-z][a-z0-9_]*$/` is accepted
+     * (`SQL_project_id`; server side: docker/clickhouse/config.d/10-custom-settings.xml).
+     * Settings NEVER come from user input: callers pass fixed values (user input is only bound through
+     * `$params`). Names that collide with the client's own arguments (`database`, `default_format`,
+     * `wait_end_of_query`, `query`, `param_*`) are rejected with `InvalidArgumentException`.
+     * Server side limits are additionally protected by the constraints in the user's profile.
+     * `$timeout` is the per-call HTTP timeout (seconds), null means the default from the constructor.
+     * Retry: only `select()`, only `ConnectionException` (could not connect, DNS, connection
+     * reset), at most `$selectRetries` times, with a small exponential backoff. cURL 28 (timeout) is NOT
+     * RETRIED: the server may still be running the query and running a heavy query three times multiplies the load.
+     * Errors returned by the server (HTTP 4xx/5xx, `exception`) are never retried. The error is a {@see ClickHouseException}.
      *
      * @param  array<string, bool|int|float|string>  $settings
      * @return array<int, array<string, mixed>>
@@ -72,7 +72,7 @@ class ClickHouseClient implements ClickHouseReads
             throw ClickHouseException::unknown('unparseable response');
         }
 
-        // Akış ortası hata bazı yapılandırmalarda hâlâ 200 + `exception` anahtarı olarak gelir.
+        // A mid-stream error still arrives as 200 + an `exception` key in some configurations.
         if (! is_array($decoded) || array_key_exists('exception', $decoded) || ! array_key_exists('data', $decoded)) {
             throw ClickHouseException::fromResponse($body);
         }
@@ -120,8 +120,8 @@ class ClickHouseClient implements ClickHouseReads
     }
 
     /**
-     * @param  array<string, mixed>  $arguments  İstemcinin kendi URL argümanları (default_format vb.)
-     * @param  array<string, mixed>  $settings  Çağıranın sorgu başına ayarları (doğrulanır)
+     * @param  array<string, mixed>  $arguments  The client's own URL arguments (default_format etc.)
+     * @param  array<string, mixed>  $settings  The caller's per-query settings (validated)
      */
     private function send(string $sql, array $params, array $arguments, ?int $timeout = null, array $settings = []): string
     {
@@ -170,7 +170,7 @@ class ClickHouseClient implements ClickHouseReads
         return $encoded;
     }
 
-    /** URL parametreleri TSV-escape edilmiş metin olarak ayrıştırılır. */
+    /** URL parameters are parsed as TSV-escaped text. */
     private function encodeParam(mixed $value): string
     {
         return match (true) {
@@ -185,7 +185,7 @@ class ClickHouseClient implements ClickHouseReads
         };
     }
 
-    /** ClickHouse dizi literali: `['a','b\'c']`. Metin elemanlar tek tırnaklı, `\` ve `'` kaçışlı. */
+    /** ClickHouse array literal: `['a','b\'c']`. Text elements are single-quoted with `\` and `'` escaped. */
     private function encodeArray(array $values): string
     {
         if (! array_is_list($values)) {
@@ -199,7 +199,7 @@ class ClickHouseClient implements ClickHouseReads
     {
         return match (true) {
             is_string($value) => $this->quote($value),
-            // Array(Bool) yalnızca true/false kabul eder (1/0 reddedilir); skaler Bool param'ı 1/0 alır.
+            // Array(Bool) only accepts true/false (1/0 is rejected); a scalar Bool param takes 1/0.
             is_bool($value) => $value ? 'true' : 'false',
             is_int($value) => (string) $value,
             is_float($value) => var_export($value, true),

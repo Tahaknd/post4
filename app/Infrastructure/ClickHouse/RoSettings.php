@@ -3,11 +3,11 @@
 namespace App\Infrastructure\ClickHouse;
 
 /**
- * Salt-okunur istemcinin kabul ettiği TEK sorgu ayarları. Başka her anahtar reddedilir: genel regex +
- * kısa bir yasak listesi `session_id`, `quota_key`, `role`, `user`, `password`, `query_id`, `compress`
- * gibi HTTP arayüzü argümanlarını kaçırırdı. Sunucu tarafı sınırlar ayrıca `ro_insights` profilinin
- * constraint'leriyle korunur (docker/clickhouse/users.d/20-readonly-user.xml); buradakiler yalnızca
- * profilin izin verdiği aralıkta DÜŞÜRMEK içindir.
+ * The ONLY query settings the read-only client accepts. Every other key is rejected: a generic regex +
+ * a short deny list would miss HTTP interface arguments such as `session_id`, `quota_key`, `role`, `user`,
+ * `password`, `query_id`, `compress`. Server side limits are additionally protected by the constraints of the
+ * `ro_insights` profile (docker/clickhouse/users.d/20-readonly-user.xml); the ones here exist only to LOWER a
+ * limit within the range the profile allows.
  */
 final class RoSettings
 {

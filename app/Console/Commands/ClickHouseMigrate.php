@@ -10,15 +10,15 @@ class ClickHouseMigrate extends Command
 {
     protected $signature = 'clickhouse:migrate';
 
-    protected $description = 'ClickHouse migration dosyalarını sırayla uygular';
+    protected $description = 'Applies the ClickHouse migration files in order';
 
     public function handle(ClickHouseMigrator $migrator, ScopedViewDriftCheck $driftCheck): int
     {
         $ran = $migrator->migrate();
 
         $ran === []
-            ? $this->info('ClickHouse: uygulanacak migration yok.')
-            : collect($ran)->each(fn (string $name) => $this->info("ClickHouse: {$name} uygulandı."));
+            ? $this->info('ClickHouse: no migrations to apply.')
+            : collect($ran)->each(fn (string $name) => $this->info("ClickHouse: {$name} applied."));
 
         // Fails the command (and so the container start, like a checksum mismatch) when a migration changed
         // `events` without recreating the scoped view: the view would silently miss the new column.

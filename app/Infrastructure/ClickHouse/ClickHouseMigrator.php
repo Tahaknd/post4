@@ -6,22 +6,25 @@ use Illuminate\Support\Facades\Cache;
 use RuntimeException;
 
 /**
- * Migration dosyalarını (`NNN_ad.sql`) sıralı uygular.
+ * Applies the migration files (`NNN_name.sql`) in order.
  *
- * Kurallar:
- * - ClickHouse ifadeleri transactional değildir. Her ifade idempotent olmalı
- *   (`IF NOT EXISTS` / `IF EXISTS`) ya da dosya tam olarak tek ifade içermeli.
- * - Yarım uygulanmış bir dosya (ortada hata) bir sonraki başlatmada ilk ifadesinden itibaren yeniden çalışır.
- * - Dosyalar sıralı dosya adı sırasıyla uygulanır (`NNN_ad.sql`).
- * - Uygulanmış dosyalar asla düzenlenmemeli: dosyanın sha256 özeti `schema_migrations.checksum`
- *   içinde saklanır ve değişirse migrate() hata verir.
- * - Eşzamanlı çalıştırıcılar `clickhouse:migrate` kilidinde BEKLER (atlamaz).
- * - `$settings` HER migration ifadesine URL argümanı olarak eklenir. Sunucuda tanımlı özel ayarlar
- *   (`SQL_project_id`, config.d/10-custom-settings.xml) bir görünümün gövdesinde `getSetting` ile
- *   kullanılacaksa CREATE sırasında da bilinmelidir (002_scoped_events_view.sql). DİKKAT: bu yüzden HER migration
- *   ifadesi `SQL_project_id=0` ile çalışır; ileride yazılacak bir `INSERT ... SELECT` ile kapsamlı olay
- *   görünümünden (002_scoped_events_view.sql) okuyan her ifade project 0'ı görür, yani SIFIR satır okur. Veri taşıyan migration'lar
- *   `events` tablosunu doğrudan okumalıdır (migrator yönetici kullanıcıyla çalışır).
+ * Rules:
+ * - ClickHouse statements are not transactional. Every statement must be idempotent
+ *   (`IF NOT EXISTS` / `IF EXISTS`) or the file must contain exactly one statement.
+ * - A half-applied file (an error in the middle) runs again from its first statement on the next start.
+ * - Files are applied in file name order (`NNN_name.sql`).
+ * - Applied files must never be edited: the sha256 digest of the file is stored in
+ *   `schema_migrations.checksum` and migrate() fails if it changes.
+ *   (001_events.sql and 002_scoped_events_view.sql still carry Turkish comments for exactly this reason: they
+ *   are checksummed, so they are translated only together with the first deliberate reset of the volumes.
+ *   Every later migration is written in English from the start.)
+ * - Concurrent runners WAIT on the `clickhouse:migrate` lock (they do not skip).
+ * - `$settings` are added to EVERY migration statement as URL arguments. Custom settings defined on the server
+ *   (`SQL_project_id`, config.d/10-custom-settings.xml) must also be known while the CREATE runs if a view body
+ *   uses them with `getSetting` (002_scoped_events_view.sql). CAUTION: that is why EVERY migration
+ *   statement runs with `SQL_project_id=0`; any future `INSERT ... SELECT` that reads from the scoped events
+ *   view (002_scoped_events_view.sql) sees project 0, that is it reads ZERO rows. Migrations that move data
+ *   must read the `events` table directly (the migrator runs as the admin user).
  */
 final class ClickHouseMigrator
 {
@@ -37,7 +40,7 @@ final class ClickHouseMigrator
         private readonly array $settings = [],
     ) {}
 
-    /** @return list<string> Uygulanan migration dosya adları */
+    /** @return list<string> Names of the applied migration files */
     public function migrate(): array
     {
         return Cache::lock(self::LOCK_KEY, self::LOCK_TTL)
@@ -55,7 +58,7 @@ final class ClickHouseMigrator
             ) ENGINE = MergeTree ORDER BY version
             SQL);
 
-        // Checksum kolonu öncesinde oluşturulmuş tablolar için.
+        // For tables created before the checksum column existed.
         $this->clickhouse->execute("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum String DEFAULT ''");
 
         $applied = array_column(
@@ -67,7 +70,7 @@ final class ClickHouseMigrator
         $files = glob($this->path.'/*.sql') ?: [];
         sort($files);
 
-        // Önce hepsini doğrula: kaymış bir dosya varken hiçbir yeni migration uygulanmaz.
+        // Verify all of them first: while a file has drifted, no new migration is applied.
         $pending = [];
         foreach ($files as $file) {
             $name = basename($file);
@@ -103,9 +106,9 @@ final class ClickHouseMigrator
     }
 
     /**
-     * Dosyayı üst düzey `;` karakterlerinden ifadelere böler. Tek tırnaklı string'ler (`\` ve `''`
-     * kaçışlı), çift tırnaklı ve backtick'li tanımlayıcılar, `--` satır ve `/* *​/` blok yorumları
-     * `;` ayırıcısını gizler. Yorumlar atılır; ifadeler kırpılır, boş olanlar düşer.
+     * Splits the file into statements at top-level `;` characters. Single-quoted strings (`\` and `''`
+     * escapes), double-quoted and backtick-quoted identifiers, `--` line comments and `/* *​/` block comments
+     * hide the `;` separator. Comments are dropped; statements are trimmed, empty ones are discarded.
      *
      * @return list<string>
      */
@@ -124,7 +127,7 @@ final class ClickHouseMigrator
                 $current .= substr($sql, $i, $end - $i);
                 $i = $end - 1;
             } elseif ($char === '-' && $next === '-') {
-                // Satır sonu ifadeye dahil kalır ki bitişik token'lar yapışmasın.
+                // The line break stays in the statement so that adjacent tokens do not stick together.
                 $newline = strpos($sql, "\n", $i);
                 $i = $newline === false ? $length : $newline - 1;
             } elseif ($char === '/' && $next === '*') {
@@ -143,7 +146,7 @@ final class ClickHouseMigrator
         return array_values(array_filter(array_map('trim', $statements), fn (string $s) => $s !== ''));
     }
 
-    /** `$start` konumundaki açılış tırnağına karşılık gelen kapanıştan HEMEN SONRAKI konum. */
+    /** The position IMMEDIATELY AFTER the closing quote that matches the opening quote at `$start`. */
     private static function quotedEnd(string $sql, int $start, int $length): int
     {
         $quote = $sql[$start];
