@@ -64,6 +64,61 @@ x-app: &app
     CLICKHOUSE_USER: posthog
     CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-posthog}
     CLICKHOUSE_RO_PASSWORD: ${CLICKHOUSE_RO_PASSWORD:-posthog_ro}
+    # OPTIONAL PASS-THROUGH of the documented tuning knobs. A key with no value is the bare-name form
+    # (`- NAME` in a list): the variable is passed on only when it is set in the shell or in the compose
+    # `.env` file, and stays UNSET inside the container otherwise, so the default in config/*.php applies.
+    # Do not rewrite these as `${NAME:-}`: that would pass an empty string, which Laravel reads as
+    # 0/false/null instead of the default. Passwords and API keys are not on this list on purpose (the ones
+    # the stack uses are explicit above); APP_PREVIOUS_KEYS is the one secret, for APP_KEY rotation.
+    # Do not write `NAME=` (an empty value) in .env either: it is passed as an empty string. Leave the line out
+    # or commented. Verify with a throwaway container, which touches nothing that is running:
+    #   docker compose run --rm --no-deps -T app env | grep -E '^(INSIGHTS|KAFKA|SESSION)'
+    # (`docker compose config` lists every key of this block, set or not). Applies on the next recreate
+    # (`docker compose up -d`).
+    APP_LOCALE:
+    APP_FALLBACK_LOCALE:
+    APP_PREVIOUS_KEYS:
+    CAPTURE_STATUS_KAFKA_GROUP:
+    CAPTURE_STATUS_MIN_FREE_BYTES:
+    CAPTURE_STATUS_MIN_FREE_PERCENT:
+    CLICKHOUSE_CONNECT_TIMEOUT:
+    CLICKHOUSE_TIMEOUT:
+    CLICKHOUSE_RO_TIMEOUT:
+    CLICKHOUSE_RO_SELECT_RETRIES:
+    CLICKHOUSE_RO_SELECT_RETRY_BACKOFF_MS:
+    INERTIA_ENCRYPT_HISTORY:
+    INSIGHTS_CACHE_STORE:
+    INSIGHTS_CACHE_TTL_SECONDS:
+    INSIGHTS_EVENTS_CACHE_TTL_SECONDS:
+    INSIGHTS_EVENTS_EMPTY_SEARCH_CACHE_TTL_SECONDS:
+    INSIGHTS_EVENTS_LOCK_TTL_SECONDS:
+    INSIGHTS_EVENTS_MAX_EXECUTION_SECONDS:
+    INSIGHTS_EVENTS_PROJECT_BUDGET_MS:
+    INSIGHTS_EVENTS_WAIT_MS:
+    INSIGHTS_FINISHED_TTL_SECONDS:
+    INSIGHTS_FLIGHTFAIL_TTL_SECONDS:
+    INSIGHTS_INFLIGHT_TTL_SECONDS:
+    INSIGHTS_LOCK_TTL_SECONDS:
+    INSIGHTS_MAX_ACTIVE_RUNS_PER_PROJECT:
+    INSIGHTS_MAX_ACTIVE_RUNS_PER_USER:
+    INSIGHTS_MAX_CONCURRENT_QUERIES_PER_PROJECT:
+    INSIGHTS_MAX_RESULT_BYTES:
+    INSIGHTS_POLL_INTERVAL_SECONDS:
+    INSIGHTS_RUN_TTL_SECONDS:
+    INSIGHTS_UNAVAILABLE_RETRY_AFTER_SECONDS:
+    KAFKA_BREAKER_COOLDOWN_SECONDS:
+    KAFKA_EVENTS_TOPIC:
+    KAFKA_FLUSH_TIMEOUT_MS:
+    KAFKA_MESSAGE_TIMEOUT_MS:
+    LOG_AUDIT_CHANNEL:
+    LOG_DAILY_DAYS:
+    LOG_STDERR_FORMATTER:
+    SESSION_DOMAIN:
+    SESSION_ENCRYPT:
+    SESSION_EXPIRE_ON_CLOSE:
+    SESSION_LIFETIME:
+    SESSION_SAME_SITE:
+    SESSION_SECURE_COOKIE:
   volumes:
     - app-storage:/app/storage
     # OPTIONAL GeoIP: put a GeoLite2-City or DB-IP Lite City `.mmdb` (you download it yourself: licences forbid
