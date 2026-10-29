@@ -11,6 +11,8 @@ import MetricSelect from '@/Components/Insights/MetricSelect.vue';
 import ResultState from '@/Components/Insights/ResultState.vue';
 import TrendsChart from '@/Components/Insights/TrendsChart.vue';
 import { useInsightRun } from '@/composables/useInsightRun';
+import { useTouchedFields } from '@/composables/useTouchedFields';
+import { useUrlState } from '@/composables/useUrlState';
 import {
     decodeDefinition,
     defaultDefinition,
@@ -81,43 +83,10 @@ watch(
 );
 
 // ---------------------------------------------------------------- the query string follows the definition
-// Debounced, harmless when the browser refuses it, keeps the fragment, and never fires after the page is left (a late
-// replaceState would rewrite the URL of the NEXT page). Inertia keeps its page object in history.state: it is passed
-// through untouched, only the URL changes.
-let urlTimer = null;
-
-watch(
-    () => encodeDefinition(definition, props.defaults),
-    (query) => {
-        clearTimeout(urlTimer);
-        urlTimer = setTimeout(() => {
-            try {
-                const next = window.location.pathname + (query === '' ? '' : `?${query}`) + window.location.hash;
-
-                if (next !== window.location.pathname + window.location.search + window.location.hash) {
-                    window.history.replaceState(window.history.state, '', next);
-                }
-            } catch {
-                // a sandbox or a browser limit: the link just does not follow the form
-            }
-        }, 300);
-    },
-);
-
-onBeforeUnmount(() => clearTimeout(urlTimer));
+useUrlState(() => encodeDefinition(definition, props.defaults));
 
 // ---------------------------------------------------------------- when a field's message may appear
-const touched = reactive(new Set());
-
-// Leaving a control marks its field (`data-field` on the input) as touched; focus moving INSIDE a field (date from to to)
-// is a different field each time.
-function onFocusOut(event) {
-    const field = event.target.closest?.('[data-field]')?.dataset.field;
-
-    if (field !== undefined) {
-        touched.add(field);
-    }
-}
+const { touched, onFocusOut } = useTouchedFields();
 
 // Field errors: the instant client-side ones win but are shown only for fields the user has been through; the API's 422
 // messages fill the rest and always show (the user has asked for exactly that definition).
