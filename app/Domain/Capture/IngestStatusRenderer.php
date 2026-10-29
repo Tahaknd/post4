@@ -78,6 +78,24 @@ final class IngestStatusRenderer
         $out[] = sprintf('  active parts:        %s (max_parts_in_total %s)', $ch['active_parts'] ?? 'unknown', $ch['max_parts_in_total'] ?? 'unknown');
         $out[] = '  pending mutations:   '.$ch['pending_mutations'];
 
+        if (isset($r['identity_consumer'])) {
+            $i = $r['identity_consumer'];
+            $out[] = '';
+            $out[] = sprintf('Identity consumer (group %s, topic %s)', $i['group'], $i['topic']);
+            if (! $i['lag']['known']) {
+                $out[] = '  total lag:           unknown';
+            } else {
+                $out[] = '  total lag:           '.number_format((int) $i['lag']['total']);
+                foreach ((array) $i['lag']['partitions'] as $partition => $p) {
+                    $out[] = sprintf('  partition %d:         committed %s, high watermark %d, lag %d', $partition, $p['committed'] ?? 'none', $p['high'], $p['lag']);
+                }
+            }
+
+            $out[] = '';
+            $out[] = sprintf('Identity dead letters (topic %s)', $i['dlq']['topic']);
+            $out[] = '  messages in topic:   '.($i['dlq']['known'] ? number_format((int) $i['dlq']['depth']) : 'unknown');
+        }
+
         return $out;
     }
 }

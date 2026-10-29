@@ -132,4 +132,59 @@ final class IngestStatusReport
             ],
         ];
     }
+
+    /**
+     * The identity part of the health snapshot (see {@see IngestHealth}): lag and committed-offset sum of group
+     * `identity`, the depth of the dead letter topic, and what the previous run saw of both.
+     *
+     * @param  array{known: bool, total: ?int, partitions: array<int, array{committed: ?int, high: int, lag: int}>}  $lag
+     * @param  array{known: bool, total: ?int, partitions: array}  $dlq
+     * @param  ?array{offset_sum: int, at: int, lag: ?int}  $previous  the stall baseline of the identity consumer
+     * @param  ?int  $previousDlqDepth  the depth of the dead letter topic at the previous run
+     * @return array<string, int|null>
+     */
+    public static function identitySnapshot(array $lag, array $dlq, ?array $previous, ?int $previousDlqDepth, int $now): array
+    {
+        return [
+            'identity_lag' => $lag['total'],
+            'identity_offset_sum' => self::offsetSum($lag['partitions']),
+            'identity_previous_offset_sum' => $previous['offset_sum'] ?? null,
+            'identity_previous_age' => $previous === null ? null : max(0, $now - $previous['at']),
+            'identity_previous_lag' => $previous['lag'] ?? null,
+            'dlq_depth' => $dlq['total'],
+            'dlq_previous_depth' => $previousDlqDepth,
+        ];
+    }
+
+    /**
+     * The `identity_consumer` section of the report: the lag of the group on the events topic and the dead letter topic.
+     *
+     * @param  array{known: bool, total: ?int, partitions: array<int, array{committed: ?int, high: int, lag: int}>}  $lag
+     * @param  array{known: bool, total: ?int, partitions: array<int, array{low: int, high: int, depth: int}>}  $dlq
+     * @return array<string, mixed>
+     */
+    public static function identitySection(array $lag, array $dlq, string $group, string $eventsTopic, string $dlqTopic): array
+    {
+        return [
+            'group' => $group,
+            'topic' => $eventsTopic,
+            'lag' => [
+                'known' => $lag['known'],
+                'total' => $lag['total'],
+                'partitions' => (object) $lag['partitions'],
+            ],
+            'dlq' => [
+                'topic' => $dlqTopic,
+                'known' => $dlq['known'],
+                'depth' => $dlq['total'],
+                'partitions' => (object) $dlq['partitions'],
+            ],
+        ];
+    }
+
+    /** @param array<int, array{committed: ?int}> $partitions */
+    public static function offsetSum(array $partitions): int
+    {
+        return array_sum(array_map(fn (array $p): int => $p['committed'] ?? 0, $partitions));
+    }
 }

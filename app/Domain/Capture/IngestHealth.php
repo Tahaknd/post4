@@ -14,6 +14,9 @@ namespace App\Domain\Capture;
  *    ClickHouse comes up before Kafka, must not read STALLED; an unknown lag keeps this signature armed);
  *  - Kafka lag is known and > 0 while the consumer offsets did not move since a previous snapshot taken
  *    at least 60 s ago (that snapshot also saw a KNOWN lag > 0, so a burst that just arrived is not a stall).
+ * The identity consumer (group `identity` on the events topic) has the second signature only, and only with a
+ * KNOWN lag > 0 (a consumer that is caught up has nothing to commit, so frozen offsets at lag 0 are the normal state):
+ * its committed offsets did not move since a snapshot at least 60 s old that also saw a lag > 0.
  * WARN is everything else worth looking at; OK means nothing was found. Missing snapshot keys mean
  * "unknown" and never raise a reason on their own.
  *
@@ -21,7 +24,10 @@ namespace App\Domain\Capture;
  * commit_age (?int, null = never committed), poll_age (?int), lag (?int, null = unknown), offset_sum (int),
  * previous_offset_sum (?int), previous_age (?int), previous_lag (?int), errors_last_hour (int),
  * disk_free_bytes (?int), disk_total_bytes (?int), parts_active (?int), parts_max (?int),
- * pending_mutations (int), dropped_by_project (array<int, int> drops in the last hour per project id).
+ * pending_mutations (int), dropped_by_project (array<int, int> drops in the last hour per project id),
+ * identity_lag (?int, null = unknown), identity_offset_sum (int), identity_previous_offset_sum (?int),
+ * identity_previous_age (?int), identity_previous_lag (?int), dlq_depth (?int, null = unknown),
+ * dlq_previous_depth (?int).
  */
 final class IngestHealth
 {
@@ -105,6 +111,22 @@ final class IngestHealth
             );
         }
 
+        $identityLag = self::int($s, 'identity_lag');
+        $identityAge = self::int($s, 'identity_previous_age');
+        $identityPreviousSum = self::int($s, 'identity_previous_offset_sum');
+        $identityPreviousLag = self::int($s, 'identity_previous_lag');
+        if ($identityLag !== null && $identityLag > 0
+            && $identityAge !== null && $identityAge >= $t['stall_min_baseline_age_seconds']
+            && $identityPreviousSum !== null && $identityPreviousSum === self::int($s, 'identity_offset_sum')
+            && $identityPreviousLag !== null && $identityPreviousLag > 0) {
+            $reasons[] = sprintf(
+                'the identity consumer is stalled: its lag is %d and its committed offsets have not moved for %d s (offset sum %d); is the `identity` service running? see `docker compose logs identity`',
+                $identityLag,
+                $identityAge,
+                $identityPreviousSum,
+            );
+        }
+
         return $reasons;
     }
 
@@ -146,6 +168,14 @@ final class IngestHealth
             if ((int) $dropped > $t['drops_warn_per_project_per_hour']) {
                 $reasons[] = sprintf('project #%d lost %d events to the normaliser in the last hour (more than %d); check its SDK payloads', $projectId, $dropped, $t['drops_warn_per_project_per_hour']);
             }
+        }
+
+        // The dead letter topic only grows by what the identity consumer could not process: new messages since the previous
+        // run deserve a look, an old backlog (kept for 30 days) is shown by the report but not repeated as a warning.
+        $dlq = self::int($s, 'dlq_depth');
+        $dlqBefore = self::int($s, 'dlq_previous_depth');
+        if ($dlq !== null && $dlqBefore !== null && $dlq > $dlqBefore) {
+            $reasons[] = sprintf('%d event(s) were dead-lettered to events_dlq since the previous run (%d in the topic now)', $dlq - $dlqBefore, $dlq);
         }
 
         if (self::int($s, 'consumers') === 0) {

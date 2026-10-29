@@ -2,9 +2,10 @@
 
 namespace Tests\Support;
 
-use App\Domain\Capture\KafkaLagProbe;
+use App\Domain\Capture\IdentityLagProbe;
 
-final class FakeKafkaLagProbe implements KafkaLagProbe
+/** Stands in for the ClickHouse group's probe and, being an IdentityLagProbe too, for the identity group's. */
+final class FakeKafkaLagProbe implements IdentityLagProbe
 {
     /**
      * @param  array<int, array{committed: ?int, high: int, lag: int}>  $partitions

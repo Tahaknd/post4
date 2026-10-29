@@ -2,6 +2,8 @@
 
 namespace App\Console\Commands;
 
+use App\Domain\Capture\DlqDepthProbe;
+use App\Domain\Capture\IdentityLagProbe;
 use App\Domain\Capture\IngestHealth;
 use App\Domain\Capture\IngestStatusFormat;
 use App\Domain\Capture\IngestStatusRenderer;
@@ -30,6 +32,12 @@ class CaptureStatus extends Command
     public const ERROR = 2;
 
     public const SNAPSHOT_KEY = 'capture-status:last';
+
+    /** Baseline of the identity consumer's frozen-offsets check (same mechanics as SNAPSHOT_KEY). */
+    public const IDENTITY_SNAPSHOT_KEY = 'capture-status:identity';
+
+    /** The depth of the dead letter topic at the previous run: a larger one is a WARN. */
+    public const DLQ_SNAPSHOT_KEY = 'capture-status:dlq';
 
     protected $signature = 'capture:status
         {--json : Print ONE JSON object on stdout and nothing else}
@@ -66,7 +74,7 @@ scheduler runs `capture:status --log` every minute, so `docker compose logs sche
 trend and an ingest stall without anybody running the command.
 HELP;
 
-    public function handle(IngestStatusQueries $queries, KafkaLagProbe $probe): int
+    public function handle(IngestStatusQueries $queries, KafkaLagProbe $probe, IdentityLagProbe $identityProbe, DlqDepthProbe $dlqProbe): int
     {
         try {
             $data = $queries->fetch($this->budgetSeconds());
@@ -75,16 +83,24 @@ HELP;
         }
 
         $lag = $this->kafkaLag($probe);
+        $identityLag = $this->kafkaLag($identityProbe, 'identity consumer lag');
+        $dlq = $this->dlqDepth($dlqProbe);
         $dropped = $this->droppedEvents();
         $now = CarbonImmutable::now('UTC')->getTimestamp();
         $previous = $this->readSnapshot();
+        $identityPrevious = $this->readSnapshot(self::IDENTITY_SNAPSHOT_KEY);
+        $dlqPrevious = $this->readDlqSnapshot();
 
-        $snapshot = IngestStatusReport::healthSnapshot($data, $lag, $previous, $now) + ['dropped_by_project' => $dropped['by_project']];
+        $snapshot = IngestStatusReport::healthSnapshot($data, $lag, $previous, $now)
+            + ['dropped_by_project' => $dropped['by_project']]
+            + IngestStatusReport::identitySnapshot($identityLag, $dlq, $identityPrevious, $dlqPrevious, $now);
         $health = IngestHealth::classify($snapshot, [
             'min_free_percent' => (float) config('capture.status.min_free_percent'),
             'min_free_bytes' => (int) config('capture.status.min_free_bytes'),
         ]);
         $this->writeSnapshot($data['offset_sum'], $lag['total'], $previous, $now);
+        $this->writeSnapshot(IngestStatusReport::offsetSum($identityLag['partitions']), $identityLag['total'], $identityPrevious, $now, self::IDENTITY_SNAPSHOT_KEY);
+        $this->writeDlqSnapshot($dlq['total']);
 
         $exit = match ($health['status']) {
             IngestHealth::STATUS_STALLED => self::STALLED,
@@ -93,6 +109,13 @@ HELP;
         };
 
         $report = IngestStatusReport::build($data, $lag, $dropped, $previous, $now, $health, $exit);
+        $report['identity_consumer'] = IngestStatusReport::identitySection(
+            $identityLag,
+            $dlq,
+            (string) config('identity.group'),
+            (string) config('capture.events_topic'),
+            (string) config('identity.dlq_topic'),
+        );
 
         if ($this->option('log')) {
             $this->logSummary($report);
@@ -129,14 +152,32 @@ HELP;
      *
      * @return array{known: bool, total: ?int, partitions: array<int, array{committed: ?int, high: int, lag: int}>}
      */
-    private function kafkaLag(KafkaLagProbe $probe): array
+    private function kafkaLag(KafkaLagProbe $probe, string $label = 'Kafka lag'): array
     {
         try {
             $partitions = $probe->lag();
 
             return ['known' => true, 'total' => array_sum(array_column($partitions, 'lag')), 'partitions' => $partitions];
         } catch (\Throwable $e) {
-            $this->getOutput()->getErrorStyle()->writeln('NOTE: Kafka lag is unknown: '.OutputFormatter::escape(Str::limit(IngestStatusFormat::oneLine($e->getMessage()), 200)));
+            $this->getOutput()->getErrorStyle()->writeln('NOTE: '.$label.' is unknown: '.OutputFormatter::escape(Str::limit(IngestStatusFormat::oneLine($e->getMessage()), 200)));
+
+            return ['known' => false, 'total' => null, 'partitions' => []];
+        }
+    }
+
+    /**
+     * Best effort, like the lag: a failing probe is a stderr note and an unknown depth.
+     *
+     * @return array{known: bool, total: ?int, partitions: array<int, array{low: int, high: int, depth: int}>}
+     */
+    private function dlqDepth(DlqDepthProbe $probe): array
+    {
+        try {
+            $partitions = $probe->depth();
+
+            return ['known' => true, 'total' => array_sum(array_column($partitions, 'depth')), 'partitions' => $partitions];
+        } catch (\Throwable $e) {
+            $this->getOutput()->getErrorStyle()->writeln('NOTE: the dead letter depth is unknown: '.OutputFormatter::escape(Str::limit(IngestStatusFormat::oneLine($e->getMessage()), 200)));
 
             return ['known' => false, 'total' => null, 'partitions' => []];
         }
@@ -174,10 +215,10 @@ HELP;
     }
 
     /** @return ?array{offset_sum: int, at: int, lag: ?int} */
-    private function readSnapshot(): ?array
+    private function readSnapshot(string $key = self::SNAPSHOT_KEY): ?array
     {
         try {
-            $value = Cache::get(self::SNAPSHOT_KEY);
+            $value = Cache::get($key);
         } catch (\Throwable) {
             return null;
         }
@@ -196,17 +237,42 @@ HELP;
      *
      * @param  ?array{offset_sum: int, at: int, lag: ?int}  $previous
      */
-    private function writeSnapshot(int $offsetSum, ?int $lag, ?array $previous, int $now): void
+    private function writeSnapshot(int $offsetSum, ?int $lag, ?array $previous, int $now, string $key = self::SNAPSHOT_KEY): void
     {
         $keep = $previous !== null && $lag !== null && $lag > 0
             && ($previous['lag'] ?? 0) > 0 && $previous['offset_sum'] === $offsetSum;
 
         try {
             Cache::put(
-                self::SNAPSHOT_KEY,
+                $key,
                 $keep ? $previous : ['offset_sum' => $offsetSum, 'at' => $now, 'lag' => $lag],
                 (int) config('capture.status.snapshot_ttl_seconds'),
             );
+        } catch (\Throwable) {
+            // no comparison next time
+        }
+    }
+
+    private function readDlqSnapshot(): ?int
+    {
+        try {
+            $value = Cache::get(self::DLQ_SNAPSHOT_KEY);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return is_int($value) ? $value : null;
+    }
+
+    /** An unknown depth leaves the stored one alone, so a Kafka blip does not hide or invent a difference. */
+    private function writeDlqSnapshot(?int $depth): void
+    {
+        if ($depth === null) {
+            return;
+        }
+
+        try {
+            Cache::put(self::DLQ_SNAPSHOT_KEY, $depth, (int) config('capture.status.snapshot_ttl_seconds'));
         } catch (\Throwable) {
             // no comparison next time
         }

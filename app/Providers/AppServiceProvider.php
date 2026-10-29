@@ -2,11 +2,13 @@
 
 namespace App\Providers;
 
+use App\Domain\Capture\DlqDepthProbe;
 use App\Domain\Capture\Enricher;
 use App\Domain\Capture\Enrichment\MmdbGeoLookup;
 use App\Domain\Capture\Enrichment\UserAgentParser;
 use App\Domain\Capture\EventProducer;
 use App\Domain\Capture\FlagEvaluator;
+use App\Domain\Capture\IdentityLagProbe;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\NoFlagsEvaluator;
 use App\Domain\Capture\PayloadDecoder;
@@ -25,7 +27,9 @@ use App\Infrastructure\Kafka\Identity\RdKafkaMessageSource;
 use App\Infrastructure\Kafka\Identity\RdKafkaRowWriter;
 use App\Infrastructure\Kafka\Identity\RowWriter;
 use App\Infrastructure\Kafka\KafkaEventProducer;
+use App\Infrastructure\Kafka\RdKafkaIdentityLagProbe;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
+use App\Infrastructure\Kafka\RdKafkaTopicDepthProbe;
 use App\Models\Project;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Http\Middleware\TrustProxies;
@@ -109,6 +113,20 @@ class AppServiceProvider extends ServiceProvider
             config('capture.kafka_brokers'),
             messageTimeoutMs: (int) config('identity.produce_timeout_ms'),
             flushTimeoutMs: (int) config('identity.produce_timeout_ms') + 5000,
+        ));
+
+        // `capture:status`: how far the identity consumer's group is behind on the events topic (a RdKafkaLagProbe of its
+        // own group, never the ClickHouse one) and how many messages the dead letter topic holds.
+        $this->app->singleton(IdentityLagProbe::class, fn () => new RdKafkaIdentityLagProbe(new RdKafkaLagProbe(
+            config('capture.kafka_brokers'),
+            config('capture.events_topic'),
+            config('identity.group'),
+            (int) config('capture.status.kafka_timeout_ms'),
+        )));
+        $this->app->singleton(DlqDepthProbe::class, fn () => new RdKafkaTopicDepthProbe(
+            config('capture.kafka_brokers'),
+            config('identity.dlq_topic'),
+            (int) config('capture.status.kafka_timeout_ms'),
         ));
 
         // One Enricher per Octane worker (listed in config/octane.php `warm`): it owns the User-Agent memo and the

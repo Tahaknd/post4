@@ -1,6 +1,8 @@
 <?php
 
 use App\Console\Commands\CaptureStatus;
+use App\Domain\Capture\DlqDepthProbe;
+use App\Domain\Capture\IdentityLagProbe;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Models\Project;
 use Carbon\CarbonImmutable;
@@ -12,6 +14,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Tests\Support\ClickHouseStatusFake;
+use Tests\Support\FakeDlqDepthProbe;
 use Tests\Support\FakeKafkaLagProbe;
 use Tests\Support\ProjectCache;
 use Tests\Support\SplitOutput;
@@ -27,6 +30,8 @@ beforeEach(function () {
     ]);
     ClickHouseStatusFake::install();
     $this->app->instance(KafkaLagProbe::class, new FakeKafkaLagProbe);
+    $this->app->instance(IdentityLagProbe::class, new FakeKafkaLagProbe);
+    $this->app->instance(DlqDepthProbe::class, new FakeDlqDepthProbe);
 });
 
 afterEach(function () {
@@ -548,4 +553,144 @@ it('runs the scheduled entry end to end and writes the summary line', function (
     $event->run(app());
 
     Log::shouldHaveReceived('info')->once()->with('capture:status', Mockery::on(fn ($c) => $c['status'] === 'OK'));
+});
+
+describe('the identity consumer', function () {
+    it('shows the lag of its group and the dead letter depth, in the text and in the JSON, without touching the other sections', function () {
+        $this->app->instance(IdentityLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => 90, 'high' => 100, 'lag' => 10], 1 => ['committed' => null, 'high' => 5, 'lag' => 5]]));
+        $this->app->instance(DlqDepthProbe::class, new FakeDlqDepthProbe([0 => ['low' => 0, 'high' => 3, 'depth' => 3], 1 => ['low' => 2, 'high' => 4, 'depth' => 2]]));
+
+        [$code, $out, $err] = runStatus();
+        [, $jsonOut] = runStatus(['--json' => true]);
+        $json = json_decode($jsonOut, true, flags: JSON_THROW_ON_ERROR);
+
+        expect($code)->toBe(0)
+            ->and($err)->toBe('')
+            ->and($out)->toContain('Identity consumer (group identity, topic events)')
+            ->toContain('total lag:           15')
+            ->toContain('partition 0:         committed 90, high watermark 100, lag 10')
+            ->toContain('partition 1:         committed none, high watermark 5, lag 5')
+            ->toContain('Identity dead letters (topic events_dlq)')
+            ->toContain('messages in topic:   5')
+            // the ClickHouse sections are what they were
+            ->toContain('Kafka lag (group clickhouse_events, topic events)')->toContain('total lag:           0')
+            ->and($json['identity_consumer'])->toMatchArray(['group' => 'identity', 'topic' => 'events'])
+            ->and($json['identity_consumer']['lag'])->toMatchArray(['known' => true, 'total' => 15])
+            ->and($json['identity_consumer']['lag']['partitions'])->toBe(['0' => ['committed' => 90, 'high' => 100, 'lag' => 10], '1' => ['committed' => null, 'high' => 5, 'lag' => 5]])
+            ->and($json['identity_consumer']['dlq'])->toMatchArray(['topic' => 'events_dlq', 'known' => true, 'depth' => 5])
+            ->and($json['kafka_lag'])->toMatchArray(['known' => true, 'total' => 0])
+            ->and(array_keys($json))->toContain('status', 'exit_code', 'reasons', 'events', 'events_errors', 'kafka_consumer', 'kafka_lag', 'clickhouse', 'dropped', 'previous_run');
+    });
+
+    it('is NOT stalled at lag 0, however long its offsets stay put (a caught-up consumer commits nothing)', function () {
+        runStatus();
+
+        CarbonImmutable::setTestNow('2026-10-23 14:00:00');
+        ClickHouseStatusFake::install();
+        [$code, , $err] = runStatus();
+
+        expect($code)->toBe(0)->and($err)->toBe('');
+    });
+
+    it('is STALLED when its lag stays above 0 while its committed offsets do not move for 60 s', function () {
+        $probe = new FakeKafkaLagProbe([0 => ['committed' => 10, 'high' => 40, 'lag' => 30]]);
+        $this->app->instance(IdentityLagProbe::class, $probe);
+
+        [$first] = runStatus();
+        CarbonImmutable::setTestNow('2026-10-23 12:01:05');
+        ClickHouseStatusFake::install();
+        [$second, , $err] = runStatus();
+
+        expect($first)->toBe(0)
+            ->and($second)->toBe(2)
+            ->and($err)->toContain('INGEST STALLED: the identity consumer is stalled: its lag is 30')->toContain('not moved for 65 s')->toContain('docker compose logs identity');
+    });
+
+    it('is not stalled while its offsets move, nor before 60 s have passed', function () {
+        $probe = new FakeKafkaLagProbe([0 => ['committed' => 10, 'high' => 40, 'lag' => 30]]);
+        $this->app->instance(IdentityLagProbe::class, $probe);
+        runStatus();
+
+        CarbonImmutable::setTestNow('2026-10-23 12:00:30');
+        ClickHouseStatusFake::install();
+        expect(runStatus()[0])->toBe(0);
+
+        $probe->partitions = [0 => ['committed' => 25, 'high' => 70, 'lag' => 45]];
+        CarbonImmutable::setTestNow('2026-10-23 12:02:00');
+        ClickHouseStatusFake::install();
+        expect(runStatus()[0])->toBe(0);
+    });
+
+    it('stops being stalled the moment the lag is gone', function () {
+        $probe = new FakeKafkaLagProbe([0 => ['committed' => 10, 'high' => 40, 'lag' => 30]]);
+        $this->app->instance(IdentityLagProbe::class, $probe);
+        runStatus();
+
+        $probe->partitions = [0 => ['committed' => 10, 'high' => 10, 'lag' => 0]];
+        CarbonImmutable::setTestNow('2026-10-23 12:05:00');
+        ClickHouseStatusFake::install();
+
+        expect(runStatus()[0])->toBe(0);
+    });
+
+    it('shows its lag as unknown with a stderr note when the probe fails, and stays non-fatal', function () {
+        $this->app->instance(IdentityLagProbe::class, new FakeKafkaLagProbe(failWith: new RuntimeException('timeout')));
+
+        [$code, $out, $err] = runStatus();
+        $json = json_decode(runStatus(['--json' => true])[1], true, flags: JSON_THROW_ON_ERROR);
+
+        expect($code)->toBe(0)
+            ->and($out)->toContain('Identity consumer (group identity, topic events)')
+            ->and($err)->toContain('NOTE: identity consumer lag is unknown: timeout')
+            ->and($json['identity_consumer']['lag'])->toMatchArray(['known' => false, 'total' => null]);
+    });
+
+    it('warns about events that were dead-lettered since the previous run, once, and not about an old backlog', function () {
+        $dlq = new FakeDlqDepthProbe([0 => ['low' => 0, 'high' => 4, 'depth' => 4]]);
+        $this->app->instance(DlqDepthProbe::class, $dlq);
+
+        [$first, , $firstErr] = runStatus();
+
+        $dlq->partitions = [0 => ['low' => 0, 'high' => 7, 'depth' => 7]];
+        CarbonImmutable::setTestNow('2026-10-23 12:03:00');
+        ClickHouseStatusFake::install();
+        [$second, , $secondErr] = runStatus();
+
+        CarbonImmutable::setTestNow('2026-10-23 12:04:00');
+        ClickHouseStatusFake::install();
+        [$third, , $thirdErr] = runStatus();
+
+        expect($first)->toBe(0)->and($firstErr)->toBe('')
+            ->and($second)->toBe(1)->and($secondErr)->toContain('WARN: 3 event(s) were dead-lettered to events_dlq since the previous run (7 in the topic now)')
+            ->and($third)->toBe(0)->and($thirdErr)->toBe('');
+    });
+
+    it('does not warn when the dead letter topic shrinks (retention) or its depth is unknown', function () {
+        $dlq = new FakeDlqDepthProbe([0 => ['low' => 0, 'high' => 9, 'depth' => 9]]);
+        $this->app->instance(DlqDepthProbe::class, $dlq);
+        runStatus();
+
+        $dlq->partitions = [0 => ['low' => 5, 'high' => 9, 'depth' => 4]];
+        CarbonImmutable::setTestNow('2026-10-23 12:03:00');
+        ClickHouseStatusFake::install();
+        [$shrunk, , $shrunkErr] = runStatus();
+
+        $dlq->failWith = new RuntimeException('no brokers');
+        CarbonImmutable::setTestNow('2026-10-23 12:04:00');
+        ClickHouseStatusFake::install();
+        [$unknown, $unknownOut, $unknownErr] = runStatus();
+
+        expect($shrunk)->toBe(0)->and($shrunkErr)->toBe('')
+            ->and($unknown)->toBe(0)
+            ->and($unknownOut)->toContain('messages in topic:   unknown')
+            ->and($unknownErr)->toContain('NOTE: the dead letter depth is unknown: no brokers');
+    });
+
+    it('keeps the one-line log entry as it was', function () {
+        Log::spy();
+
+        runStatus(['--log' => true]);
+
+        Log::shouldHaveReceived('info')->once()->with('capture:status', ['status' => 'OK', 'lag_max_partition' => 0, 'disk_free_percent' => 50.0]);
+    });
 });

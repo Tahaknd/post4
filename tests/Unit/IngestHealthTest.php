@@ -218,3 +218,50 @@ describe('dropped events', function () {
         expect(IngestHealth::classify(healthySnapshot(['dropped_by_project' => [1 => 600, 2 => 600]]))['status'])->toBe('OK');
     });
 });
+
+describe('the identity consumer', function () {
+    function identityStalled(array $override = []): array
+    {
+        return healthySnapshot(array_replace([
+            'identity_lag' => 30,
+            'identity_offset_sum' => 500,
+            'identity_previous_offset_sum' => 500,
+            'identity_previous_age' => 90,
+            'identity_previous_lag' => 12,
+        ], $override));
+    }
+
+    it('is STALLED when its lag is above 0 and its offsets did not move for a minute', function () {
+        $result = IngestHealth::classify(identityStalled());
+
+        expect($result['status'])->toBe('STALLED')
+            ->and($result['reasons'][0])->toContain('identity consumer is stalled')->toContain('lag is 30')->toContain('90 s');
+    });
+
+    it('is never STALLED at lag 0, however long its offsets stayed put', function () {
+        expect(IngestHealth::classify(identityStalled(['identity_lag' => 0, 'identity_previous_age' => 86_000, 'identity_previous_lag' => 0])))->toBe(['status' => 'OK', 'reasons' => []]);
+    });
+
+    it('needs a known lag, a baseline that is old enough, with a lag of its own, and offsets that really are the same', function (array $override) {
+        expect(IngestHealth::classify(identityStalled($override))['status'])->toBe('OK');
+    })->with([
+        'unknown lag' => [['identity_lag' => null]],
+        'baseline too young' => [['identity_previous_age' => 59]],
+        'no baseline' => [['identity_previous_age' => null, 'identity_previous_offset_sum' => null, 'identity_previous_lag' => null]],
+        'the baseline was caught up' => [['identity_previous_lag' => 0]],
+        'the baseline lag was unknown' => [['identity_previous_lag' => null]],
+        'the offsets moved' => [['identity_offset_sum' => 501]],
+    ]);
+
+    it('warns when the dead letter topic grew since the previous run, and only then', function (?int $now, ?int $before, bool $warns) {
+        $result = IngestHealth::classify(healthySnapshot(['dlq_depth' => $now, 'dlq_previous_depth' => $before]));
+
+        expect($result['status'])->toBe($warns ? 'WARN' : 'OK');
+    })->with([
+        'grew' => [5, 2, true],
+        'same' => [5, 5, false],
+        'shrank' => [2, 5, false],
+        'first run' => [5, null, false],
+        'unknown now' => [null, 5, false],
+    ]);
+});
