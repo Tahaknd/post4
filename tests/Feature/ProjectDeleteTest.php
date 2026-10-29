@@ -4,6 +4,7 @@ use App\Actions\Projects\QueueEventsPurge;
 use App\Console\Commands\ProjectDelete;
 use App\Domain\Capture\ProjectResolver;
 use App\Jobs\PurgeProjectEvents;
+use App\Jobs\PurgeProjectPersonDistinctIds;
 use App\Models\Project;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -47,6 +48,17 @@ it('purges the events by default: both passes go to the maintenance queue', func
     expect(flattened(Artisan::output()))->toContain('Events purge queued')->not->toContain('KEPT');
     Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 1 && $job->queue === 'maintenance');
     Queue::assertPushed(PurgeProjectEvents::class, fn (PurgeProjectEvents $job) => $job->projectId === $project->id && $job->pass === 2 && $job->delay === QueueEventsPurge::SECOND_PASS_DELAY_SECONDS);
+});
+
+it('purges the distinct id mapping of the project too: its own job, both passes, same queue', function () {
+    $project = Project::factory()->create();
+
+    Artisan::call('project:delete', ['api_key' => $project->api_key, '--force' => true]);
+
+    Queue::assertPushed(PurgeProjectPersonDistinctIds::class, 2);
+    Queue::assertPushed(PurgeProjectPersonDistinctIds::class, fn (PurgeProjectPersonDistinctIds $job) => $job->projectId === $project->id && $job->pass === 1 && $job->queue === 'maintenance' && $job->delay === null);
+    Queue::assertPushed(PurgeProjectPersonDistinctIds::class, fn (PurgeProjectPersonDistinctIds $job) => $job->projectId === $project->id && $job->pass === 2 && $job->delay === QueueEventsPurge::SECOND_PASS_DELAY_SECONDS);
+    Queue::assertPushed(PurgeProjectEvents::class, 2);
 });
 
 it('keeps the events with --keep-events, queues no purge and names the follow-up command', function () {

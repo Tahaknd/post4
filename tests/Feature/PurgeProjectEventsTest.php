@@ -199,7 +199,7 @@ it('reports the failure without server text, urls or the password', function () 
 
     $job->assertFailed();
     $reason = (new ReflectionProperty($job->job, 'failedWith'))->getValue($job->job);
-    expect($reason->getMessage())->toBe('Purge of project 990501 failed: ClickHouse authentication_failed (code 516).')
+    expect($reason->getMessage())->toBe('Purge of project 990501 (events) failed: ClickHouse authentication_failed (code 516).')
         ->and($reason->getMessage())->not->toContain(PURGE_PASSWORD)
         ->and($reason->getPrevious())->toBeNull();
 });
@@ -211,7 +211,7 @@ it('throws a sanitised exception for a transient ClickHouse error so the queue r
         purgeJob()->handle(purgeClient());
         $this->fail('expected an exception');
     } catch (RuntimeException $e) {
-        expect($e->getMessage())->toBe('Purge of project 990501 failed: ClickHouse busy (code 202).')
+        expect($e->getMessage())->toBe('Purge of project 990501 (events) failed: ClickHouse busy (code 202).')
             ->and($e->getMessage())->not->toContain(PURGE_PASSWORD);
     }
 });
@@ -223,7 +223,7 @@ it('reduces a connection failure to its class name', function () {
         purgeJob()->handle(purgeClient());
         $this->fail('expected an exception');
     } catch (RuntimeException $e) {
-        expect($e->getMessage())->toBe('Purge of project 990501 failed: '.ConnectionException::class.'.')
+        expect($e->getMessage())->toBe('Purge of project 990501 (events) failed: '.ConnectionException::class.'.')
             ->and($e->getMessage())->not->toContain(PURGE_PASSWORD);
     }
 });
@@ -234,6 +234,7 @@ it('logs the id and exception class, nothing else, when it fails for good', func
     (new PurgeProjectEvents(990501, pass: 2))->failed(new RuntimeException('Purge of project 990501 failed: x.'));
 
     Log::shouldHaveReceived('error')->once()->withArgs(fn (string $message, array $context) => $context === [
+        'table' => 'events',
         'project_id' => 990501,
         'pass' => 2,
         'exception' => RuntimeException::class,
