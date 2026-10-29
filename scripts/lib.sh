@@ -160,12 +160,12 @@ lib_create_project() {
   fi
 }
 
-# lib_preflight_project_clean: Postgres ids and ClickHouse rows must agree: a fresh project id has no events yet.
-# Otherwise the project is deleted again, PROJECT_ID is cleared (those rows are not ours: the cleanup must not
-# touch them) and the script exits 2.
+# lib_preflight_project_clean: Postgres ids and ClickHouse rows must agree: a fresh project id has no events yet
+# and no person_distinct_ids rows (the identity mapping, Milestone 4). Otherwise the project is deleted again,
+# PROJECT_ID is cleared (those rows are not ours: the cleanup must not touch them) and the script exits 2.
 lib_preflight_project_clean() {
   local pre
-  if ! pre="$(ch "SELECT count() FROM posthog.events WHERE project_id = $PROJECT_ID" 2>"$TMP/ch_err")" || [[ ! "$pre" =~ ^[0-9]+$ ]]; then
+  if ! pre="$(ch "SELECT (SELECT count() FROM posthog.events WHERE project_id = $PROJECT_ID) + (SELECT count() FROM posthog.person_distinct_ids WHERE project_id = $PROJECT_ID)" 2>"$TMP/ch_err")" || [[ ! "$pre" =~ ^[0-9]+$ ]]; then
     fail "cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
     exit 1
   fi

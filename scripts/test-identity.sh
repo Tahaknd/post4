@@ -10,7 +10,9 @@
 #      key to the test through the environment;
 #   3. runs `php artisan test --group=kafka-identity` in the app container;
 #   4. deletes the project (its persons and distinct ids go with it through the foreign keys, its ClickHouse events
-#      are purged by the queued job) and the consumer groups named identity-e2e-* that the test created.
+#      and person_distinct_ids rows are purged by the queued jobs: ClickHouse reads the person_distinct_ids topic too,
+#      so the rows this test produced reach it; rows that arrive after both purge passes are removed by the daily
+#      `events:sweep-orphans`) and the consumer groups named identity-e2e-* that the test created.
 # What stays: the messages the test produced on the Kafka topics (person_distinct_ids, events_dlq, events). They
 # carry the scratch project's id and expire with the topics' retention.
 #
