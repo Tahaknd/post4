@@ -20,6 +20,27 @@
  *   chart-1..8                   >= 3:1 on canvas and surface (graphical objects)
  * `line` is decorative (dividers) and intentionally lighter than 3:1.
  */
+/*
+ * Retention heat map: the shade of a cell is --chart-1 mixed into the surface by --heat-N, and the ink of the cell is a token
+ * per step so that every step keeps at least 4.5:1 in both schemes. The tints are the same in both schemes; what changes is
+ * the step where the ink turns from --fg to --accent-fg (white on the light blue, near black on the pale blue of the dark
+ * scheme): light from step 6, dark from step 5. tests/js/heatContrast.test.mjs reads this file and checks every step.
+ */
+:root {
+    --heat-1: 10%;
+    --heat-2: 24%;
+    --heat-3: 40%;
+    --heat-4: 55%;
+    --heat-5: 70%;
+    --heat-6: 100%;
+    --heat-ink-1: var(--fg);
+    --heat-ink-2: var(--fg);
+    --heat-ink-3: var(--fg);
+    --heat-ink-4: var(--fg);
+    --heat-ink-5: var(--fg);
+    --heat-ink-6: var(--fg);
+}
+
 :root,
 :root[data-theme='light'] {
     color-scheme: light;
@@ -51,6 +72,8 @@
     --chart-6: #b05e3b;
     --chart-7: #880761;
     --chart-8: #ad1f58;
+
+    --heat-ink-6: var(--accent-fg);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -82,6 +105,9 @@
         --chart-6: #d98cab;
         --chart-7: #bde87d;
         --chart-8: #6ef7f7;
+
+        --heat-ink-5: var(--accent-fg);
+        --heat-ink-6: var(--accent-fg);
     }
 }
 
@@ -113,6 +139,9 @@
     --chart-6: #d98cab;
     --chart-7: #bde87d;
     --chart-8: #6ef7f7;
+
+    --heat-ink-5: var(--accent-fg);
+    --heat-ink-6: var(--accent-fg);
 }
 
 @theme inline {
@@ -144,6 +173,23 @@
     --color-chart-6: var(--chart-6);
     --color-chart-7: var(--chart-7);
     --color-chart-8: var(--chart-8);
+}
+
+@layer components {
+    /* A retention cell with a share above 0: the heat step of retentionFormat.js (HEAT_STEPS). */
+    .heat-1 { background-color: color-mix(in srgb, var(--chart-1) var(--heat-1), var(--surface)); color: var(--heat-ink-1); }
+    .heat-2 { background-color: color-mix(in srgb, var(--chart-1) var(--heat-2), var(--surface)); color: var(--heat-ink-2); }
+    .heat-3 { background-color: color-mix(in srgb, var(--chart-1) var(--heat-3), var(--surface)); color: var(--heat-ink-3); }
+    .heat-4 { background-color: color-mix(in srgb, var(--chart-1) var(--heat-4), var(--surface)); color: var(--heat-ink-4); }
+    .heat-5 { background-color: color-mix(in srgb, var(--chart-1) var(--heat-5), var(--surface)); color: var(--heat-ink-5); }
+    .heat-6 { background-color: color-mix(in srgb, var(--chart-1) var(--heat-6), var(--surface)); color: var(--heat-ink-6); }
+
+    /* A period that has not started yet: hatched, so it differs from a share of 0 by pattern as well as by the dash. */
+    .heat-future {
+        background-color: var(--canvas);
+        background-image: repeating-linear-gradient(135deg, transparent 0 5px, var(--line) 5px 6px);
+        color: var(--muted);
+    }
 }
 
 @layer base {

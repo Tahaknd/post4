@@ -54,7 +54,7 @@ function dateFormatOptions(interval, style, spansYears) {
     return { month: 'short', day: 'numeric', ...year };
 }
 
-function formatterFor(timeZone, options, locale = DEFAULT_LOCALE) {
+export function formatterFor(timeZone, options, locale = DEFAULT_LOCALE) {
     const key = `d|${locale}|${timeZone}|${JSON.stringify(options)}`;
 
     if (!formatters.has(key)) {
