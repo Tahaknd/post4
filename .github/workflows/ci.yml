@@ -1,0 +1,127 @@
+# CI for post4. Two jobs:
+#   lint-and-unit  PHP style (Pint), the default Pest suite (SQLite in memory, every external host is a dead
+#                  address, so no services are needed), the Node unit tests and the production asset build.
+#   integration    builds the image, starts the real compose stack, then runs the opt-in test groups that need
+#                  real ClickHouse / Redis / Postgres plus the operator scripts against the live stack.
+#
+# Every `run:` line is a plain command that works the same on a developer machine (the same commands are in the
+# README checklist): this file adds no CI-only behaviour. Actions are pinned by MAJOR TAG (not by commit SHA);
+# pin them by SHA before running this on a repository that handles secrets.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The extension list is the one of the Dockerfile (install-php-extensions) plus what the default suite needs on
+      # the runner: pdo_sqlite (in-memory test database) and rdkafka (KafkaEventProducerTest talks to a dead broker
+      # through the real client).
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, pdo_sqlite, redis, rdkafka, intl, zip, bcmath, pcntl, posix, mbstring
+          coverage: none
+          tools: composer:v2
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Code style (Pint)
+        run: vendor/bin/pint --test
+
+      - name: Default test suite
+        run: php artisan test
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Node unit tests
+        run: npm run test:unit
+
+      - name: Production asset build
+        run: npm run build
+
+  integration:
+    needs: lint-and-unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Compose-level settings only (see .env.example). The defaults already fit a 7 GB runner (the whole stack
+      # measured about 2.5 GB), so only the HTTP worker count is lowered.
+      - name: Compose settings
+        run: |
+          cp .env.example .env
+          echo "OCTANE_WORKERS=2" >> .env
+
+      - name: Build and start the stack
+        run: docker compose up -d --build --wait --wait-timeout 900
+
+      - name: Show the stack
+        run: docker compose ps -a
+
+      - name: Default suite inside the app container
+        run: docker compose exec -T app php artisan test
+
+      - name: ClickHouse group (real ClickHouse, two tenants)
+        run: docker compose exec -T app composer test:clickhouse
+
+      - name: Redis group
+        run: docker compose exec -T -e REDIS_INTEGRATION_HOST=redis app php artisan test --group=redis
+
+      - name: Postgres group
+        run: docker compose exec -T -e POSTGRES_INTEGRATION_HOST=postgres app php artisan test --group=postgres
+
+      # The geoip group needs a licensed MaxMind database (GEOIP_TEST_DB=/path/to/file.mmdb): skipped on purpose.
+
+      - name: Capture smoke test (HTTP -> Kafka -> ClickHouse)
+        run: scripts/smoke-capture.sh
+
+      - name: Read-only ClickHouse user checks
+        run: scripts/check-readonly-user.sh
+
+      # Needs the npm registry and the node:22-alpine image; a network hiccup there must not fail the build.
+      - name: posthog-node compatibility test
+        continue-on-error: true
+        run: tests/compat/run.sh
+
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          docker compose ps -a > ci-logs/ps.txt 2>&1 || true
+          docker compose logs --no-color --timestamps > ci-logs/compose.log 2>&1 || true
+          docker compose exec -T app php artisan capture:status > ci-logs/capture-status.txt 2>&1 || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: ci-logs
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans
