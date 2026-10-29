@@ -54,6 +54,22 @@ describe('UI pages', function () {
             ->not->toMatch('#https?://#');
     });
 
+    it('sends Cross-Origin-Opener-Policy only where the browser honours it: https and localhost, not a plain-http address', function () {
+        expect($this->get('https://analytics.example/login')->headers->get('Cross-Origin-Opener-Policy'))->toBe('same-origin')
+            ->and($this->get('http://localhost/login')->headers->get('Cross-Origin-Opener-Policy'))->toBe('same-origin')
+            ->and($this->get('http://127.0.0.1/login')->headers->get('Cross-Origin-Opener-Policy'))->toBe('same-origin')
+            ->and($this->get('http://app.localhost/login')->headers->get('Cross-Origin-Opener-Policy'))->toBe('same-origin');
+
+        foreach (['http://172.18.0.5/login', 'http://post4.test/login', 'http://analytics.example/login'] as $url) {
+            $response = $this->get($url)->assertOk();
+
+            expect($response->headers->has('Cross-Origin-Opener-Policy'))->toBeFalse($url)
+                // everything else is still there
+                ->and($response->headers->get('X-Frame-Options'))->toBe('DENY')
+                ->and($response->headers->has('Content-Security-Policy-Report-Only'))->toBeTrue();
+        }
+    });
+
     it('sends Strict-Transport-Security only when the request is secure', function () {
         expect($this->get('/login')->headers->has('Strict-Transport-Security'))->toBeFalse();
 

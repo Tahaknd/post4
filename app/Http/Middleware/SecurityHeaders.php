@@ -12,8 +12,10 @@ use Symfony\Component\HttpFoundation\Response;
  * never run it (they answer cross-origin SDKs and set `nosniff` themselves); the insight JSON API lives in the web group
  * but is skipped here too, its answers are data and not documents.
  *
- *  - X-Content-Type-Options, Referrer-Policy, Permissions-Policy, Cross-Origin-Opener-Policy, X-Frame-Options (DENY):
- *    always. Strict-Transport-Security only when the request itself is secure (never over plain http, where it would
+ *  - X-Content-Type-Options, Referrer-Policy, Permissions-Policy, X-Frame-Options (DENY): always.
+ *    Cross-Origin-Opener-Policy only where the browser honours it (https, localhost): on a plain-http LAN or `.test`
+ *    address Chrome ignores it and logs a console ERROR on every page ("... because the URL's origin was untrustworthy"),
+ *    which the browser e2e over plain http caught. Strict-Transport-Security only when the request itself is secure (never over plain http, where it would
  *    be ignored anyway and would be a trap behind a TLS-terminating proxy that is not trusted).
  *  - Content-Security-Policy-Report-Only (default) or Content-Security-Policy (config security.csp_mode), not on Horizon's
  *    pages (inline scripts and styles of the package) and not while public/hot exists (Vite's dev server serves
@@ -34,9 +36,12 @@ final class SecurityHeaders
             'X-Content-Type-Options' => 'nosniff',
             'Referrer-Policy' => 'strict-origin-when-cross-origin',
             'Permissions-Policy' => 'camera=(), microphone=(), geolocation=()',
-            'Cross-Origin-Opener-Policy' => 'same-origin',
             'X-Frame-Options' => 'DENY',
         ];
+
+        if ($this->isTrustworthy($request)) {
+            $headers['Cross-Origin-Opener-Policy'] = 'same-origin';
+        }
 
         if ($request->isSecure()) {
             $headers['Strict-Transport-Security'] = 'max-age=31536000';
@@ -54,6 +59,14 @@ final class SecurityHeaders
         }
 
         return $response;
+    }
+
+    /** The origins browsers treat as secure contexts: https, and the loopback names (a plain-http address is not). */
+    private function isTrustworthy(Request $request): bool
+    {
+        $host = strtolower($request->getHost());
+
+        return $request->isSecure() || in_array($host, ['localhost', '127.0.0.1', '[::1]', '::1'], true) || str_ends_with($host, '.localhost');
     }
 
     /** @return array{0: string, 1: string}|null header name and value */
