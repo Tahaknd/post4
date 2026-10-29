@@ -36,11 +36,13 @@ use InvalidArgumentException;
  *     grows with the number of people: the GROUP BY spills to disk past the profile's threshold (see
  *     docker/clickhouse/users.d/20-readonly-user.xml) and fails cleanly as MEMORY_LIMIT_EXCEEDED, kind "query too large", beyond
  *     that. People with no target event inside a cohort period are dropped here.
- *     The state is a plain `groupArrayIf` of the period indexes (8 bytes per event of the person) made distinct afterwards. The
- *     alternatives were measured on 6M events / 500k people / 12 weekly cohorts through the read-only profile: `groupUniqArrayIf`
- *     (a hash set per person) peaked at 282 MiB (weekly) and 354 MiB (daily, 30 periods: next to the 381 MiB cap), `groupBitmapStateIf`
- *     at 228 and 293 MiB, `groupArrayIf` + `arrayDistinct` at 222 and 256 MiB and was the fastest (1.0 s and 1.4 s), with
- *     byte for byte equal answers. The cost of the array is that one person with millions of events holds all of them (8 bytes
+ *     The state is a plain `groupArrayIf` of the period indexes (8 bytes per event of the person) made distinct afterwards, and
+ *     when target and return are the same event the cohort periods are derived from the return periods instead of collected a
+ *     second time. The alternatives were measured on 6M events / 500k people / 12 weekly cohorts through the read-only profile:
+ *     `groupUniqArrayIf` (a hash set per person) peaked at 282 MiB (weekly) and 354 MiB (daily, 30 periods: next to the 381 MiB
+ *     cap), `groupBitmapStateIf` at 228 and 293 MiB, `groupArrayIf` + `arrayDistinct` at 222 and 256 MiB and was the fastest, with
+ *     byte for byte equal answers; collecting the same event once took the weekly table to 193 MiB and 0.65 s. The cost of the
+ *     array is that one person with millions of events holds all of them (8 bytes
  *     each) until the end of the aggregation; the cap turns that into the clean memory error.
  *  3. Each (person, cohort period) pair becomes a row with the flags "returned in period k" for k = 1..periods, and the pairs
  *     are summed per cohort with `sumForEach`: the result has one row per cohort, never one per person.
@@ -68,16 +70,28 @@ final class RetentionSqlBuilder implements InsightSqlBuilder
         $key = PersonSource::KEY;
         $source = PersonSource::SQL;
 
-        // The cohort periods of a person, restricted to the periods of the table (a target event in the follow-up tail
-        // after the last cohort starts no cohort).
-        $cohortPeriods = $query->type === RetentionType::Recurring
-            ? "arrayDistinct(groupArrayIf(i, is_target AND i < toInt64({$cohorts})))"
-            : "if(countIf(is_target) > 0, arrayFilter(x -> x < toInt64({$cohorts}), [minIf(i, is_target)]), [])";
+        // The return periods of a person (`rs`) and their cohort periods (`cs`): the periods of the table in which they did the
+        // target event. When both roles are the same event (the usual "came back" table) the cohort periods are derived from `rs`
+        // instead of being collected a second time: the state of a person is the largest memory consumer of the query.
+        $maxCohort = "toInt64({$cohorts})";
+        $returned = 'arrayDistinct(groupArrayIf(i, is_return)) AS rs';
+        if ($query->target->canonical() === $query->returning->canonical()) {
+            $cohortPeriods = $query->type === RetentionType::Recurring
+                ? "arrayFilter(x -> x < {$maxCohort}, rs) AS cs"
+                : "if(empty(rs), [], arrayFilter(x -> x < {$maxCohort}, [arrayMin(rs)])) AS cs";
+            $people = "{$returned}, {$cohortPeriods}";
+        } else {
+            // Restricted to the periods of the table: a target event in the follow-up tail after the last cohort starts no cohort.
+            $cohortPeriods = $query->type === RetentionType::Recurring
+                ? "arrayDistinct(groupArrayIf(i, is_target AND i < {$maxCohort})) AS cs"
+                : "if(countIf(is_target) > 0, arrayFilter(x -> x < {$maxCohort}, [minIf(i, is_target)]), []) AS cs";
+            $people = "{$cohortPeriods}, {$returned}";
+        }
 
         $sql = 'SELECT cohort, count() AS size, sumForEach(returned) AS retained FROM ('
             .'SELECT arrayJoin(cs) AS cohort, '
             ."arrayMap(k -> has(rs, cohort + k), range(1, {$periods} + 1)) AS returned FROM ("
-            ."SELECT {$cohortPeriods} AS cs, arrayDistinct(groupArrayIf(i, is_return)) AS rs FROM ("
+            ."SELECT {$people} FROM ("
             .'SELECT m_mapped, pk, i, is_target, is_return FROM ('
             ."SELECT m_mapped, {$key} AS pk, "
             ."toInt64({$number}(timestamp, {$tz})) - toInt64({$number}({$from}, {$tz})) AS i, "

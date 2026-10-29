@@ -11,12 +11,12 @@ use Tests\Support\RetentionFixtures as R;
 use Tests\Support\ScriptedReads;
 use Tests\Support\TrendsFixtures as T;
 
-/** The SQL between the person source and the end, for the given cohort expression. */
-function retentionSql(string $cohortPeriods, string $number, string $conditions = '(event = {target_event:String}) AS is_target, (event = {return_event:String}) AS is_return'): string
+/** The whole SQL, for the given select list of the per person aggregate (`cs` and `rs`). */
+function retentionSql(string $people, string $number, string $conditions = '(event = {target_event:String}) AS is_target, (event = {return_event:String}) AS is_return'): string
 {
     return 'SELECT cohort, count() AS size, sumForEach(returned) AS retained FROM ('
         .'SELECT arrayJoin(cs) AS cohort, arrayMap(k -> has(rs, cohort + k), range(1, {periods:UInt8} + 1)) AS returned FROM ('
-        ."SELECT {$cohortPeriods} AS cs, arrayDistinct(groupArrayIf(i, is_return)) AS rs FROM ("
+        ."SELECT {$people} FROM ("
         .'SELECT m_mapped, pk, i, is_target, is_return FROM ('
         .'SELECT m_mapped, if(m_mapped = 1, toString(m_person), distinct_id) AS pk, '
         ."toInt64({$number}(timestamp, {tz:String})) - toInt64({$number}({from:DateTime64(3)}, {tz:String})) AS i, "
@@ -32,7 +32,7 @@ describe('SQL snapshots', function () {
         $built = (new RetentionSqlBuilder)->build(R::query('signup', 'visit'));
 
         expect($built->sql)->toBe(retentionSql(
-            'if(countIf(is_target) > 0, arrayFilter(x -> x < toInt64({cohorts:UInt64}), [minIf(i, is_target)]), [])',
+            'if(countIf(is_target) > 0, arrayFilter(x -> x < toInt64({cohorts:UInt64}), [minIf(i, is_target)]), []) AS cs, arrayDistinct(groupArrayIf(i, is_return)) AS rs',
             'toRelativeDayNum',
         ))->and(T::plain($built->params))->toBe([
             'from' => '2026-03-02 00:00:00.000',
@@ -51,7 +51,7 @@ describe('SQL snapshots', function () {
         $built = (new RetentionSqlBuilder)->build(R::query('signup', 'visit', ['type' => RetentionType::Recurring, 'period' => RetentionPeriod::Week, 'periods' => 5, 'from' => '2026-03-02', 'to' => '2026-03-23', 'zone' => 'Europe/Istanbul']));
 
         expect($built->sql)->toBe(retentionSql(
-            'arrayDistinct(groupArrayIf(i, is_target AND i < toInt64({cohorts:UInt64})))',
+            'arrayDistinct(groupArrayIf(i, is_target AND i < toInt64({cohorts:UInt64}))) AS cs, arrayDistinct(groupArrayIf(i, is_return)) AS rs',
             'toRelativeWeekNum',
         ))->and(T::plain($built->params))->toBe([
             // the Monday midnight of Istanbul (UTC+3) is 21:00 UTC the evening before
@@ -71,6 +71,22 @@ describe('SQL snapshots', function () {
         $built = (new RetentionSqlBuilder)->build(R::query(o: ['period' => RetentionPeriod::Month, 'from' => '2026-01-01', 'to' => '2026-04-01']));
 
         expect($built->sql)->toContain('toInt64(toRelativeMonthNum(timestamp, {tz:String})) - toInt64(toRelativeMonthNum({from:DateTime64(3)}, {tz:String}))');
+    });
+
+    it('derives the cohort periods from the return periods when both roles are the same event, so a person is collected once', function () {
+        $first = (new RetentionSqlBuilder)->build(R::query('visit', 'visit'));
+        $recurring = (new RetentionSqlBuilder)->build(R::query('visit', 'visit', ['type' => RetentionType::Recurring]));
+        $withFilter = fn (string $value) => ['visit', [new PropertyFilter('plan', FilterOperator::Equals, $value)]];
+
+        expect($first->sql)->toBe(retentionSql(
+            'arrayDistinct(groupArrayIf(i, is_return)) AS rs, if(empty(rs), [], arrayFilter(x -> x < toInt64({cohorts:UInt64}), [arrayMin(rs)])) AS cs',
+            'toRelativeDayNum',
+            '(event = {target_event:String}) AS is_target, (event = {return_event:String}) AS is_return',
+        ))->and($recurring->sql)->toContain('arrayDistinct(groupArrayIf(i, is_return)) AS rs, arrayFilter(x -> x < toInt64({cohorts:UInt64}), rs) AS cs')
+            ->and($recurring->sql)->not->toContain('is_target AND')
+            // the same event with the same filters is the same role; another filter value is another role, collected on its own
+            ->and((new RetentionSqlBuilder)->build(R::query($withFilter('pro'), $withFilter('pro')))->sql)->toContain('AS rs, if(empty(rs)')
+            ->and((new RetentionSqlBuilder)->build(R::query($withFilter('pro'), $withFilter('free')))->sql)->toContain('AS cs, arrayDistinct(groupArrayIf(i, is_return)) AS rs');
     });
 
     it('lists one event name once and keeps one condition per role', function () {
