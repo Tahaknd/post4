@@ -4,6 +4,7 @@ use App\Console\Commands\CaptureStatus;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Models\Project;
 use Carbon\CarbonImmutable;
+use Illuminate\Console\Scheduling\CallbackEvent;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Artisan;
@@ -525,16 +526,26 @@ describe('--log summary line', function () {
     });
 });
 
-it('is scheduled every minute without overlapping, in the foreground, with --log', function () {
+it('is scheduled every minute without overlapping, inside the scheduler process, so the log line reaches its stderr', function () {
     $events = collect(app(Schedule::class)->events())
-        ->filter(fn ($event) => str_contains($event->command, 'capture:status'));
+        ->filter(fn ($event) => $event->description === 'capture:status');
 
     expect($events)->toHaveCount(1);
     $event = $events->first();
 
-    expect($event->command)->toEndWith('capture:status --log')
+    // A command event would run `artisan ... > /dev/null 2>&1` and lose the stderr log line: it must be a closure.
+    expect($event)->toBeInstanceOf(CallbackEvent::class)
         ->and($event->expression)->toBe('* * * * *')
         ->and($event->withoutOverlapping)->toBeTrue()
         ->and($event->expiresAt)->toBe(5)
         ->and($event->runInBackground)->toBeFalse();
+});
+
+it('runs the scheduled entry end to end and writes the summary line', function () {
+    Log::spy();
+    $event = collect(app(Schedule::class)->events())->first(fn ($e) => $e->description === 'capture:status');
+
+    $event->run(app());
+
+    Log::shouldHaveReceived('info')->once()->with('capture:status', Mockery::on(fn ($c) => $c['status'] === 'OK'));
 });
