@@ -1,16 +1,24 @@
 <script setup>
+import { computed } from 'vue';
+
 import { SecondaryButtonClass } from '@/Components/Insights/classes';
 
 // The non-chart states of the results area. `kind` is one of: idle (nothing chosen yet), loading (no earlier result to
 // show), empty (every value is zero), failed (a server or client error: `error` has {kind, message, retryable}),
 // expired (the run is gone: run again), blocked (the form has errors, nothing was sent). `noun` names what the page
-// shows ("trend", later "funnel"), so the copy is not tied to one insight.
+// shows ("trend", "funnel"). `idleCopy` and `emptyCopy` ({ title, text }) replace the wording of those two states for a
+// page whose insight needs other words than "pick an event" and "no events".
 // Messages from the server are fixed sentences and are shown as text, never as markup.
-defineProps({
+const props = defineProps({
     kind: { type: String, required: true },
     error: { type: Object, default: null },
     noun: { type: String, default: 'result' },
+    idleCopy: { type: Object, default: null },
+    emptyCopy: { type: Object, default: null },
 });
+
+const idle = computed(() => props.idleCopy ?? { title: `Pick an event to see its ${props.noun}`, text: 'Choose one or more events above. The chart appears here.' });
+const empty = computed(() => props.emptyCopy ?? { title: 'No events in this range', text: 'The selected events have no occurrences with these filters. Try a longer range or remove a filter.' });
 
 const emit = defineEmits(['retry', 'reload']);
 
@@ -19,8 +27,8 @@ const RELOAD_KINDS = ['unauthenticated', 'page_expired'];
 
 <template>
     <div v-if="kind === 'idle'" class="rounded-md border border-dashed border-line-strong px-4 py-10 text-center" data-testid="state-idle">
-        <p class="font-medium">Pick an event to see its {{ noun }}</p>
-        <p class="mt-1 text-sm text-muted">Choose one or more events above. The chart appears here.</p>
+        <p class="font-medium">{{ idle.title }}</p>
+        <p class="mt-1 text-sm text-muted">{{ idle.text }}</p>
     </div>
 
     <div v-else-if="kind === 'loading'" class="space-y-3" data-testid="state-loading" aria-hidden="true">
@@ -29,8 +37,8 @@ const RELOAD_KINDS = ['unauthenticated', 'page_expired'];
     </div>
 
     <div v-else-if="kind === 'empty'" class="rounded-md border border-line bg-surface px-4 py-10 text-center" data-testid="state-empty">
-        <p class="font-medium">No events in this range</p>
-        <p class="mt-1 text-sm text-muted">The selected events have no occurrences with these filters. Try a longer range or remove a filter.</p>
+        <p class="font-medium">{{ empty.title }}</p>
+        <p class="mt-1 text-sm text-muted">{{ empty.text }}</p>
     </div>
 
     <div v-else-if="kind === 'blocked'" class="rounded-md border border-line bg-surface px-4 py-6" data-testid="state-blocked">
