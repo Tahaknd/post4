@@ -45,7 +45,9 @@ version of an id and hides a tombstoned one. Everything else is refused with the
                         max_result_rows, max_concurrent_queries_for_user = 0) and changing a pinned
                         setting (join_algorithm, use_query_cache, log_queries,
                         stream_like_engine_allow_direct_select, session_timezone,
-                        output_format_json_quote_64bit_integers, serialize_query_plan, enable_analyzer)
+                        output_format_json_quote_64bit_integers, serialize_query_plan, enable_analyzer,
+                        the spill limits: max_bytes_before_external_group_by / _sort and their ratio forms,
+                        max_temporary_data_on_disk_size_for_query / _for_user, min_free_disk_space_for_temporary_data)
 and that a benign setting (max_execution_time = 5) is accepted, SET profile = 'default' and SET ROLE ALL
 change no limit, and the grants are EXACTLY `GRANT SELECT ON posthog.project_events_v TO posthog_ro` and
 `GRANT SELECT ON posthog.project_person_distinct_ids_v TO posthog_ro`. For
@@ -402,6 +404,17 @@ check_code "session_timezone is pinned" 452 "SELECT 1 SETTINGS session_timezone 
 check_code "output_format_json_quote_64bit_integers is pinned" 452 'SELECT 1 SETTINGS output_format_json_quote_64bit_integers = 1'
 check_code "serialize_query_plan is pinned" 452 'SELECT 1 SETTINGS serialize_query_plan = 1'
 check_code "enable_analyzer (old analyzer) is pinned" 452 'SELECT 1 SETTINGS enable_analyzer = 0'
+check_code "spilling cannot be switched off (max_bytes_before_external_group_by = 0 is pinned)" 452 'SELECT 1 SETTINGS max_bytes_before_external_group_by = 0'
+check_code "the spill threshold cannot be changed (max_bytes_before_external_group_by = 50000000 is pinned)" 452 'SELECT 1 SETTINGS max_bytes_before_external_group_by = 50000000'
+check_code "external sort cannot be switched on (max_bytes_before_external_sort = 100000000 is pinned)" 452 'SELECT 1 SETTINGS max_bytes_before_external_sort = 100000000'
+check_code "the ratio forms are pinned (max_bytes_ratio_before_external_group_by = 0.5)" 452 'SELECT 1 SETTINGS max_bytes_ratio_before_external_group_by = 0.5'
+check_code "the ratio forms are pinned (max_bytes_ratio_before_external_sort = 0.5)" 452 'SELECT 1 SETTINGS max_bytes_ratio_before_external_sort = 0.5'
+check_code "temporary data per query cannot be unlimited (max_temporary_data_on_disk_size_for_query = 0)" 452 'SELECT 1 SETTINGS max_temporary_data_on_disk_size_for_query = 0'
+check_code "temporary data per query cannot be raised (max_temporary_data_on_disk_size_for_query = 10 GB)" 452 'SELECT 1 SETTINGS max_temporary_data_on_disk_size_for_query = 10000000000'
+check_code "temporary data per user cannot be unlimited (max_temporary_data_on_disk_size_for_user = 0)" 452 'SELECT 1 SETTINGS max_temporary_data_on_disk_size_for_user = 0'
+check_code "temporary data per user cannot be raised (max_temporary_data_on_disk_size_for_user = 10 GB)" 452 'SELECT 1 SETTINGS max_temporary_data_on_disk_size_for_user = 10000000000'
+check_code "the free disk guard cannot be removed (min_free_disk_space_for_temporary_data = 0)" 452 'SELECT 1 SETTINGS min_free_disk_space_for_temporary_data = 0'
+check_out "the spill limits are in effect (threshold 150 MB, sort off, 1 GiB per query, 2 GiB per user, 2 GB kept free)" "SELECT getSetting('max_bytes_before_external_group_by'), getSetting('max_bytes_before_external_sort'), getSetting('max_temporary_data_on_disk_size_for_query'), getSetting('max_temporary_data_on_disk_size_for_user'), getSetting('min_free_disk_space_for_temporary_data')" $'150000000\t0\t1073741824\t2147483648\t2000000000'
 check_out "the pinned values are in effect" "SELECT getSetting('session_timezone'), getSetting('output_format_json_quote_64bit_integers'), getSetting('serialize_query_plan'), getSetting('enable_analyzer')" $'UTC\tfalse\tfalse\ttrue'
 check_ok "a benign setting (max_execution_time = 5) is accepted" 'SELECT 1 SETTINGS max_execution_time = 5'
 
@@ -438,6 +451,11 @@ check_http_code "HTTP: max_execution_time=1000 as URL argument exceeds the cap" 
 check_http_code "HTTP: max_execution_time=0 (unlimited) as URL argument is refused" 452 "SQL_project_id=1&max_execution_time=0" 'SELECT 1'
 check_http_code "HTTP: max_memory_usage=500000000 as URL argument exceeds the cap" 452 "SQL_project_id=1&max_memory_usage=500000000" 'SELECT 1'
 check_http_code "HTTP: max_result_rows=30000 as URL argument exceeds the cap" 452 "SQL_project_id=1&max_result_rows=30000" 'SELECT 1'
+check_http_code "HTTP: max_bytes_before_external_group_by=0 as URL argument is pinned (spilling stays on)" 452 "SQL_project_id=1&max_bytes_before_external_group_by=0" 'SELECT 1'
+check_http_code "HTTP: max_bytes_before_external_sort=100000000 as URL argument is pinned" 452 "SQL_project_id=1&max_bytes_before_external_sort=100000000" 'SELECT 1'
+check_http_code "HTTP: max_temporary_data_on_disk_size_for_query=0 (unlimited) as URL argument is refused" 452 "SQL_project_id=1&max_temporary_data_on_disk_size_for_query=0" 'SELECT 1'
+check_http_code "HTTP: max_temporary_data_on_disk_size_for_user=0 (unlimited) as URL argument is refused" 452 "SQL_project_id=1&max_temporary_data_on_disk_size_for_user=0" 'SELECT 1'
+check_http_code "HTTP: min_free_disk_space_for_temporary_data=0 as URL argument is pinned" 452 "SQL_project_id=1&min_free_disk_space_for_temporary_data=0" 'SELECT 1'
 check_http_code "HTTP: allow_introspection_functions=1 as URL argument is pinned" 452 "SQL_project_id=1&allow_introspection_functions=1" 'SELECT 1'
 check_http_out "HTTP: a benign URL argument (max_execution_time=5) is accepted and applied" "SQL_project_id=1&max_execution_time=5" "SELECT getSetting('max_execution_time')" 5
 check_http_out "HTTP: profile=default is accepted but keeps readonly and max_execution_time" "SQL_project_id=1&profile=default" "SELECT getSetting('readonly'), getSetting('max_execution_time')" $'2\t20'

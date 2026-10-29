@@ -108,6 +108,9 @@ final class ClickHouseIntegration
 
     public const FUNNEL_IDS = [self::FUNNEL_A, self::FUNNEL_B, self::FUNNEL_C, self::FUNNEL_D];
 
+    /** The tenant of the spill test (ClickHouseSpillTest): millions of rows in the partition 200101, dropped as a whole afterwards. */
+    public const SPILL_A = 991301;
+
     /** Santiago DST gap day (BucketAxisOracleTest): three rows around the missing local midnight of 2023-09-03. */
     public const TREND_D = 990204;
 
@@ -450,6 +453,24 @@ final class ClickHouseIntegration
             $params += ["p{$i}" => $project, "e{$i}" => $event, "d{$i}" => $distinct, "props{$i}" => $props, "ts{$i}" => $ts];
         }
         $this->admin->execute('INSERT INTO posthog.events (uuid, project_id, event, distinct_id, properties, timestamp) '.implode(' UNION ALL ', $selects), $params);
+    }
+
+    /** Partition (toYYYYMM) that holds ONLY the rows of {@see self::SPILL_A}: dropping it is much cheaper than deleting millions of rows. */
+    public const SPILL_PARTITION = 200101;
+
+    /**
+     * Removes the spill tenant's rows. Drops the whole partition only when it holds nothing else (it is a year no real
+     * event has); otherwise falls back to a normal delete.
+     */
+    public function cleanupSpill(): void
+    {
+        $others = (int) $this->admin->select('SELECT count() AS n FROM posthog.events WHERE toYYYYMM(timestamp) = '.self::SPILL_PARTITION.' AND project_id != '.self::SPILL_A)[0]['n'];
+        if ($others === 0) {
+            $this->admin->execute('ALTER TABLE posthog.events DROP PARTITION '.self::SPILL_PARTITION);
+
+            return;
+        }
+        $this->deleteRowsOf([self::SPILL_A]);
     }
 
     /** Like cleanupAfterAll() for the insight API tenants. */

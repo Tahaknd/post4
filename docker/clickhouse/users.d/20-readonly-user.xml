@@ -120,10 +120,35 @@
         backstops against full scans of a huge table; they throw instead of returning a silently
         truncated answer.
 
-        Spilling to disk (external GROUP BY / sort, and the partial_merge / grace_hash join algorithms,
-        which can write temp files) is switched off and pinned, so a heavy query hits max_memory_usage and
-        fails instead of filling the (nearly full) Docker disk. join_algorithm is pinned to `hash`.
-        max_temp_data_on_disk_size_for_query is a server level setting on 25.8, not a profile setting.
+        Spilling to disk (external GROUP BY): max_bytes_before_external_group_by 150 MB (37% of the 400 MB cap). A
+        GROUP BY whose state grows past it writes sorted/bucketed pieces to the temp directory and merges them
+        bucket by bucket, so a funnel or a person based unique users query over many people ends with a correct
+        answer instead of MEMORY_LIMIT_EXCEEDED. Measured on 25.8 with this profile (events as seeded random data,
+        3 step funnel, 14 day window, through the real reader; the mapping join stays in memory either way):
+            1M events / 100k people           no spill, 59-118 ms, 72-146 MiB (as before)
+            6M events / 500k people           before: 241 after 0.2 s; now 1.0 s, 281 MiB, 90 files, 231 MiB spilled
+            12M events / 1M people            now 2.0 s, 297 MiB (3 runs at once: 4.5 s each, 309-316 MiB each)
+            30M events / 4M people            still a clean 241 after 4 s (400 MB compressed spilled, temp dir empty after)
+        THE VALUE IS EMPIRICAL AND MUST NOT BE LOWERED: a smaller threshold writes many small pieces, and merging
+        them needs a read buffer per piece, so the peak went UP and the 6M funnel failed again (30 MB: 239 files,
+        381 MiB, 241; 60 MB: 238 files, 380 MiB, 241; 150 MB: 90 files, 281 MiB; 200-300 MB: 34-48 files, 305-330
+        MiB). Above 150 MB the peak rises with the threshold. Re-measure before touching it.
+        Everything that spills is bounded here and pinned const (a caller cannot raise or switch off any of it):
+          * max_temporary_data_on_disk_size_for_query 1 GiB and ..._for_user 2 GiB (compressed bytes on disk; three
+            concurrent queries of one user can never write more than 2 GiB together). Over the limit a query fails
+            with code 396 (TOO_MANY_ROWS_OR_BYTES, kind too_many_rows, "query too large").
+          * min_free_disk_space_for_temporary_data 2 GB: a spill is refused (code 243 NOT_ENOUGH_SPACE) while the disk
+            of the data directory has less free space than that, so a nearly full Docker disk fails the query
+            instead of filling up. (The temp directory is /var/lib/clickhouse/tmp on the SAME volume as the data.)
+          * Temp files are removed when the query ends, fails or is cancelled; the ones left by a killed server
+            (SIGKILL measured: 176 files, 244 MB) are removed at the next start (files with the tmp prefix).
+        The server wide max_temporary_data_on_disk_size (config, 0 = unlimited) is left alone: the caps above are what
+        bound the read-only user. (The admin user is not covered by this profile; its own queries are not the
+        read-only user's concern.)
+        External SORT stays off (max_bytes_before_external_sort 0, pinned): no insight sorts more than a handful
+        of rows after aggregation. The ratio forms (max_bytes_ratio_before_external_*) stay 0 and pinned: they are
+        relative to max_memory_usage, which a query may lower. join_algorithm stays pinned to `hash` (the
+        partial_merge and grace_hash algorithms also write temp files and are not needed).
 
         Also pinned: log_queries 1 (the read-only user must not switch off its own audit trail in
         system.query_log), use_query_cache 0 (no cross-query result sharing), allow_introspection_functions
@@ -197,10 +222,13 @@
             <max_rows_to_read>1000000000</max_rows_to_read>
             <max_bytes_to_read>64000000000</max_bytes_to_read>
             <read_overflow_mode>throw</read_overflow_mode>
-            <max_bytes_before_external_group_by>0</max_bytes_before_external_group_by>
+            <max_bytes_before_external_group_by>150000000</max_bytes_before_external_group_by>
             <max_bytes_ratio_before_external_group_by>0</max_bytes_ratio_before_external_group_by>
             <max_bytes_before_external_sort>0</max_bytes_before_external_sort>
             <max_bytes_ratio_before_external_sort>0</max_bytes_ratio_before_external_sort>
+            <max_temporary_data_on_disk_size_for_query>1073741824</max_temporary_data_on_disk_size_for_query>
+            <max_temporary_data_on_disk_size_for_user>2147483648</max_temporary_data_on_disk_size_for_user>
+            <min_free_disk_space_for_temporary_data>2000000000</min_free_disk_space_for_temporary_data>
             <join_algorithm>hash</join_algorithm>
             <log_queries>1</log_queries>
             <use_query_cache>0</use_query_cache>
@@ -228,6 +256,9 @@
                 <max_bytes_before_external_group_by><const/></max_bytes_before_external_group_by>
                 <max_bytes_ratio_before_external_group_by><const/></max_bytes_ratio_before_external_group_by>
                 <max_bytes_before_external_sort><const/></max_bytes_before_external_sort>
+                <max_temporary_data_on_disk_size_for_query><const/></max_temporary_data_on_disk_size_for_query>
+                <max_temporary_data_on_disk_size_for_user><const/></max_temporary_data_on_disk_size_for_user>
+                <min_free_disk_space_for_temporary_data><const/></min_free_disk_space_for_temporary_data>
                 <max_bytes_ratio_before_external_sort><const/></max_bytes_ratio_before_external_sort>
                 <join_algorithm><const/></join_algorithm>
                 <log_queries><const/></log_queries>
