@@ -11,7 +11,10 @@
 # Run `scripts/check-readonly-user.sh --help` for usage, environment variables and exit codes.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+# shellcheck source=scripts/lib.sh
+source "$ROOT/scripts/lib.sh"
 
 usage() {
   cat <<'EOF_USAGE'
@@ -84,34 +87,21 @@ done
 
 CH_CONTAINER="${CH_CONTAINER:-}"
 if [[ -n "$CH_CONTAINER" && ! "$CH_CONTAINER" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
-  echo "REFUSED: CH_CONTAINER must be a plain container name, got '$CH_CONTAINER'" >&2
-  exit 2
+  lib_refuse "CH_CONTAINER must be a plain container name, got '$CH_CONTAINER'"
 fi
 
 # --- Docker target guard: only a local engine, and only if the target is up -------------------------
-command -v docker >/dev/null 2>&1 || { echo "REFUSED: docker is not installed" >&2; exit 2; }
-endpoint="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)}"
-case "$endpoint" in
-  unix://* | npipe://* | "") ;;
-  *) echo "REFUSED: docker endpoint '$endpoint' is not local" >&2; exit 2 ;;
-esac
+lib_docker_guard
 if [[ -n "$CH_CONTAINER" ]]; then
   if [[ "$(docker inspect --format '{{.State.Running}}' "$CH_CONTAINER" 2>/dev/null || true)" != "true" ]]; then
-    echo "REFUSED: container '$CH_CONTAINER' is not running" >&2
-    exit 2
+    lib_refuse "container '$CH_CONTAINER' is not running"
   fi
 elif [[ -z "$(docker compose ps -q clickhouse 2>/dev/null || true)" ]]; then
-  echo "REFUSED: the clickhouse service is not up (docker compose up -d)" >&2
-  exit 2
+  lib_refuse "the clickhouse service is not up (docker compose up -d)"
 fi
 
-PASSED=0
-FAILED=0
 OUT=""
 RC=0
-
-pass() { PASSED=$((PASSED + 1)); echo "PASS: $1"; }
-fail() { FAILED=$((FAILED + 1)); echo "FAIL: $1"; }
 
 # clickhouse-client as posthog_ro inside the container. The password is read from the container's own
 # CLICKHOUSE_RO_PASSWORD by the inner shell, so it is never on any argv. The single-quoted script is for

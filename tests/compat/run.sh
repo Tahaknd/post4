@@ -16,7 +16,10 @@
 # Run `tests/compat/run.sh --help` for usage, environment variables and exit codes.
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+# shellcheck source=scripts/lib.sh
+source "$ROOT/scripts/lib.sh"
 DIR="$PWD/tests/compat"
 
 usage() {
@@ -63,35 +66,15 @@ POSTHOG_NODE_VERSION="${POSTHOG_NODE_VERSION:-}"
 # Only used inside the container when it has no CLICKHOUSE_PASSWORD of its own (passed by name, never on argv).
 export CH_FALLBACK_PASSWORD="${CLICKHOUSE_PASSWORD:-posthog}"
 
-if [[ ! "$HOST" =~ ^http://(localhost|127\.0\.0\.1)(:[0-9]+)?$ ]]; then
-  echo "REFUSED: HOST must be http://localhost[:port] or http://127.0.0.1[:port], got '$HOST'" >&2
-  exit 2
-fi
-if [[ ! "$WAIT_SECONDS" =~ ^[0-9]+$ || "$WAIT_SECONDS" -lt 1 ]]; then
-  echo "REFUSED: WAIT_SECONDS must be a positive integer, got '$WAIT_SECONDS'" >&2
-  exit 2
-fi
-if [[ ! "$TS_TOLERANCE_MS" =~ ^[0-9]+$ ]]; then
-  echo "REFUSED: TS_TOLERANCE_MS must be a non-negative integer, got '$TS_TOLERANCE_MS'" >&2
-  exit 2
-fi
+lib_require_local_host
+lib_require_positive_int WAIT_SECONDS
+lib_require_nonneg_int TS_TOLERANCE_MS
 if [[ -n "$POSTHOG_NODE_VERSION" && ! "$POSTHOG_NODE_VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  echo "REFUSED: POSTHOG_NODE_VERSION must match ^[A-Za-z0-9._-]+\$, got '$POSTHOG_NODE_VERSION'" >&2
-  exit 2
+  lib_refuse "POSTHOG_NODE_VERSION must match ^[A-Za-z0-9._-]+\$, got '$POSTHOG_NODE_VERSION'"
 fi
 
-# --- Docker target guard: only a local engine, and only if the stack is up -------------------------
-command -v docker >/dev/null 2>&1 || { echo "REFUSED: docker is not installed" >&2; exit 2; }
-endpoint="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)}"
-case "$endpoint" in
-  unix://* | npipe://* | "") ;;
-  *) echo "REFUSED: docker endpoint '$endpoint' is not local" >&2; exit 2 ;;
-esac
-APP_ID="$(docker compose ps -q app 2>/dev/null || true)"
-if [[ -z "$APP_ID" ]]; then
-  echo "REFUSED: stack is not up (docker compose up -d)" >&2
-  exit 2
-fi
+lib_docker_guard
+lib_require_app_up
 
 EPOCH="$(date +%s)"
 NAME="compat_${EPOCH}_$$_${RANDOM}"
@@ -100,40 +83,11 @@ NODE_URL="http://app:8000"   # what the node container uses: HOST's localhost is
 NODE_IMAGE="node:22-alpine"
 KEY=""
 PROJECT_ID=""
-REFUSED=0
 KAFKA_STOPPED=0
 TMP="$(mktemp -d)"
-PASSED=0
-FAILED=0
 HTTP_CODE="000"
 HTTP_TIME="0"
 RETRY_AFTER=""
-CH_OUT=""
-
-pass() { PASSED=$((PASSED + 1)); echo "PASS: $1"; }
-fail() { FAILED=$((FAILED + 1)); echo "FAIL: $1"; }
-
-# ClickHouse client run inside the container with the container's own CLICKHOUSE_USER / CLICKHOUSE_PASSWORD
-# (the client reads them from its environment), so no password appears on any argv.
-# SC2016 is intended: the single-quoted script is for the container's shell, not for this one.
-# shellcheck disable=SC2016
-ch() {
-  docker compose exec -T -e CH_FALLBACK_PASSWORD clickhouse sh -c '
-    [ -n "${CLICKHOUSE_USER:-}" ] || CLICKHOUSE_USER=posthog
-    [ -n "${CLICKHOUSE_PASSWORD:-}" ] || CLICKHOUSE_PASSWORD="$CH_FALLBACK_PASSWORD"
-    export CLICKHOUSE_USER CLICKHOUSE_PASSWORD
-    exec clickhouse-client --max_execution_time=30 "$@"' sh --query "$1"
-}
-
-# chv <query>: result in CH_OUT; a failing query is reported through fail and returns 1.
-chv() {
-  if CH_OUT="$(ch "$1" 2>"$TMP/ch_err")"; then
-    return 0
-  fi
-  CH_OUT=""
-  fail "ClickHouse query failed: ${1:0:90} ($(head -c 200 "$TMP/ch_err" 2>/dev/null | tr '\n' ' '))"
-  return 1
-}
 
 # The rows this script owns: its own project AND a name only the SDK/this script produces (this includes the
 # SDK's fixed-name $identify / $create_alias events). $1 = project id.
@@ -144,40 +98,6 @@ own_rows_where() {
 # Pipeline errors that belong to this run: received since the start AND mentioning our project or name.
 run_errors_where() {
   printf '%s' "received_at >= toDateTime(${T0}) AND (raw LIKE '%${NAME}%' OR match(raw, '\"project_id\":${PROJECT_ID}[^0-9]'))"
-}
-
-# Removes the throwaway project by its unique api_key. project:delete goes through the model, so the
-# observer also forgets the cached key lookups, and it queues the purge of the project's events by default
-# (this script also deletes its own rows below, so the two cannot disagree). The decision rests on the
-# documented exit codes only: 0 deleted and 3 unknown key (nothing left to delete) are both success; 4 (deleted,
-# purge not queued) is a WARN, the rows are removed below anyway. On exit 0 only the cache-clearing warning
-# ('Could not clear the cached key') is echoed as WARN: stderr also carries the structured audit log line
-# (LOG_CHANNEL=stderr under Compose, see LOG_AUDIT_CHANNEL) and the 'KEPT'/purge notes, which are not warnings.
-# Scripts must call the app with `docker compose exec -T` (no TTY): without -T the output is not a clean stream.
-delete_project() {
-  [[ -n "$KEY" ]] || return 0
-  local out rc=0
-  out="$(docker compose exec -T app php artisan project:delete "$KEY" --force 2>"$TMP/delete_err")" || rc=$?
-  case "$rc" in
-    0)
-      if grep -q 'Could not clear the cached key' "$TMP/delete_err"; then
-        echo "WARN: project:delete reported: $(grep 'Could not clear the cached key' "$TMP/delete_err" | head -c 300 | tr '\n' ' ')" >&2
-      fi
-      KEY=""
-      return 0
-      ;;
-    4)
-      echo "WARN: project deleted but its events purge could not be queued (the rows are removed below)" >&2
-      KEY=""
-      return 0
-      ;;
-    3)
-      KEY=""
-      return 0
-      ;;
-  esac
-  echo "WARN: could not delete throwaway project (key ${KEY:0:8}..., exit $rc): $(printf '%s %s' "$out" "$(head -c 200 "$TMP/delete_err" 2>/dev/null)" | head -c 200 | tr '\n' ' ')" >&2
-  return 1
 }
 
 kafka_health() {
@@ -227,19 +147,12 @@ cleanup() {
   fi
   exit "$rc"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+lib_install_traps cleanup
 
 echo "compat: HOST=$HOST node-url=$NODE_URL project=$NAME kafka-outage=$WITH_OUTAGE wait=${WAIT_SECONDS}s"
 
 # Compose network of the app service: prefer the one ending in _default.
-NETS="$(docker inspect "$APP_ID" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null || true)"
-NETWORK=""
-for n in $NETS; do
-  if [[ "$n" == *_default ]]; then NETWORK="$n"; break; fi
-done
-[[ -n "$NETWORK" ]] || NETWORK="${NETS%% *}"
+NETWORK="$(lib_compose_network "$APP_ID")"
 if [[ -z "$NETWORK" ]]; then
   fail "cannot find the compose network of the app service"
   exit 1
@@ -270,39 +183,8 @@ if ! docker run --rm --network bridge --user "$(id -u):$(id -g)" \
 fi
 
 # --- throwaway project --------------------------------------------------------------------------
-# One JSON line carries id and key. Only a line of exactly that shape counts, so a stray warning cannot
-# hide a project that was created; the key is validated before it is used to delete anything.
-CREATED_JSON="$(docker compose exec -T app php artisan project:create "$NAME" --json 2>"$TMP/create_err" | tr -d '\r' | grep -E '^\{"id":[0-9]+,"api_key":"phc_[A-Za-z0-9]{43}"\}$' | head -n 1 || true)"
-CREATED="$(printf '%s\n' "$CREATED_JSON" | sed -n 's/^.*"api_key":"\(phc_[A-Za-z0-9]\{43\}\)".*$/\1/p')"
-ID_RAW="$(printf '%s\n' "$CREATED_JSON" | sed -n 's/^{"id":\([0-9][0-9]*\),.*$/\1/p')"
-if [[ "$CREATED" =~ ^phc_[A-Za-z0-9]{43}$ ]]; then
-  KEY="$CREATED"   # from here on cleanup deletes the project by this key
-else
-  fail "could not create throwaway project ($(head -c 200 "$TMP/create_err" | tr '\n' ' '))"
-  exit 1
-fi
-
-# The id must be exactly a number before it may reach SQL.
-if [[ "$ID_RAW" =~ ^[0-9]+$ ]]; then
-  PROJECT_ID="$ID_RAW"
-  echo "INFO: project #$PROJECT_ID $NAME"
-else
-  fail "could not read throwaway project id (got '${ID_RAW:0:100}')"
-  exit 1
-fi
-
-# Pre-flight: Postgres ids and ClickHouse rows must agree; a fresh project id must have no events yet.
-if ! PRE="$(ch "SELECT count() FROM posthog.events WHERE project_id = $PROJECT_ID" 2>"$TMP/ch_err")" || [[ ! "$PRE" =~ ^[0-9]+$ ]]; then
-  fail "cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
-  exit 1
-fi
-if [[ "$PRE" != "0" ]]; then
-  REFUSED=1
-  PROJECT_ID=""   # these rows are not ours: cleanup must not touch them
-  delete_project || true
-  echo "REFUSED: project id collides with existing ClickHouse rows; Postgres and ClickHouse are out of sync" >&2
-  exit 2
-fi
+lib_create_project "$NAME"
+lib_preflight_project_clean
 
 # --- Step B: run the real SDK in a locked-down throwaway container on the compose network ---------------
 NODE_OK=1

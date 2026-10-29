@@ -12,7 +12,10 @@
 # Run `scripts/smoke-capture.sh --help` for usage, environment variables and exit codes.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+# shellcheck source=scripts/lib.sh
+source "$ROOT/scripts/lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -82,30 +85,12 @@ MAX_BODY_BYTES="${MAX_BODY_BYTES:-1000000}"
 # Only used inside the container when it has no CLICKHOUSE_PASSWORD of its own (passed by name, never on argv).
 export CH_FALLBACK_PASSWORD="${CLICKHOUSE_PASSWORD:-posthog}"
 
-if [[ ! "$HOST" =~ ^http://(localhost|127\.0\.0\.1)(:[0-9]+)?$ ]]; then
-  echo "REFUSED: HOST must be http://localhost[:port] or http://127.0.0.1[:port], got '$HOST'" >&2
-  exit 2
-fi
-if [[ ! "$WAIT_SECONDS" =~ ^[0-9]+$ || "$WAIT_SECONDS" -lt 1 ]]; then
-  echo "REFUSED: WAIT_SECONDS must be a positive integer, got '$WAIT_SECONDS'" >&2
-  exit 2
-fi
-if [[ ! "$MAX_BODY_BYTES" =~ ^[0-9]+$ || "$MAX_BODY_BYTES" -lt 1 ]]; then
-  echo "REFUSED: MAX_BODY_BYTES must be a positive integer, got '$MAX_BODY_BYTES'" >&2
-  exit 2
-fi
+lib_require_local_host
+lib_require_positive_int WAIT_SECONDS
+lib_require_positive_int MAX_BODY_BYTES
 
-# --- Docker target guard: only a local engine, and only if the stack is up -------------------------
-command -v docker >/dev/null 2>&1 || { echo "REFUSED: docker is not installed" >&2; exit 2; }
-endpoint="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)}"
-case "$endpoint" in
-  unix://* | npipe://* | "") ;;
-  *) echo "REFUSED: docker endpoint '$endpoint' is not local" >&2; exit 2 ;;
-esac
-if [[ -z "$(docker compose ps -q app 2>/dev/null || true)" ]]; then
-  echo "REFUSED: stack is not up (docker compose up -d)" >&2
-  exit 2
-fi
+lib_docker_guard
+lib_require_app_up
 
 EPOCH="$(date +%s)"
 NAME="smoke_${EPOCH}_$$_${RANDOM}"
@@ -113,76 +98,10 @@ MARK="$NAME"
 SENT_URL='http://example.test/'
 KEY=""
 PROJECT_ID=""
-REFUSED=0
 TMP="$(mktemp -d)"
-PASSED=0
-FAILED=0
 HTTP_CODE="000"
 HTTP_BODY=""
-CH_OUT=""
 SLOW_PIDS=()
-
-pass() { PASSED=$((PASSED + 1)); echo "PASS: $1"; }
-fail() { FAILED=$((FAILED + 1)); echo "FAIL: $1"; }
-
-# ClickHouse client run inside the container with the container's own CLICKHOUSE_USER / CLICKHOUSE_PASSWORD
-# (the client reads them from its environment), so no password appears on any argv.
-# ch_run <clickhouse-client args...> is the general form; ch <query> is the 30 s-limited shortcut.
-# SC2016 is intended: the single-quoted script is for the container's shell, not for this one.
-# shellcheck disable=SC2016
-ch_run() {
-  docker compose exec -T -e CH_FALLBACK_PASSWORD clickhouse sh -c '
-    [ -n "${CLICKHOUSE_USER:-}" ] || CLICKHOUSE_USER=posthog
-    [ -n "${CLICKHOUSE_PASSWORD:-}" ] || CLICKHOUSE_PASSWORD="$CH_FALLBACK_PASSWORD"
-    export CLICKHOUSE_USER CLICKHOUSE_PASSWORD
-    exec clickhouse-client "$@"' sh "$@"
-}
-ch() { ch_run --max_execution_time=30 --query "$1"; }
-
-
-# chv <query>: result in CH_OUT; a failing query is reported through fail and returns 1.
-chv() {
-  if CH_OUT="$(ch "$1" 2>"$TMP/ch_err")"; then
-    return 0
-  fi
-  CH_OUT=""
-  fail "ClickHouse query failed: ${1:0:90} ($(head -c 200 "$TMP/ch_err" 2>/dev/null | tr '\n' ' '))"
-  return 1
-}
-
-# Removes the throwaway project by its unique api_key. project:delete goes through the model, so the
-# observer also forgets the cached key lookups, and it queues the purge of the project's events by default
-# (this script also deletes its own rows below, so the two cannot disagree). The decision rests on the
-# documented exit codes only: 0 deleted and 3 unknown key (nothing left to delete) are both success; 4 (deleted,
-# purge not queued) is a WARN, the rows are removed below anyway. On exit 0 only the cache-clearing warning
-# ('Could not clear the cached key') is echoed as WARN: stderr also carries the structured audit log line
-# (LOG_CHANNEL=stderr under Compose, see LOG_AUDIT_CHANNEL) and the 'KEPT'/purge notes, which are not warnings.
-# Scripts must call the app with `docker compose exec -T` (no TTY): without -T the output is not a clean stream.
-delete_project() {
-  [[ -n "$KEY" ]] || return 0
-  local out rc=0
-  out="$(docker compose exec -T app php artisan project:delete "$KEY" --force 2>"$TMP/delete_err")" || rc=$?
-  case "$rc" in
-    0)
-      if grep -q 'Could not clear the cached key' "$TMP/delete_err"; then
-        echo "WARN: project:delete reported: $(grep 'Could not clear the cached key' "$TMP/delete_err" | head -c 300 | tr '\n' ' ')" >&2
-      fi
-      KEY=""
-      return 0
-      ;;
-    4)
-      echo "WARN: project deleted but its events purge could not be queued (the rows are removed below)" >&2
-      KEY=""
-      return 0
-      ;;
-    3)
-      KEY=""
-      return 0
-      ;;
-  esac
-  echo "WARN: could not delete throwaway project (key ${KEY:0:8}..., exit $rc): $(printf '%s %s' "$out" "$(head -c 200 "$TMP/delete_err" 2>/dev/null)" | head -c 200 | tr '\n' ' ')" >&2
-  return 1
-}
 
 cleanup() {
   local rc=$?
@@ -227,9 +146,7 @@ cleanup() {
   fi
   exit "$rc"
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+lib_install_traps cleanup
 
 echo "smoke-capture: HOST=$HOST project=$NAME wait=${WAIT_SECONDS}s"
 
@@ -263,39 +180,8 @@ else
   echo "INFO: scripts/check-readonly-user.sh not found, skipping the read-only user check"
 fi
 
-# One JSON line carries id and key. Only a line of exactly that shape counts, so a stray warning cannot
-# hide a project that was created; the key is validated before it is used to delete anything.
-CREATED_JSON="$(docker compose exec -T app php artisan project:create "$NAME" --json 2>"$TMP/create_err" | tr -d '\r' | grep -E '^\{"id":[0-9]+,"api_key":"phc_[A-Za-z0-9]{43}"\}$' | head -n 1 || true)"
-CREATED="$(printf '%s\n' "$CREATED_JSON" | sed -n 's/^.*"api_key":"\(phc_[A-Za-z0-9]\{43\}\)".*$/\1/p')"
-ID_RAW="$(printf '%s\n' "$CREATED_JSON" | sed -n 's/^{"id":\([0-9][0-9]*\),.*$/\1/p')"
-if [[ "$CREATED" =~ ^phc_[A-Za-z0-9]{43}$ ]]; then
-  KEY="$CREATED"   # from here on cleanup deletes the project by this key
-else
-  fail "could not create throwaway project ($(head -c 200 "$TMP/create_err" | tr '\n' ' '))"
-  exit 1
-fi
-
-# The id must be exactly a number before it may reach SQL.
-if [[ "$ID_RAW" =~ ^[0-9]+$ ]]; then
-  PROJECT_ID="$ID_RAW"
-  echo "INFO: project #$PROJECT_ID $NAME"
-else
-  fail "could not read throwaway project id (got '${ID_RAW:0:100}')"
-  exit 1
-fi
-
-# Pre-flight: Postgres ids and ClickHouse rows must agree; a fresh project id must have no events yet.
-if ! PRE="$(ch "SELECT count() FROM posthog.events WHERE project_id = $PROJECT_ID" 2>"$TMP/ch_err")" || [[ ! "$PRE" =~ ^[0-9]+$ ]]; then
-  fail "cannot query ClickHouse: $(head -c 200 "$TMP/ch_err" | tr '\n' ' ')"
-  exit 1
-fi
-if [[ "$PRE" != "0" ]]; then
-  REFUSED=1
-  PROJECT_ID=""   # these rows are not ours: cleanup must not touch them
-  delete_project || true
-  echo "REFUSED: project id collides with existing ClickHouse rows; Postgres and ClickHouse are out of sync" >&2
-  exit 2
-fi
+lib_create_project "$NAME"
+lib_preflight_project_clean
 
 # A browser User-Agent on every request: the capture Enricher derives browser, os and device from it
 # (check (b) below asserts the materialized columns). curl would otherwise send `curl/x`, which is a bot.

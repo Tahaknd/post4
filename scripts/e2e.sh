@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Runs the Playwright smoke test (tests/e2e) in a THROWAWAY container on the compose network: the browser lives in the
 # official Playwright image, nothing is installed on the host or in the app image, and only the few files the test needs
 # are mounted, read-only (the container works on copies, so no root-owned files appear in the checkout).
@@ -35,15 +35,20 @@ PLAYWRIGHT_VERSION=1.64.1
 : "${E2E_PASSWORD:?set E2E_PASSWORD}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/lib.sh
+source "$ROOT/scripts/lib.sh"
+lib_docker_guard
 PINNED="$(sed -n 's/.*"@playwright\/test": "\([0-9.]*\)".*/\1/p' "$ROOT/package.json")"
 if [ "$PINNED" != "$PLAYWRIGHT_VERSION" ]; then
     echo "PLAYWRIGHT_VERSION ($PLAYWRIGHT_VERSION) in scripts/e2e.sh must equal @playwright/test ($PINNED) in package.json" >&2
     exit 1
 fi
 
-NETWORK="${E2E_NETWORK:-$(basename "$ROOT")_default}"
 CONTAINER="$(cd "$ROOT" && docker compose ps -q app)"
 [ -n "$CONTAINER" ] || { echo "the app container is not running" >&2; exit 1; }
+# The compose network of the running app container (any COMPOSE_PROJECT_NAME), unless E2E_NETWORK names one.
+NETWORK="${E2E_NETWORK:-$(lib_compose_network "$CONTAINER")}"
+[ -n "$NETWORK" ] || { echo "the app container has no compose network (set E2E_NETWORK)" >&2; exit 1; }
 if [ -z "${E2E_BASE_URL:-}" ]; then
     IP="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$NETWORK\").IPAddress}}" "$CONTAINER")"
     [ -n "$IP" ] || { echo "the app container has no address on the network $NETWORK (set E2E_NETWORK)" >&2; exit 1; }
