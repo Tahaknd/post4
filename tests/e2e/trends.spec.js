@@ -29,7 +29,10 @@ test.beforeAll(async ({ browser }) => {
     // axe needs a page of its own context (browser.newContext()), not browser.newPage().
     page = await (await browser.newContext()).newPage();
     page.on('console', (message) => {
-        if (message.type() === 'error' && !provoking) {
+        // A report-only Content-Security-Policy violation is logged by Chrome as an INFO message, so match the text (see demo.spec.js).
+        if (/Content Security Policy|\[Report Only\]/i.test(message.text())) {
+            problems.push(`csp violation: ${message.text()}`);
+        } else if (message.type() === 'error' && !provoking) {
             problems.push(`console: ${message.text()}`);
         }
     });

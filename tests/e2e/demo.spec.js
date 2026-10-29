@@ -1,3 +1,5 @@
+import { gunzipSync } from 'node:zlib';
+
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 
@@ -11,12 +13,15 @@ const email = process.env.E2E_EMAIL;
 const password = process.env.E2E_PASSWORD;
 const marker = `demo${Date.now().toString(36)}`;
 const projectName = `E2E ${marker}`;
+// A second project of the same user: its name must never end up in an event of the first.
+const otherName = `Foreign ${marker}`;
 
 test.describe.configure({ mode: 'serial' });
 
 let context;
 let page;
 let projectId;
+let otherProjectId;
 let apiKey;
 let baseOrigin;
 
@@ -29,6 +34,34 @@ const sdkPath = /^\/(e|i|batch|flags|decide|array|s|static|engage)(\/|$)/;
 const demoPath = () => `/projects/${projectId}/demo`;
 const sdkRequests = (path) => traffic.filter((entry) => new URL(entry.url).pathname.startsWith(path));
 const since = (mark) => traffic.slice(mark);
+
+/**
+ * Waits long enough that a request which WOULD be sent has been: the SDK flushes its queue every 500 ms (demoSdk.js),
+ * so this is the one place a fixed wait is the point of the test (proving that something is NOT sent).
+ */
+const quiet = () => page.waitForTimeout(1500);
+
+/**
+ * The POST requests of the page under test since `mark`. A sendBeacon ping is left out: the Playwright event for the
+ * beacon a PREVIOUS page sent while it unloaded can arrive after the next page has loaded, and what a beacon sends is
+ * checked through the beacon log (leaveAndReadBeacons) instead.
+ */
+const posts = (mark) => since(mark).filter((entry) => entry.method === 'POST' && entry.type !== 'ping');
+
+/** The events of the POST /e/ requests in `entries`, whatever the body encoding (gzip, JSON, base64 form). */
+function sentEvents(entries) {
+    return entries
+        .filter((entry) => entry.method === 'POST' && new URL(entry.url).pathname === '/e/' && entry.postData)
+        .flatMap((entry) => {
+            let text = entry.postData.subarray(0, 2).toString('hex') === '1f8b' ? gunzipSync(entry.postData).toString() : entry.postData.toString();
+            if (text.startsWith('data=')) {
+                text = Buffer.from(decodeURIComponent(text.slice(5)), 'base64').toString();
+            }
+            const body = JSON.parse(text);
+
+            return Array.isArray(body) ? body : (body.batch ?? [body]);
+        });
+}
 
 test.beforeAll(async ({ browser }) => {
     if (!email || !password) {
@@ -65,7 +98,11 @@ test.beforeAll(async ({ browser }) => {
     page = await context.newPage();
 
     page.on('console', (message) => {
-        if (message.type() === 'error') {
+        // Chrome logs a report-only Content-Security-Policy violation as an INFO message ("... violates the following Content
+        // Security Policy directive ... The policy is report-only"), not as an error: match the text, whatever the level.
+        if (/Content Security Policy|\[Report Only\]/i.test(message.text())) {
+            problems.push(`csp violation: ${message.text()}`);
+        } else if (message.type() === 'error') {
             problems.push(`console error: ${message.text()}`);
         } else if (message.type() === 'warning') {
             warnings.push(`console warning: ${message.text()}`);
@@ -103,6 +140,12 @@ test.beforeAll(async ({ browser }) => {
     await page.getByRole('button', { name: 'Reveal key' }).click();
     apiKey = (await page.getByTestId('api-key').textContent()).trim();
     expect(apiKey).toMatch(/^phc_/);
+
+    await page.goto('/projects/create');
+    await page.getByLabel('Name').fill(otherName);
+    await page.getByRole('button', { name: 'Create project' }).click();
+    await expect(page).toHaveURL(/\/projects\/\d+$/);
+    otherProjectId = Number(page.url().split('/').pop());
 });
 
 // A response >= 400 a test provokes on purpose.
@@ -112,12 +155,14 @@ function tolerated(response) {
 }
 
 test.afterAll(async () => {
-    if (projectId !== undefined) {
-        await page.goto(`/projects/${projectId}`);
-        await page.getByRole('button', { name: 'Delete project…' }).click();
-        await page.getByRole('dialog').getByLabel('Project name').fill(projectName);
-        await page.getByRole('dialog').getByRole('button', { name: 'Delete project' }).click();
-        await expect(page).toHaveURL(/\/projects$/);
+    for (const [id, name] of [[projectId, projectName], [otherProjectId, otherName]]) {
+        if (id !== undefined) {
+            await page.goto(`/projects/${id}`);
+            await page.getByRole('button', { name: 'Delete project…' }).click();
+            await page.getByRole('dialog').getByLabel('Project name').fill(name);
+            await page.getByRole('dialog').getByRole('button', { name: 'Delete project' }).click();
+            await expect(page).toHaveURL(/\/projects$/);
+        }
     }
     await context.close();
 });
@@ -136,9 +181,12 @@ async function openDemo({ query = '', viaLink = false } = {}) {
 
 /** Distinct search texts for an event name: the answer of the events API is cached per text, so a poll must not repeat one. */
 function* searches(name) {
-    for (let length = name.length; length >= 3; length--) {
-        for (let start = 0; start + length <= name.length; start++) {
-            yield name.slice(start, start + length);
+    // The search is case-insensitive but the cache key is the text, so the upper-case spelling doubles the supply.
+    for (const spell of [(text) => text, (text) => text.toUpperCase()]) {
+        for (let length = name.length; length >= 3; length--) {
+            for (let start = 0; start + length <= name.length; start++) {
+                yield spell(name.slice(start, start + length));
+            }
         }
     }
 }
@@ -170,6 +218,16 @@ async function waitForEvent(name, min = 1, deadlineMs = 90_000) {
     throw new Error(`${name} did not reach ${min} in the events API (last count ${last})`);
 }
 
+/** How many events of this name the events API lists right now (0 when none): one query, never a repeated search text. */
+async function countOf(name) {
+    const unused = polled.get(name) ?? searches(name);
+    polled.set(name, unused);
+    const next = unused.next();
+    const answer = next.done ? null : await page.request.get(`/api/projects/${projectId}/insights/events?q=${encodeURIComponent(next.value)}`);
+
+    return answer?.ok() ? ((await answer.json()).events.find((item) => item.name === name)?.count ?? 0) : 0;
+}
+
 async function seriousViolations() {
     const results = await new AxeBuilder({ page }).analyze();
 
@@ -178,6 +236,10 @@ async function seriousViolations() {
 
 test('starts the real SDK from the project page and talks to this server only', async () => {
     await openDemo({ viaLink: true });
+
+    // Secure only on https or localhost; a plain-http LAN or `.test` address is not, and the SDK must work there too.
+    const { hostname, protocol } = new URL(page.url());
+    expect(await page.evaluate(() => window.isSecureContext)).toBe(protocol === 'https:' || ['localhost', '127.0.0.1', '[::1]'].includes(hostname));
 
     // The page that starts the SDK is the demo page; its host is the origin the browser opened.
     await expect(page.getByTestId('demo-host')).toHaveText(baseOrigin);
@@ -223,7 +285,6 @@ test('captures a custom event: gzip body, 200, no cookie, and it reaches the eve
     const url = new URL(response.url());
     // posthog-js 1.438 marks a gzip body by its content (the gzip magic bytes), not by a `compression=gzip-js` query parameter.
     expect(url.searchParams.has('compression')).toBe(false);
-    console.log(`SDK /e/ request: ${url.pathname}${url.search}`);
     const request = response.request();
     expect(request.headers()['content-type']).toContain('text/plain');
     expect([...(request.postDataBuffer() ?? [])].slice(0, 2)).toEqual([0x1f, 0x8b]);
@@ -260,7 +321,6 @@ test('the SDK calls /flags when the remote config says there are flags, and the 
         expect(query.get('v')).toBe('2');
         expect(response.request().headers()['content-type']).toContain('text/plain');
         expect([...(response.request().postDataBuffer() ?? [])].slice(0, 2)).toEqual([0x1f, 0x8b]);
-        console.log(`SDK /flags request: ${new URL(response.url()).pathname}${new URL(response.url()).search}`);
         const body = await response.json();
         expect(body.flags).toEqual({});
         expect(body.errorsWhileComputingFlags).toBe(false);
@@ -300,21 +360,61 @@ test('autocapture sends $autocapture for the target only, and stays silent when 
     await waitForEvent('$autocapture');
 
     // The controls of the bench are not autocaptured: a click on one sends no request.
-    await page.getByRole('button', { name: 'Clear' }).click();
-    await page.waitForTimeout(1500);
+    await page.getByRole('button', { name: 'Clear activity log' }).click();
+    await quiet();
     const mark = traffic.length;
-    await page.getByRole('button', { name: 'Clear' }).click();
-    await page.waitForTimeout(1500);
-    expect(since(mark).filter((entry) => entry.method === 'POST')).toEqual([]);
+    await page.getByRole('button', { name: 'Clear activity log' }).click();
+    await quiet();
+    expect(posts(mark)).toEqual([]);
 
     // Switched off: the SDK restarts, and the target sends nothing.
     await page.getByLabel('Autocapture clicks and form changes').uncheck();
     await expect(page.getByTestId('demo-log')).toContainText('autocapture off');
     await expect(page.getByTestId('demo-status')).toContainText('Ready, posthog-js');
-    const quiet = traffic.length;
+    const before = traffic.length;
     await page.getByRole('button', { name: 'Autocapture target' }).click();
-    await page.waitForTimeout(1500);
-    expect(since(quiet).filter((entry) => entry.method === 'POST')).toEqual([]);
+    await quiet();
+    expect(posts(before)).toEqual([]);
+});
+
+test('autocapture records the demo target only: clicks on the app chrome send nothing, and no other project name leaves the page', async () => {
+    await openDemo();
+    await page.evaluate(() => localStorage.removeItem('__e2e_beacons'));
+    const mark = traffic.length;
+
+    // Positive control: the target is recorded, as an element of this page.
+    const [response] = await Promise.all([
+        page.waitForResponse((r) => new URL(r.url()).pathname === '/e/' && r.request().method() === 'POST'),
+        page.getByRole('button', { name: 'Autocapture target' }).click(),
+    ]);
+    expect(response.status()).toBe(200);
+    const recorded = sentEvents(posts(mark));
+    expect(recorded.map((event) => event.event)).toEqual(['$autocapture']);
+    expect(JSON.stringify(recorded)).toContain('demo-autocapture-target');
+
+    // The app's own chrome: the project picker (three quick clicks, the stuff a rage click is made of), its panel, the
+    // header links and the page's own links. None of it may become an event.
+    const picker = page.getByRole('button', { name: /^Project:/ });
+    const afterTarget = traffic.length;
+    for (let i = 0; i < 4; i++) {
+        await picker.click({ delay: 20 });
+    }
+    await expect(picker).toHaveAttribute('aria-expanded', 'false');
+    await picker.click();
+    await page.getByRole('link', { name: 'All projects' }).hover();
+    await page.getByRole('link', { name: 'Trends' }).first().hover();
+    await quiet();
+    expect(posts(afterTarget)).toEqual([]);
+
+    // Picking the other project (a client-side navigation away from the page) records nothing either, and the
+    // shutdown that follows flushes nothing: no request and no beacon.
+    await page.getByRole('link', { name: otherName }).click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${otherProjectId}$`));
+    await quiet();
+    const sent = sentEvents(posts(mark));
+    expect(sent.map((event) => event.event)).toEqual(['$autocapture']);
+    expect(JSON.stringify(sent)).not.toContain(otherName);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('__e2e_beacons') || '[]'))).toEqual([]);
 });
 
 test('opt out stops all sending until opt in', async () => {
@@ -326,8 +426,8 @@ test('opt out stops all sending until opt in', async () => {
     const mark = traffic.length;
     await page.getByRole('button', { name: 'Capture $pageview' }).click();
     await page.getByRole('button', { name: 'Capture custom event' }).click();
-    await page.waitForTimeout(1500);
-    expect(since(mark).filter((entry) => entry.method === 'POST')).toEqual([]);
+    await quiet();
+    expect(posts(mark)).toEqual([]);
 
     await optOut.click();
     await expect(optOut).toHaveAttribute('aria-pressed', 'false');
@@ -385,6 +485,7 @@ async function leaveAndReadBeacons() {
 test('page close sends $pageleave by sendBeacon with a gzip body, and it arrives', async () => {
     await openDemo();
 
+    const leavesBefore = await countOf('$pageleave');
     const beacons = await leaveAndReadBeacons();
 
     expect(beacons).toHaveLength(1);
@@ -393,9 +494,8 @@ test('page close sends $pageleave by sendBeacon with a gzip body, and it arrives
     // A gzip body travels as text/plain (a CORS simple request: a beacon cannot preflight); no compression parameter.
     expect(beacons[0].type).toBe('text/plain');
     expect(url.searchParams.has('compression')).toBe(false);
-    console.log(`SDK beacon (config on): ${url.pathname}${url.search} ${beacons[0].type} ${beacons[0].size} bytes`);
 
-    await waitForEvent('$pageleave');
+    await waitForEvent('$pageleave', leavesBefore + 1);
 });
 
 test('leaving the demo page by navigation inside the app shuts the SDK down: nothing is sent when the tab closes later', async () => {
@@ -404,11 +504,12 @@ test('leaving the demo page by navigation inside the app shuts the SDK down: not
     await expect(page).toHaveURL(new RegExp(`/projects/${projectId}$`));
 
     const mark = traffic.length;
-    await page.waitForTimeout(1000);
-    await page.goto('about:blank');
-    await page.waitForTimeout(1000);
+    await quiet();
+    // Closing the tab now fires the `pagehide` listener the stopped SDK instance could not remove: it must send no beacon.
+    expect(await leaveAndReadBeacons()).toEqual([]);
+    await quiet();
 
-    expect(since(mark).filter((entry) => entry.method === 'POST')).toEqual([]);
+    expect(posts(mark)).toEqual([]);
 });
 
 test('without the remote config the SDK never asks for it and still gets its events and its page leave through', async () => {
@@ -429,14 +530,14 @@ test('without the remote config the SDK never asks for it and still gets its eve
     expect(response.status()).toBe(200);
     // The SDK gzips by default even when it has no remote config to say the server can read it.
     const sent = response.request();
-    console.log(`SDK /e/ without remote config: ${new URL(response.url()).search} ${sent.headers()['content-type']}`);
     expect([...(sent.postDataBuffer() ?? [])].slice(0, 2)).toEqual([0x1f, 0x8b]);
     await waitForEvent(name);
 
+    const leavesBefore = await countOf('$pageleave');
     const beacons = await leaveAndReadBeacons();
     expect(beacons).toHaveLength(1);
     expect(beacons[0].type).toBe('text/plain');
-    await waitForEvent('$pageleave', 2);
+    await waitForEvent('$pageleave', leavesBefore + 1);
 });
 
 test('with compression off the SDK posts plain JSON and its page leave is a base64 form', async () => {
@@ -456,19 +557,18 @@ test('with compression off the SDK posts plain JSON and its page leave is a base
     ]);
     expect(response.status()).toBe(200);
     const sent = response.request();
-    console.log(`SDK /e/ with compression off: ${new URL(response.url()).search} ${sent.headers()['content-type']}`);
     expect(sent.headers()['content-type']).toContain('application/json');
     expect((sent.postDataBuffer() ?? Buffer.alloc(0)).subarray(0, 1).toString()).toMatch(/[\[{]/);
     await waitForEvent(name);
 
+    const leavesBefore = await countOf('$pageleave');
     const beacons = await leaveAndReadBeacons();
     expect(beacons).toHaveLength(1);
     const url = new URL(beacons[0].url);
     expect(url.pathname).toBe('/e/');
     expect(beacons[0].type).toBe('application/x-www-form-urlencoded');
     expect(url.searchParams.get('compression')).toBe('base64');
-    console.log(`SDK beacon (compression off): ${url.pathname}${url.search} ${beacons[0].type} ${beacons[0].size} bytes`);
-    await waitForEvent('$pageleave', 3);
+    await waitForEvent('$pageleave', leavesBefore + 1);
 });
 
 test('the demo page is accessible in light and dark', async () => {
