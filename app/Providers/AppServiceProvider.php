@@ -20,6 +20,10 @@ use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
 use App\Infrastructure\ClickHouse\RoSettings;
+use App\Infrastructure\Kafka\Identity\MessageSource;
+use App\Infrastructure\Kafka\Identity\RdKafkaMessageSource;
+use App\Infrastructure\Kafka\Identity\RdKafkaRowWriter;
+use App\Infrastructure\Kafka\Identity\RowWriter;
 use App\Infrastructure\Kafka\KafkaEventProducer;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
 use App\Models\Project;
@@ -92,6 +96,19 @@ class AppServiceProvider extends ServiceProvider
             config('capture.events_topic'),
             config('capture.status.kafka_group'),
             (int) config('capture.status.kafka_timeout_ms'),
+        ));
+
+        // The identity consumer (App\Console\Commands\IdentityConsume). The group is a parameter: `--group` replays
+        // the topic under another group id without touching the live one.
+        $this->app->bind(MessageSource::class, fn ($app, array $parameters) => new RdKafkaMessageSource(
+            config('capture.kafka_brokers'),
+            config('capture.events_topic'),
+            $parameters['group'] ?? config('identity.group'),
+        ));
+        $this->app->bind(RowWriter::class, fn () => new RdKafkaRowWriter(
+            config('capture.kafka_brokers'),
+            messageTimeoutMs: (int) config('identity.produce_timeout_ms'),
+            flushTimeoutMs: (int) config('identity.produce_timeout_ms') + 5000,
         ));
 
         // One Enricher per Octane worker (listed in config/octane.php `warm`): it owns the User-Agent memo and the
