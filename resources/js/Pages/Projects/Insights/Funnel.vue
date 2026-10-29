@@ -1,15 +1,16 @@
 <script setup>
 import { Head, Link } from '@inertiajs/vue3';
-import { computed, nextTick, onMounted, reactive, ref, shallowRef, watch } from 'vue';
+import { computed, nextTick, onMounted, reactive, ref } from 'vue';
 
 import DateRangeControl from '@/Components/Insights/DateRangeControl.vue';
 import FunnelChart from '@/Components/Insights/FunnelChart.vue';
 import FunnelSteps from '@/Components/Insights/FunnelSteps.vue';
 import OptionSelect from '@/Components/Insights/OptionSelect.vue';
-import ResultState from '@/Components/Insights/ResultState.vue';
+import RunControls from '@/Components/Insights/RunControls.vue';
+import RunResults from '@/Components/Insights/RunResults.vue';
 import WindowControl from '@/Components/Insights/WindowControl.vue';
 import { useEventNames } from '@/composables/useEventNames';
-import { useInsightRun } from '@/composables/useInsightRun';
+import { useRunPage } from '@/composables/useRunPage';
 import { useTouchedFields } from '@/composables/useTouchedFields';
 import { useUrlState } from '@/composables/useUrlState';
 import { decodeDefinition, defaultDefinition, encodeDefinition, formatDuration, mapServerErrors, stepEvent, toRequestBody, validateDefinition } from '@/lib/funnelDefinition';
@@ -41,11 +42,10 @@ const definition = reactive(fromLink ?? defaultDefinition(props));
 
 // One list of suggestions for all the steps: one cache and one request budget.
 const names = useEventNames(props.urls.events, props.limits.max_search_length);
-const run = useInsightRun(props.urls.funnel, props.urls.runs);
 
 const validation = computed(() => validateDefinition(definition, props));
+const valid = computed(() => validation.value.ok);
 const body = computed(() => toRequestBody(definition, props));
-const bodyKey = computed(() => JSON.stringify(body.value));
 
 useUrlState(() => encodeDefinition(definition, props));
 
@@ -54,121 +54,49 @@ const { touched, onFocusOut } = useTouchedFields();
 // message appearing under a field the user just left would also shift the button they are about to click), only a refused
 // Run names it.
 const refused = reactive(new Set());
-// A Run that was refused because of the form (the hint and the live region say so until the form is valid).
-const attempted = ref(false);
 
 const form = ref(null);
-const runButton = ref(null);
 
 // ---------------------------------------------------------------- running
-const state = computed(() => run.state.value);
-const busy = computed(() => state.value.phase === 'loading');
-
-// The result that is on screen and the definition it answers (labels must match the data, not the live form).
-const shown = shallowRef(null);
-let askedFor = null;
-
-function start() {
-    if (busy.value) {
-        return;
+function refuse() {
+    // Every field there is now has been "left": its message may appear. A step added afterwards starts clean.
+    for (const step of definition.steps) {
+        touched.add(`step:${step.id}`);
+        refused.add(`step:${step.id}`);
+        step.filters.forEach((row) => touched.add(`filter:${row.id}`));
     }
-    if (!validation.value.ok) {
-        attempted.value = true;
-        // Every field there is now has been "left": its message may appear. A step added afterwards starts clean.
-        for (const step of definition.steps) {
-            touched.add(`step:${step.id}`);
-            refused.add(`step:${step.id}`);
-            step.filters.forEach((row) => touched.add(`filter:${row.id}`));
-        }
-        ['window', 'date.from', 'date.to'].forEach((field) => touched.add(field));
-        nextTick(() => form.value?.querySelector('[aria-invalid="true"]')?.focus());
-
-        return;
-    }
-
-    attempted.value = false;
-    askedFor = bodyKey.value;
-    shown.value = null;
-    run.run(body.value);
+    ['window', 'date.from', 'date.to'].forEach((field) => touched.add(field));
+    nextTick(() => form.value?.querySelector('[aria-invalid="true"]')?.focus());
 }
 
-function cancel() {
-    run.cancel();
-    nextTick(() => runButton.value?.focus());
-}
-
-watch(
-    () => state.value,
-    (next) => {
-        if (next.phase === 'done' && askedFor !== null && isFunnelResult(next.result)) {
-            shown.value = { result: next.result, key: askedFor };
-        } else if (next.phase !== 'loading') {
-            shown.value = null;
-        }
+const { state, busy, attempted, runButton, shown, view, error, help, stale, stageText, status, start, cancel } = useRunPage({
+    postUrl: props.urls.funnel,
+    runsUrl: props.urls.runs,
+    body,
+    valid,
+    isResult: isFunnelResult,
+    isEmpty: isEmptyFunnel,
+    refuse,
+    failureHelp,
+    messages: {
+        running: 'Running the funnel…',
+        refused: 'Fix the highlighted fields to run the funnel.',
+        empty: 'Nobody started this funnel in this range.',
+        describe: describeSummary,
     },
-);
+});
 
 onMounted(() => {
-    if (fromLink !== null && validation.value.ok) {
+    if (fromLink !== null && valid.value) {
         start();
     }
 });
-
-// ---------------------------------------------------------------- what the results area shows
-const UNREADABLE = { kind: 'unexpected', message: 'The server sent an answer this page cannot read. Reload the page and try again.', retryable: true, retry_after_seconds: null };
-
-const view = computed(() => {
-    switch (state.value.phase) {
-        case 'idle':
-            return 'idle';
-        case 'loading':
-            return 'loading';
-        case 'done':
-            return shown.value === null ? 'failed' : isEmptyFunnel(shown.value.result) ? 'empty' : 'result';
-        case 'invalid':
-            return 'blocked';
-        default:
-            // failed, expired, cancelled
-            return state.value.phase;
-    }
-});
-
-const error = computed(() => (state.value.phase === 'done' ? UNREADABLE : state.value.error));
-const help = computed(() => (view.value === 'failed' ? failureHelp(error.value) : null));
-// The form changed since the result on screen was asked for.
-const stale = computed(() => view.value === 'result' && shown.value.key !== bodyKey.value);
 
 const IDLE_COPY = { title: 'Build a funnel to see where people drop off', text: 'Choose an event for each step above, then run the funnel. The bars and the table appear here.' };
 const emptyCopy = computed(() => {
     const first = shown.value?.result.steps[0].event ?? 'the first step';
 
     return { title: 'Nobody started this funnel in this range', text: `No one did ${first}${first === 'the first step' ? '' : ' (with the filters of that step)'} in these dates. Try a longer date range or check the first step.` };
-});
-
-const stageText = computed(() => (state.value.stage === 'queued' ? 'Waiting for a free slot…' : (state.value.notice ?? 'Running the funnel…')));
-
-// One short sentence for the live region, once per finished action. Failures and form errors are announced by their own
-// alerts and are NOT repeated here.
-const status = computed(() => {
-    if (busy.value) {
-        return stageText.value;
-    }
-    if (attempted.value && !validation.value.ok) {
-        return 'Fix the highlighted fields to run the funnel.';
-    }
-
-    switch (view.value) {
-        case 'result':
-            return describeSummary(shown.value.result);
-        case 'empty':
-            return 'Nobody started this funnel in this range.';
-        case 'cancelled':
-            return 'The run was cancelled.';
-        case 'expired':
-            return 'This result is no longer available. Run it again.';
-        default:
-            return '';
-    }
 });
 
 // ---------------------------------------------------------------- when a field's message may appear
@@ -232,10 +160,6 @@ const ORDER_HINTS = {
 
 const orderHint = computed(() => ORDER_HINTS[definition.order] ?? ORDER_HINTS.ordered);
 const windowHint = computed(() => `Time allowed from a person’s first step to the last one: ${formatDuration(props.limits.min_window_seconds)} to ${formatDuration(props.limits.max_window_seconds)}.`);
-
-function reload() {
-    window.location.reload();
-}
 </script>
 
 <template>
@@ -268,38 +192,11 @@ function reload() {
 
             <p v-if="errors.general" role="alert" class="rounded-md border border-danger px-3 py-2 text-sm text-danger" data-testid="general-error">{{ errors.general }}</p>
 
-            <div class="flex flex-wrap items-center gap-3">
-                <button
-                    ref="runButton"
-                    type="submit"
-                    class="inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 font-medium text-accent-fg hover:bg-accent-hover aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
-                    :aria-disabled="busy || !validation.ok ? 'true' : undefined"
-                    :aria-describedby="attempted && !validation.ok ? 'run-hint' : undefined"
-                >
-                    Run funnel
-                </button>
-                <button
-                    v-if="busy"
-                    type="button"
-                    class="inline-flex items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-fg hover:bg-canvas"
-                    @click="cancel"
-                >
-                    Cancel run
-                </button>
-                <p v-if="busy" class="text-sm text-muted" aria-hidden="true" data-testid="status-visible">{{ stageText }}</p>
-                <p v-else-if="attempted && !validation.ok" id="run-hint" class="text-sm text-danger" data-testid="run-hint">Fix the highlighted fields to run the funnel.</p>
-            </div>
+            <RunControls ref="runButton" label="Run funnel" :busy="busy" :valid="valid" :attempted="attempted" :stage-text="stageText" hint="Fix the highlighted fields to run the funnel." @cancel="cancel" />
         </form>
 
-        <!-- Always in the DOM: a live region only announces text that is inserted into one that already exists. -->
-        <div class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="status">{{ status }}</div>
-
-        <section aria-label="Results" :aria-busy="busy ? 'true' : 'false'" class="space-y-3">
-            <p v-if="stale" class="text-sm text-muted" data-testid="status-stale">The form has changed since this result. Run the funnel again to update it.</p>
-
-            <FunnelChart v-if="view === 'result'" :result="shown.result" :stale="stale" />
-
-            <ResultState v-else :kind="view" :error="error" :help="help" :idle-copy="IDLE_COPY" :empty-copy="emptyCopy" noun="funnel" @retry="start" @reload="reload" />
-        </section>
+        <RunResults :view="view" :status="status" :busy="busy" :stale="stale" noun="funnel" :error="error" :help="help" :idle-copy="IDLE_COPY" :empty-copy="emptyCopy" @retry="start">
+            <FunnelChart :result="shown.result" :stale="stale" />
+        </RunResults>
     </div>
 </template>
