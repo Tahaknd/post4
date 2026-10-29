@@ -3,6 +3,7 @@
 namespace Tests;
 
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+use Tests\Support\TestDatabaseGuard;
 
 abstract class TestCase extends BaseTestCase
 {
@@ -20,8 +21,9 @@ abstract class TestCase extends BaseTestCase
     private function assertIsolatedTestEnvironment(): void
     {
         $config = $this->app['config'];
-        $default = $config->get('database.default');
-        $database = $config->get("database.connections.{$default}.database");
+        $default = (string) $config->get('database.default');
+        $connection = (array) $config->get("database.connections.{$default}");
+        $driver = (string) ($connection['driver'] ?? $default);
 
         $problems = [];
 
@@ -29,8 +31,11 @@ abstract class TestCase extends BaseTestCase
             $problems[] = 'config is cached (run php artisan config:clear)';
         }
 
-        if ($default !== 'sqlite' || $database !== ':memory:') {
-            $problems[] = "database={$default}/{$database}";
+        // SQLite in memory, or the throwaway Postgres of phpunit.pgsql.xml; see TestDatabaseGuard for the exact rule.
+        $databaseProblem = TestDatabaseGuard::problem($driver, $connection, env('TESTS_ALLOW_PGSQL'));
+
+        if ($databaseProblem !== null) {
+            $problems[] = $databaseProblem;
         }
 
         if ($config->get('cache.default') !== 'array') {
