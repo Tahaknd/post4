@@ -42,7 +42,10 @@ use InvalidArgumentException;
  * MEMORY. windowFunnel keeps every relevant event of a person (about 16 bytes each) until the person is complete, and the
  * join with the id mapping holds the whole mapping of the project ({@see PersonSource}); both count against the 400 MB
  * cap of the read-only profile and a funnel over too much data fails cleanly as ClickHouseErrorKind::MemoryLimit ("query
- * too large"), never with a wrong number. `strict_order` reads all events, so it reaches the cap first.
+ * too large"), never with a wrong number. `strict_order` reads all events, so it reaches the cap first. The per person GROUP BY
+ * spills to a bounded temp disk past 150 MB (users.d/20-readonly-user.xml), which moved the ceiling from about 300k active
+ * people to over a million (12M events / 1M people: 2.0 s, 297 MiB; 30M events / 4M people: still the clean memory error); the
+ * mapping join cannot spill, so its ceiling of about 800k mapped ids per project stays.
  *
  * KNOWN BEHAVIOURS of the ClickHouse function that the tests pin: the best chain over several step 1 events is found by
  * a single greedy pass that always restarts from the latest step 1 event, which gives the longest chain; in `strict_order`
