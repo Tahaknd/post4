@@ -108,6 +108,20 @@ final class ClickHouseIntegration
 
     public const FUNNEL_IDS = [self::FUNNEL_A, self::FUNNEL_B, self::FUNNEL_C, self::FUNNEL_D];
 
+    /**
+     * Tenants of the retention tests (RetentionClickHouseTest): A has every scenario, B reuses A's distinct ids and event names
+     * with another mapping, C has no row at all, D holds the seeded random dataset of the oracle check.
+     */
+    public const RET_A = 991401;
+
+    public const RET_B = 991402;
+
+    public const RET_C = 991403;
+
+    public const RET_D = 991404;
+
+    public const RET_IDS = [self::RET_A, self::RET_B, self::RET_C, self::RET_D];
+
     /** The tenant of the spill test (ClickHouseSpillTest): millions of rows in the partition 200101, dropped as a whole afterwards. */
     public const SPILL_A = 991301;
 
@@ -319,6 +333,24 @@ final class ClickHouseIntegration
             $ch->admin->execute('SYSTEM START MERGES posthog.person_distinct_ids');
             $ch->deletePersonRowsOf(self::FUNNEL_IDS);
             $ch->deleteRowsOf(self::FUNNEL_IDS);
+        } finally {
+            Facade::clearResolvedInstances();
+        }
+    }
+
+    /** For Pest's afterAll(): removes the retention tests' events and mapping rows, also after a failed test. */
+    public static function cleanupRetentionAfterAll(): void
+    {
+        if (! self::$personTouched) {
+            return;
+        }
+
+        Http::swap(new Factory);
+        try {
+            $ch = self::connect();
+            $ch->admin->execute('SYSTEM START MERGES posthog.person_distinct_ids');
+            $ch->deletePersonRowsOf(self::RET_IDS);
+            $ch->deleteRowsOf(self::RET_IDS);
         } finally {
             Facade::clearResolvedInstances();
         }
