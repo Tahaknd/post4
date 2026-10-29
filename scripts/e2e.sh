@@ -14,9 +14,9 @@
 # contexts, App\Http\HistoryEncryption). It is by IP and not by the service name because a host called `app` is forced to
 # https by Chromium (`.app` is an HSTS-preloaded top level domain). Set E2E_BASE_URL to test another address.
 #
-# The specs: trends.spec.js (the Trends page) and demo.spec.js (the real posthog-js on the demo page: remote config, gzip /
-# JSON / base64 bodies, sendBeacon on page close, UTM, no cookies from the SDK endpoints, a clean console, axe). Both create and
-# delete their own project.
+# The specs: trends.spec.js (the Trends page), funnel.spec.js (the Funnel page: the step builder by keyboard, run, cancel,
+# numbers, URL, axe) and demo.spec.js (the real posthog-js on the demo page: remote config, gzip / JSON / base64 bodies,
+# sendBeacon on page close, UTM, no cookies from the SDK endpoints, a clean console, axe). Each creates and deletes its own project.
 #
 # The tests refuse an E2E_BASE_URL that is not localhost, a private address or a *.test / *.localhost name (they create and delete
 # projects as an administrator) unless E2E_ALLOW_REMOTE=1 is set.
