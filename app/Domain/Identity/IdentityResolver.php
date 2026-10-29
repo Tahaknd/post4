@@ -14,8 +14,8 @@ use LogicException;
  * The distinct id of the event is the TARGET (its person survives); the other id (`$anon_distinct_id`, `alias`) is
  * the SOURCE. By what is known about the two ids:
  *
- *   neither has a person   a person is created with both ids and is identified (every kind)
- *   one has a person       the other id is attached to it and the person is identified (every kind)
+ *   neither has a person   a person is created with both ids
+ *   one has a person       the other id is attached to it
  *   the same person        nothing (a repeated event, or the reverse of an earlier one: A->B then B->A converges)
  *   two different persons  merge the source's person into the target's, unless
  *                            $identify           the source's person is already identified
@@ -24,8 +24,12 @@ use LogicException;
  *
  * A merge moves every distinct id of the source person to the target person (version + 1 each, so ClickHouse's
  * ReplacingMergeTree keeps the new assignment), merges the properties (the TARGET wins a key both have), keeps the
- * earlier created_at, marks the target identified and deletes the source person. Setting properties from `$set` and
- * `$set_once` is NOT done here.
+ * earlier created_at and deletes the source person. Setting properties from `$set` and `$set_once` is NOT done here.
+ *
+ * is_identified, as in PostHog: only `$identify` marks a person identified (a created person starts identified, an
+ * attached or surviving person becomes identified). `$create_alias` and `$merge_dangerously` never set the flag: a
+ * person they create starts NOT identified, and an attached or surviving person keeps the flag it had (the SOURCE's
+ * flag is not carried over by a merge; the target's decides).
  *
  * Concurrency, in this order inside the transaction:
  *   1. pg_advisory_xact_lock for each id of the event, keys in one global ascending order (IdentityLockKey), so two
@@ -143,7 +147,7 @@ final class IdentityResolver
         $personId = (int) DB::table('persons')->insertGetId([
             'uuid' => $uuid,
             'project_id' => $event->projectId,
-            'is_identified' => true,
+            'is_identified' => $event->kind === IdentityKind::Identify,
             'created_at' => $now,
             'updated_at' => $now,
         ]);
@@ -160,8 +164,10 @@ final class IdentityResolver
     {
         $change = $this->insertDistinctId($event->projectId, (int) $person->id, $person->uuid, $distinctId, $now);
 
-        DB::table('persons')->where('id', $person->id)->where('is_identified', false)
-            ->update(['is_identified' => true, 'updated_at' => $now]);
+        if ($event->kind === IdentityKind::Identify) {
+            DB::table('persons')->where('id', $person->id)->where('is_identified', false)
+                ->update(['is_identified' => true, 'updated_at' => $now]);
+        }
 
         return new IdentityResult(IdentityOutcome::Attached, $event->projectId, (int) $person->id, $person->uuid, [$change]);
     }
@@ -177,9 +183,9 @@ final class IdentityResolver
         // jsonb || : the right operand wins a key both have, so the target's value is kept.
         DB::update(
             'update persons set properties = source.properties || persons.properties,
-                    created_at = least(persons.created_at, source.created_at), is_identified = true, updated_at = ?
+                    created_at = least(persons.created_at, source.created_at), is_identified = persons.is_identified or ?, updated_at = ?
              from persons source where persons.id = ? and source.id = ?',
-            [$now, $target->id, $source->id],
+            [$event->kind === IdentityKind::Identify, $now, $target->id, $source->id],
         );
 
         DB::table('persons')->where('id', $source->id)->delete();

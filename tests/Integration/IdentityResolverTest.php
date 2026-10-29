@@ -145,11 +145,22 @@ describe('creating and attaching', function () {
         expect($after->properties)->toBe($before->properties)->and($after->uuid)->toBe($before->uuid);
     });
 
-    it('creates the person of an alias and of a dangerous merge the same way', function (IdentityKind $kind) {
+    it('creates the person of an alias and of a dangerous merge the same way, but NOT identified (only $identify identifies)', function (IdentityKind $kind) {
         $result = resolveIdentity($this->project, $kind, 'alice', 'bob');
 
-        expect($result->outcome)->toBe(IdentityOutcome::Created)->and(personsOfProject($this->project))->toBe([$result->personId => ['alice', 'bob']]);
+        expect($result->outcome)->toBe(IdentityOutcome::Created)
+            ->and(personsOfProject($this->project))->toBe([$result->personId => ['alice', 'bob']])
+            ->and((bool) DB::table('persons')->find($result->personId)->is_identified)->toBeFalse();
     })->with([IdentityKind::CreateAlias, IdentityKind::MergeDangerously]);
+
+    it('attaching through an alias or a dangerous merge keeps the flag the person had', function (IdentityKind $kind, bool $identified) {
+        $personId = seedPerson($this->project, ['alice'], identified: $identified);
+
+        $result = resolveIdentity($this->project, $kind, 'alice', 'bob');
+
+        expect($result->outcome)->toBe(IdentityOutcome::Attached)
+            ->and((bool) DB::table('persons')->find($personId)->is_identified)->toBe($identified);
+    })->with([IdentityKind::CreateAlias, IdentityKind::MergeDangerously])->with([true, false]);
 });
 
 describe('being idempotent', function () {
@@ -221,6 +232,24 @@ describe('merging', function () {
             ->and((bool) $person->is_identified)->toBeTrue()
             ->and($person->created_at)->toStartWith('2026-01-01');
     });
+
+    it('marks the surviving person identified for $identify and leaves its flag alone for an alias or a dangerous merge', function (IdentityKind $kind, bool $targetIdentified, bool $sourceIdentified, bool $expected) {
+        seedPerson($this->project, ['alice'], identified: $targetIdentified);
+        seedPerson($this->project, ['bob'], identified: $sourceIdentified);
+
+        $result = resolveIdentity($this->project, $kind, 'alice', 'bob');
+
+        expect($result->outcome)->toBe(IdentityOutcome::Merged)
+            ->and((bool) DB::table('persons')->find($result->personId)->is_identified)->toBe($expected);
+    })->with([
+        '$identify, target not identified' => [IdentityKind::Identify, false, false, true],
+        '$create_alias, neither identified' => [IdentityKind::CreateAlias, false, false, false],
+        '$create_alias, target identified' => [IdentityKind::CreateAlias, true, false, true],
+        '$create_alias, only the source identified: its flag is not carried over' => [IdentityKind::CreateAlias, false, true, false],
+        '$merge_dangerously, neither identified' => [IdentityKind::MergeDangerously, false, false, false],
+        '$merge_dangerously, target identified' => [IdentityKind::MergeDangerously, true, true, true],
+        '$merge_dangerously, only the source identified' => [IdentityKind::MergeDangerously, false, true, false],
+    ]);
 
     it('lets the target\'s properties win in both directions of the same pair', function () {
         seedPerson($this->project, ['a'], properties: ['k' => 'from-a']);
@@ -403,12 +432,12 @@ describe('a reference model', function () {
                 $ty = $find($y);
 
                 if ($tx === null && $ty === null) {
-                    $groups[] = ['ids' => [$x, $y], 'identified' => true];
+                    $groups[] = ['ids' => [$x, $y], 'identified' => $kind === IdentityKind::Identify];
                     $expected = IdentityOutcome::Created;
                 } elseif ($tx === null || $ty === null) {
                     $index = $tx ?? $ty;
                     $groups[$index]['ids'][] = $tx === null ? $x : $y;
-                    $groups[$index]['identified'] = true;
+                    $groups[$index]['identified'] = $groups[$index]['identified'] || $kind === IdentityKind::Identify;
                     $expected = IdentityOutcome::Attached;
                 } elseif ($tx === $ty) {
                     $expected = IdentityOutcome::Noop;
@@ -420,7 +449,7 @@ describe('a reference model', function () {
                         $expected = IdentityOutcome::Noop;
                     } else {
                         $groups[$tx]['ids'] = array_merge($groups[$tx]['ids'], $groups[$ty]['ids']);
-                        $groups[$tx]['identified'] = true;
+                        $groups[$tx]['identified'] = $groups[$tx]['identified'] || $kind === IdentityKind::Identify;
                         unset($groups[$ty]);
                         $expected = IdentityOutcome::Merged;
                     }
