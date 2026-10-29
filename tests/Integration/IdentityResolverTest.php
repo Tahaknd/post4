@@ -163,6 +163,60 @@ describe('creating and attaching', function () {
     })->with([IdentityKind::CreateAlias, IdentityKind::MergeDangerously])->with([true, false]);
 });
 
+describe('re-emitting the current rows (currentRows)', function () {
+    function rowsOf(array $changes): array
+    {
+        return array_map(fn ($c) => [$c->distinctId, $c->personId, $c->personUuid, $c->version], $changes);
+    }
+
+    it('returns the same rows the first run reported, for a created person', function () {
+        $first = identifyAs($this->project, 'alice', 'anon-1');
+
+        $again = app(IdentityResolver::class)->currentRows(new IdentityEvent($this->project->id, IdentityKind::Identify, 'alice', 'anon-1'));
+
+        expect(rowsOf($again))->toBe(rowsOf($first->changes));
+    });
+
+    it('returns EVERY id of a merged person with its current version, also the ones the event does not name', function () {
+        seedPerson($this->project, ['alice']);
+        seedPerson($this->project, ['anon-1', 'anon-2', 'anon-3']);
+        $merged = identifyAs($this->project, 'alice', 'anon-1');
+
+        $rows = app(IdentityResolver::class)->currentRows(new IdentityEvent($this->project->id, IdentityKind::Identify, 'alice', 'anon-1'));
+
+        expect(rowsOf($rows))->toBe([
+            ['alice', $merged->personId, $merged->personUuid, 0],
+            ['anon-1', $merged->personId, $merged->personUuid, 1],
+            ['anon-2', $merged->personId, $merged->personUuid, 1],
+            ['anon-3', $merged->personId, $merged->personUuid, 1],
+        ]);
+    });
+
+    it('returns the rows of both persons when the ids are still apart, nothing for unknown ids, and stays inside the project', function () {
+        $other = Project::factory()->create();
+        seedPerson($this->project, ['alice']);
+        seedPerson($this->project, ['bob']);
+        seedPerson($other, ['alice', 'bob']);
+        $resolver = app(IdentityResolver::class);
+
+        $apart = $resolver->currentRows(new IdentityEvent($this->project->id, IdentityKind::Identify, 'alice', 'bob'));
+        $unknown = $resolver->currentRows(new IdentityEvent($this->project->id, IdentityKind::Identify, 'nobody', 'no-one'));
+
+        expect(array_column(rowsOf($apart), 0))->toBe(['alice', 'bob'])
+            ->and(array_unique(array_map(fn ($c) => $c->projectId, $apart)))->toBe([$this->project->id])
+            ->and($unknown)->toBe([]);
+    });
+
+    it('honours the cap and writes nothing', function () {
+        seedPerson($this->project, ['a', 'b', 'c', 'd']);
+        $snapshot = identitySnapshot();
+
+        $rows = app(IdentityResolver::class)->currentRows(new IdentityEvent($this->project->id, IdentityKind::Identify, 'a', 'b'), limit: 3);
+
+        expect($rows)->toHaveCount(3)->and(identitySnapshot())->toBe($snapshot);
+    });
+});
+
 describe('being idempotent', function () {
     it('does nothing the second time, and nothing for the reverse event (A->B then B->A)', function () {
         $first = identifyAs($this->project, 'alice', 'anon-1');

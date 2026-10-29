@@ -86,6 +86,34 @@ final class IdentityResolver
         }
     }
 
+    /**
+     * Every distinct id of the persons that hold the event's two ids, as the rows ClickHouse needs, at their CURRENT
+     * versions, ordered by distinct id. Read only (no transaction, no lock) and capped at $limit rows.
+     *
+     * For the consumer that replays an event after a crash: the first run may have committed to Postgres and died
+     * before its rows reached Kafka, and the replay then finds a no-op and reports nothing. Sending the current rows of
+     * the person again is harmless (same person and version as before, or newer ones), and it also covers the other
+     * ids a merge moved, which the event does not name.
+     *
+     * @return list<DistinctIdChange>
+     */
+    public function currentRows(IdentityEvent $event, int $limit = 10_000): array
+    {
+        $rows = DB::select(
+            'select d.distinct_id, d.person_id, p.uuid, d.version
+             from person_distinct_ids d join persons p on p.id = d.person_id and p.project_id = d.project_id
+             where d.project_id = ? and d.person_id in (
+                 select person_id from person_distinct_ids where project_id = ? and distinct_id in (?, ?))
+             order by d.distinct_id limit ?',
+            [$event->projectId, $event->projectId, $event->distinctId, $event->otherDistinctId, $limit],
+        );
+
+        return array_map(
+            fn (object $row) => new DistinctIdChange($event->projectId, $row->distinct_id, (int) $row->person_id, $row->uuid, (int) $row->version),
+            $rows,
+        );
+    }
+
     private function resolve(IdentityEvent $event): IdentityResult
     {
         $project = $event->projectId;
