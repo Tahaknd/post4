@@ -18,6 +18,8 @@ final class InsightTypes
 {
     public const TRENDS = 'trends';
 
+    public const FUNNEL = 'funnel';
+
     /** @var array<string, array{query: class-string<InsightQuery>, result: class-string<InsightResult>, builder: class-string<InsightSqlBuilder>}> */
     private const TYPES = [
         self::TRENDS => ['query' => TrendsQuery::class, 'result' => TrendsResult::class, 'builder' => TrendsSqlBuilder::class],
