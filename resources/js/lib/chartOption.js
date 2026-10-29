@@ -1,6 +1,7 @@
-// The ECharts option of a trends chart, built from plain data and a resolved colour theme. No ECharts import here: the
+// The ECharts options of the insight charts (trends: lines or bars over time; funnel: horizontal bars per step), built from plain data and a resolved colour theme. No ECharts import here: the
 // chart component hands the object to `chart.setOption()`, and tests can inspect it without a DOM.
 
+import { barLabel, stepLabel } from './funnelFormat.js';
 import { abbreviate, formatNumber, truncate } from './trendsFormat.js';
 
 const CHART_COLORS = 8;
@@ -90,5 +91,61 @@ export function buildChartOption({ labels, series, chartType, theme, reducedMoti
             symbolSize: 6,
             emphasis: { focus: 'series' },
         })),
+    };
+}
+
+/**
+ * The option of a funnel: one horizontal bar per step, step 1 on top, each bar labelled with its count and its share of
+ * everyone who started. One colour (the first chart colour): the bars measure the same thing, so length and the labels carry
+ * the meaning and no colour has to be told apart. The tooltip is ECharts' own (escaped) one: an event name is user data and
+ * never goes into an HTML formatter.
+ *
+ * @param {object} input
+ * @param {object[]} input.steps the `steps` of a funnel result
+ * @param {ReturnType<typeof readChartTheme>} input.theme
+ * @param {boolean} input.reducedMotion
+ * @param {string} input.description the accessible summary
+ */
+export function buildFunnelOption({ steps, theme, reducedMotion, description }) {
+    return {
+        animation: !reducedMotion,
+        color: [theme.series[0]],
+        textStyle: { color: theme.fg, fontFamily: theme.fontFamily },
+        aria: { enabled: true, label: { enabled: true, description } },
+        grid: { left: 8, right: 130, top: 8, bottom: 8, containLabel: true },
+        tooltip: {
+            trigger: 'axis',
+            confine: true,
+            backgroundColor: theme.surface,
+            borderColor: theme.lineStrong,
+            textStyle: { color: theme.fg, fontFamily: theme.fontFamily },
+            axisPointer: { type: 'shadow' },
+            valueFormatter: (value) => formatNumber(value),
+        },
+        xAxis: {
+            type: 'value',
+            minInterval: 1,
+            axisLabel: { color: theme.muted, formatter: (value) => abbreviate(value) },
+            splitLine: { lineStyle: { color: theme.line } },
+        },
+        yAxis: {
+            type: 'category',
+            inverse: true,
+            data: steps.map((step) => stepLabel(step)),
+            axisLabel: { color: theme.fg, width: 180, overflow: 'truncate' },
+            axisLine: { lineStyle: { color: theme.lineStrong } },
+            axisTick: { show: false },
+        },
+        series: [
+            {
+                type: 'bar',
+                name: 'People',
+                data: steps.map((step) => step.count),
+                barMaxWidth: 44,
+                itemStyle: { color: theme.series[0] },
+                label: { show: true, position: 'right', color: theme.fg, formatter: (point) => barLabel(steps[point.dataIndex]) },
+                emphasis: { focus: 'series' },
+            },
+        ],
     };
 }
