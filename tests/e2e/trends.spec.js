@@ -288,6 +288,26 @@ test('keeps the last chart while a filter row is still empty, and shows no error
     await expect(page.getByTestId('chart').locator('svg')).toBeVisible();
 });
 
+test('keeps repeated e keys in the address bar and the chips after load and reload', async () => {
+    const purchase = `${marker}_purchase`;
+    // Not sorted and repeated on purpose: the server must hand the URL back as it was sent (Inertia's default sorted the keys
+    // and kept only the last `e`).
+    const link = `/projects/${projectId}/insights/trends?i=week&e=${eventName}&e=${purchase}&m=unique_users`;
+
+    await page.goto(link);
+    const chips = page.getByRole('list', { name: 'Selected events' });
+    await expect(chips).toContainText(eventName);
+    await expect(chips).toContainText(purchase);
+    await expect(page.getByTestId('chart').locator('svg')).toBeVisible();
+    expect(await page.evaluate(() => new URL(location.href).searchParams.getAll('e').length)).toBe(2);
+
+    await page.reload();
+    await expect(chips).toContainText(eventName);
+    await expect(chips).toContainText(purchase);
+    await expect(page.getByTestId('chart').locator('svg')).toBeVisible();
+    expect(await page.evaluate(() => new URL(location.href).searchParams.getAll('e'))).toEqual([eventName, purchase]);
+});
+
 test('had no console errors and no failed requests', async () => {
     expect(problems).toEqual([]);
 });

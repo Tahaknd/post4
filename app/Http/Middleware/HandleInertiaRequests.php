@@ -6,7 +6,10 @@ use App\Http\ApiErrors;
 use App\Models\Project;
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
+use Inertia\Inertia;
 use Inertia\Middleware;
+use Symfony\Component\HttpFoundation\Response;
 
 class HandleInertiaRequests extends Middleware
 {
@@ -34,6 +37,48 @@ class HandleInertiaRequests extends Middleware
         }
 
         return parent::handle($request, $next);
+    }
+
+    /**
+     * The `url` of a page, which the browser writes into its address bar when the page loads. Inertia's default comes
+     * from Request::fullUrl(), which sorts the query keys and keeps only the LAST of a repeated key (`?e=a&e=b` became
+     * `?e=b`, silently changing a shared link). This one is the path and the query string exactly as they were sent.
+     */
+    public function urlResolver(): Closure
+    {
+        return fn (Request $request): string => self::relativeUrl($request);
+    }
+
+    /**
+     * A version mismatch (a deploy changed the assets) makes the client reload this location: it must be the one that was
+     * asked for, repeated keys included, so the same resolver builds it.
+     */
+    public function onVersionChange(Request $request, Response $response): Response
+    {
+        if ($request->hasSession()) {
+            $request->session()->reflash();
+        }
+
+        $response = Inertia::location($request->getSchemeAndHttpHost().self::relativeUrl($request));
+        $response->headers->set('X-Inertia-Version', Inertia::getVersion());
+
+        return $response;
+    }
+
+    /**
+     * The path as the framework normalises it (so a request-target of the form `//host/x` or an absolute URI can never turn
+     * into another origin), a trailing slash as sent, then the RAW query string; an empty `?` is dropped.
+     */
+    private static function relativeUrl(Request $request): string
+    {
+        $uri = $request->getRequestUri();
+        $path = Str::start(Str::after($request->url(), $request->getSchemeAndHttpHost()), '/');
+        if ($path !== '/' && Str::endsWith(Str::before($uri, '?'), '/')) {
+            $path .= '/';
+        }
+        $query = Str::contains($uri, '?') ? Str::after($uri, '?') : '';
+
+        return $query === '' ? $path : $path.'?'.$query;
     }
 
     /**
