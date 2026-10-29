@@ -18,6 +18,9 @@
 # JSON / base64 bodies, sendBeacon on page close, UTM, no cookies from the SDK endpoints, a clean console, axe). Both create and
 # delete their own project.
 #
+# The tests refuse an E2E_BASE_URL that is not localhost, a private address or a *.test / *.localhost name (they create and delete
+# projects as an administrator) unless E2E_ALLOW_REMOTE=1 is set.
+#
 # Without the image (it is about 2 GB) the same specs run from the host against an installed Chrome, see playwright.config.js:
 #   E2E_BROWSER_CHANNEL=chrome E2E_HOST_MAP=app.test E2E_BASE_URL=http://app.test:8000 E2E_EMAIL=... E2E_PASSWORD=... npx playwright test
 # (E2E_HOST_MAP makes the browser resolve that name to 127.0.0.1: a plain-http, non-localhost origin like a LAN install.)
