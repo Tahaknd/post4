@@ -102,7 +102,7 @@ final class BucketAxis
      * toStartOfInterval returns. PHP gives some instant with that date, then the loop walks back in quarter hours
      * while the instant before it is still on the same local date.
      */
-    private static function firstInstantOfLocalDate(string $date, DateTimeZone $zone): int
+    public static function firstInstantOfLocalDate(string $date, DateTimeZone $zone): int
     {
         $start = DateTimeImmutable::createFromFormat('!Y-m-d', $date, $zone)->getTimestamp();
 
