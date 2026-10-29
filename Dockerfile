@@ -18,6 +18,14 @@ COPY resources/views ./resources/views
 RUN npm run build
 
 
+# Runtime image. BASE IMAGE PIN POLICY: the node stage above is pinned by digest (it only builds assets and
+# never reaches the runtime). `dunglas/frankenphp:1-php8.4` and `composer:2` below are deliberately FLOATING
+# tags (major-version tracks): they pick up security fixes of the base OS, PHP 8.4 and Composer 2 on every
+# fresh build, at the price that two builds of the same commit can differ. Reproducibility comes from
+# composer.lock and package-lock.json, not from these tags. Pinning them by digest, building a --no-dev
+# runtime variant and running as a non-root user are Milestone 8 items (the dev stack needs the dev
+# dependencies in this image: Pest and Pint live in require-dev and `docker compose exec app php artisan test`
+# runs from the image's /app/vendor).
 FROM dunglas/frankenphp:1-php8.4
 
 RUN apt-get update \
@@ -43,6 +51,11 @@ RUN composer dump-autoload --optimize \
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Same probe as the app service of docker-compose.yml (which repeats it so that its timing can be tuned there);
+# worker and scheduler share this image and switch the check off (`healthcheck: disable: true`).
+HEALTHCHECK --interval=5s --timeout=3s --start-period=60s --retries=30 \
+    CMD curl -fsS http://localhost:8000/up || exit 1
 
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["php", "artisan", "octane:start", "--server=frankenphp", "--host=0.0.0.0", "--port=8000"]
