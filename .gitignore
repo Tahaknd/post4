@@ -9,6 +9,7 @@
 .env.*
 !.env.example
 !.env.local.example
+!.env.testing
 
 # Dependencies and build output
 /vendor/

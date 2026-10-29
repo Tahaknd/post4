@@ -16,6 +16,7 @@ vendor
 .env.*
 !.env.example
 !.env.local.example
+!.env.testing
 bootstrap/cache/*.php
 public/hot
 public/build
