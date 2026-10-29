@@ -482,12 +482,58 @@ final class ClickHouseIntegration
         Http::allowStrayRequests([rtrim($url, '/').'*']);
 
         $roClient = new ReadOnlyClickHouseClient($url, 'posthog', 'posthog_ro', $ro);
+        $adminClient = new ClickHouseClient($url, 'posthog', 'posthog', $admin);
 
-        return new self(
-            new ClickHouseClient($url, 'posthog', 'posthog', $admin),
-            $roClient,
-            new ProjectScopedReader($roClient),
-        );
+        self::assertMemoryHeadroom($adminClient);
+
+        return new self($adminClient, $roClient, new ProjectScopedReader($roClient));
+    }
+
+    /** Fraction of max_server_memory_usage above which the group refuses to start (see assertMemoryHeadroom). */
+    public const MEMORY_GUARD_RATIO = 0.8;
+
+    private static bool $memoryChecked = false;
+
+    /**
+     * Fails the group EARLY and readably when the ClickHouse server is already close to its memory ceiling,
+     * instead of letting a random query die later with code 241 MEMORY_LIMIT_EXCEEDED (the usual victim was the
+     * purge test that must not stack a second mutation). Checked once per process; if the two numbers cannot be
+     * read (older server, missing grant) the check is skipped silently: it is a guard, not a requirement.
+     */
+    private static function assertMemoryHeadroom(ClickHouseClient $admin): void
+    {
+        if (self::$memoryChecked) {
+            return;
+        }
+        self::$memoryChecked = true;
+
+        try {
+            $rows = $admin->select(
+                "SELECT (SELECT value FROM system.metrics WHERE metric = 'MemoryTracking') AS used, "
+                ."(SELECT toUInt64(value) FROM system.server_settings WHERE name = 'max_server_memory_usage') AS cap",
+            );
+        } catch (\Throwable) {
+            return;
+        }
+
+        $used = (int) ($rows[0]['used'] ?? 0);
+        $cap = (int) ($rows[0]['cap'] ?? 0);
+        if ($cap <= 0 || $used <= $cap * self::MEMORY_GUARD_RATIO) {
+            return;
+        }
+
+        $mib = static fn (int $bytes): string => number_format($bytes / 1048576, 0).' MiB';
+        Assert::fail(sprintf(
+            'ClickHouse is under memory pressure before the first test: MemoryTracking %s is %d%% of max_server_memory_usage %s '
+            .'(guard: %d%%). The clickhouse group would fail at random with code 241 MEMORY_LIMIT_EXCEEDED. '
+            .'Wait for background merges to settle, or check the small-host profile (docker/clickhouse/config.d/20-small-host.xml, '
+            .'CLICKHOUSE_MEM_LIMIT) and that no leftover system log tables exist: '
+            .'SELECT table, formatReadableSize(sum(bytes_on_disk)) FROM system.parts WHERE database = \'system\' AND active GROUP BY table.',
+            $mib($used),
+            (int) round($used / $cap * 100),
+            $mib($cap),
+            (int) (self::MEMORY_GUARD_RATIO * 100),
+        ));
     }
 
     private static function env(string $name): string
