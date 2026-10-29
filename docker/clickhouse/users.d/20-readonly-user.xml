@@ -4,8 +4,13 @@
         image entrypoint writes generated user files into /etc/clickhouse-server/users.d/).
 
         WHAT
-        `posthog_ro` may only SELECT from the VIEW `posthog.project_events_v` and has NO privilege on
-        `posthog.events` itself. The application's insight queries (ProjectScopedReader /
+        `posthog_ro` may only SELECT from two VIEWS, `posthog.project_events_v` (the events) and
+        `posthog.project_person_distinct_ids_v` (the distinct id -> person mapping, Milestone 4), and has NO
+        privilege on `posthog.events`, `posthog.person_distinct_ids` or `posthog.kafka_person_distinct_ids`
+        themselves. Everything below is written for the events view and holds for the person view in the same
+        way (same DEFINER, same SQL_project_id filter, same row policy, same lint and same honest list of what
+        only the lint closes: `SETTINGS SQL_project_id = <other id>` overrides the filter on either view).
+        The application's insight queries (ProjectScopedReader /
         ReadOnlyClickHouseClient) connect as this user, so a bug or a hostile query built there cannot
         write, alter, drop, read files or URLs, or look at other tables, and every read is limited to ONE
         project (see TENANT ISOLATION). The user name is fixed here (posthog_ro).
@@ -51,7 +56,7 @@
         (SQL cannot change an HTTP header; it also prunes and fails closed without the header). It needs
         header support in the client, so it is a possible follow-up, not part of this design.
 
-        DRIFT
+        DRIFT (person view: the same rule, see ScopedViewDriftCheck and 004_person_distinct_ids.sql)
         The view lists the columns of `events` explicitly (SELECT * would skip the MATERIALIZED ones). ALTER
         of events: ADD COLUMN leaves the view silently WITHOUT the new column, DROP/RENAME of a viewed column
         makes the view fail when read, a changed type stays stale in the view metadata. A migration that
@@ -60,12 +65,13 @@
         the real columns of posthog.events AND of the scoped view' fails loudly otherwise.
 
         WHY ONLY THE VIEW (least privilege)
-        The scoped reader's contract covers events only, through the view. `events_errors` holds the RAW
-        payloads of any project and has no project_id column; `kafka_events` is direct-select blocked
-        anyway; `schema_migrations` is needless. A table created later must NOT become readable
+        The scoped reader's contract covers events and the person mapping, each through its view.
+        `events_errors` holds the RAW payloads of any project (rejected events AND rejected person_distinct_ids
+        messages, told apart by its `topic` column) and has no project_id column; `kafka_events` and
+        `kafka_person_distinct_ids` are direct-select blocked anyway; `schema_migrations` is needless. A table created later must NOT become readable
         automatically, so the grant names the view instead of using posthog.*. Each new readable relation
-        is one more <query> line below (for example Milestone 4 will add one for `person_distinct_ids`) and
-        needs
+        is one more <query> line below (`project_person_distinct_ids_v` was added by Milestone 4, migration
+        004_person_distinct_ids.sql) and needs
             docker compose up -d - -force-recreate clickhouse
         (a new readable relation also needs its own DEFINER view or its own row policy `filter` under
         <databases>, otherwise it would be readable for every project).
@@ -246,12 +252,16 @@
             </networks>
             <grants>
                 <query>GRANT SELECT ON posthog.project_events_v</query>
+                <query>GRANT SELECT ON posthog.project_person_distinct_ids_v</query>
             </grants>
             <databases>
                 <posthog>
                     <project_events_v>
                         <filter>project_id = toUInt32(getSetting('SQL_project_id'))</filter>
                     </project_events_v>
+                    <project_person_distinct_ids_v>
+                        <filter>project_id = toUInt32(getSetting('SQL_project_id'))</filter>
+                    </project_person_distinct_ids_v>
                 </posthog>
             </databases>
         </posthog_ro>

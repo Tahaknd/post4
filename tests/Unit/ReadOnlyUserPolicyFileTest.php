@@ -2,6 +2,7 @@
 
 use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
+use App\Infrastructure\ClickHouse\ScopedRelations;
 use Tests\Support\MigrationColumns;
 
 /*
@@ -38,11 +39,22 @@ function grantedTables(SimpleXMLElement $xml): array
     return $tables;
 }
 
-it('grants posthog_ro exactly the scoped view and nothing on posthog.events', function () {
+it('grants posthog_ro exactly the two scoped views and nothing on any base table', function () {
     $tables = grantedTables(readOnlyUserXml());
 
-    expect($tables)->toBe([ProjectScopedReader::VIEW])
-        ->and($tables)->not->toContain('events');
+    expect($tables)->toBe([ProjectScopedReader::VIEW, ScopedRelations::PERSON_DISTINCT_IDS_VIEW])
+        ->and($tables)->not->toContain('events')
+        ->and($tables)->not->toContain('person_distinct_ids')
+        ->and($tables)->not->toContain('kafka_person_distinct_ids');
+});
+
+it('grants exactly the view of every registered relation, never its base table', function () {
+    $tables = grantedTables(readOnlyUserXml());
+
+    foreach (ScopedRelations::all() as $relation) {
+        expect($tables)->toContain($relation->view)->and($tables)->not->toContain($relation->table);
+    }
+    expect($tables)->toHaveCount(count(ScopedRelations::all()));
 });
 
 it('has a SQL_project_id row policy for every table posthog_ro may select from', function () {
