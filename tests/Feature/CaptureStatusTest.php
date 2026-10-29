@@ -4,9 +4,12 @@ use App\Console\Commands\CaptureStatus;
 use App\Domain\Capture\KafkaLagProbe;
 use App\Models\Project;
 use Carbon\CarbonImmutable;
+use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Tests\Support\ClickHouseStatusFake;
 use Tests\Support\FakeKafkaLagProbe;
 use Tests\Support\ProjectCache;
@@ -50,7 +53,7 @@ it('reports OK with exit code 0 for a healthy pipeline and queries every section
         ->toContain('pending mutations:   0')
         ->and($err)->toBe('')
         ->and(array_unique(ClickHouseStatusFake::$seenTags))->toEqualCanonicalizing(
-            ['events', 'errors_count', 'errors_top', 'consumers', 'too_many_parts', 'disks', 'parts', 'mutations'],
+            ['events', 'events_recent', 'errors_count', 'errors_top', 'consumers', 'too_many_parts', 'disks', 'parts', 'mutations'],
         );
 });
 
@@ -407,4 +410,131 @@ describe('dropped events', function () {
             ->and($out)->toContain('total:              unknown')
             ->and($err)->toContain('NOTE: dropped-event counters are unknown');
     });
+});
+
+describe('cheap queries', function () {
+    it('never scans posthog.events: totals come from system.parts, recency from system.part_log', function () {
+        $sql = [];
+        ClickHouseStatusFake::install();
+        Http::swap(new Factory);
+        Http::fake(function ($request) use (&$sql) {
+            $sql[] = $request->body();
+
+            return Http::response(json_encode(['meta' => [], 'data' => [], 'rows' => 0]));
+        });
+
+        runStatus();
+
+        expect($sql)->not->toBe([])
+            ->and(implode("\n", $sql))->not->toMatch('/FROM\s+posthog\.events\b(?!_)/i')
+            ->and(implode("\n", $sql))->toContain('FROM system.parts')->toContain('FROM system.part_log');
+    });
+
+    it('shows the last hour as unknown when system.part_log cannot be read, and still reports', function () {
+        $now = CarbonImmutable::now('UTC')->getTimestamp();
+        ClickHouseStatusFake::install(['events_recent' => fn () => Http::response('Code: 60. DB::Exception: Table system.part_log does not exist', 404)]);
+
+        [$code, $out] = runStatus(['--json' => true]);
+        $json = json_decode($out, true, flags: JSON_THROW_ON_ERROR);
+
+        expect($code)->toBe(0)
+            ->and($json['events']['last_hour'])->toBeNull()
+            ->and($json['events']['total'])->toBe(1500)
+            // falls back to the parts metadata for the newest timestamp
+            ->and($json['events']['newest_created_at'])->toBe(gmdate('Y-m-d\TH:i:s\Z', $now - 45));
+
+        expect(runStatus()[1])->toContain('created last hour:   unknown');
+    });
+
+    it('stops starting queries once the total time budget is used up and exits 2 with a clear message', function () {
+        config(['capture.status.total_time_budget_seconds' => 1]);
+        $calls = 0;
+        Http::swap(new Factory);
+        Http::fake(function () use (&$calls) {
+            $calls++;
+            usleep(1_100_000); // the first answer eats the whole budget
+
+            return Http::response(json_encode(['meta' => [], 'data' => [], 'rows' => 0]));
+        });
+
+        [$code, , $err] = runStatus();
+
+        expect($code)->toBe(2)
+            ->and($err)->toContain('time budget of 1 s')->toContain('before query')
+            ->and($calls)->toBeLessThan(4);
+    });
+
+    it('clamps every query max_execution_time to the remaining budget (never above 20 s)', function () {
+        $limits = [];
+        ClickHouseStatusFake::install();
+        Http::swap(new Factory);
+        Http::fake(function ($request) use (&$limits) {
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $q);
+            $limits[] = (int) ($q['max_execution_time'] ?? -1);
+
+            return Http::response(json_encode(['meta' => [], 'data' => [], 'rows' => 0]));
+        });
+
+        runStatus();
+
+        expect($limits)->not->toBe([])->and(max($limits))->toBeLessThanOrEqual(20)->and(min($limits))->toBeGreaterThanOrEqual(1);
+    });
+});
+
+describe('--log summary line', function () {
+    it('writes one info line with only status, lag_max_partition and disk_free_percent when OK', function () {
+        Log::spy();
+        $this->app->instance(KafkaLagProbe::class, new FakeKafkaLagProbe([0 => ['committed' => 5, 'high' => 7, 'lag' => 2], 1 => ['committed' => 1, 'high' => 10, 'lag' => 9]]));
+
+        [$code] = runStatus(['--log' => true]);
+
+        expect($code)->toBe(0);
+        Log::shouldHaveReceived('info')->once()->with('capture:status', ['status' => 'OK', 'lag_max_partition' => 9, 'disk_free_percent' => 50.0]);
+        Log::shouldNotHaveReceived('warning');
+        Log::shouldNotHaveReceived('error');
+    });
+
+    it('does not log without the flag', function () {
+        Log::spy();
+
+        runStatus();
+
+        Log::shouldNotHaveReceived('info');
+    });
+
+    it('logs a warning for WARN and an error for STALLED, with an unknown lag as null', function () {
+        Log::spy();
+        ClickHouseStatusFake::install(['errors_count' => [['c' => '3']], 'errors_top' => []]);
+        runStatus(['--log' => true]);
+        Log::shouldHaveReceived('warning')->once()->with('capture:status', ['status' => 'WARN', 'lag_max_partition' => 0, 'disk_free_percent' => 50.0]);
+
+        ClickHouseStatusFake::install(['consumers' => [ClickHouseStatusFake::consumer(commitAgo: 400, exceptions: [3 => WEDGE_MESSAGE])]]);
+        $this->app->instance(KafkaLagProbe::class, new FakeKafkaLagProbe(failWith: new RuntimeException('no brokers')));
+        runStatus(['--log' => true]);
+        Log::shouldHaveReceived('error')->once()->with('capture:status', ['status' => 'STALLED', 'lag_max_partition' => null, 'disk_free_percent' => 50.0]);
+    });
+
+    it('logs an error line without payload text when ClickHouse is unreachable', function () {
+        Log::spy();
+        ClickHouseStatusFake::down();
+
+        [$code] = runStatus(['--log' => true]);
+
+        expect($code)->toBe(2);
+        Log::shouldHaveReceived('error')->once()->with('capture:status', ['status' => 'ERROR', 'lag_max_partition' => null, 'disk_free_percent' => null]);
+    });
+});
+
+it('is scheduled every minute without overlapping, in the foreground, with --log', function () {
+    $events = collect(app(Schedule::class)->events())
+        ->filter(fn ($event) => str_contains($event->command, 'capture:status'));
+
+    expect($events)->toHaveCount(1);
+    $event = $events->first();
+
+    expect($event->command)->toEndWith('capture:status --log')
+        ->and($event->expression)->toBe('* * * * *')
+        ->and($event->withoutOverlapping)->toBeTrue()
+        ->and($event->expiresAt)->toBe(5)
+        ->and($event->runInBackground)->toBeFalse();
 });

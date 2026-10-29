@@ -76,7 +76,8 @@ final class ClickHouseStatusFake
         $now = CarbonImmutable::now('UTC')->getTimestamp();
 
         return [
-            'events' => [['now_ts' => $now, 'total' => '1500', 'last_hour' => '20', 'newest_ts' => $now - 30]],
+            'events' => [['now_ts' => $now, 'total' => '1500', 'newest_ts' => $now - 45]],
+            'events_recent' => [['last_hour' => '20', 'newest_ts' => $now - 30]],
             'errors_count' => [['c' => '0']],
             'errors_top' => [],
             'consumers' => [self::consumer()],

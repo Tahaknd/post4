@@ -107,6 +107,8 @@ return [
     'status' => [
         'kafka_group' => env('CAPTURE_STATUS_KAFKA_GROUP', 'clickhouse_events'),
         'kafka_timeout_ms' => 3000,
+        // All ClickHouse queries of one run together (each one is also capped at 20 s).
+        'total_time_budget_seconds' => 45,
         'min_free_percent' => (float) env('CAPTURE_STATUS_MIN_FREE_PERCENT', 10),
         'min_free_bytes' => (int) env('CAPTURE_STATUS_MIN_FREE_BYTES', 2 * 1024 ** 3),
         'snapshot_ttl_seconds' => 86400,

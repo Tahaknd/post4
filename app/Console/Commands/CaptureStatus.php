@@ -10,6 +10,7 @@ use App\Models\Project;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Symfony\Component\Console\Formatter\OutputFormatter;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -30,7 +31,12 @@ class CaptureStatus extends Command
     /** Query-level ceiling (seconds) so a sick ClickHouse cannot hang the command. */
     private const QUERY_TIME_LIMIT = 20;
 
-    protected $signature = 'capture:status {--json : Print ONE JSON object on stdout and nothing else}';
+    /** hrtime (seconds) after which no further ClickHouse query is started. */
+    private float $deadline = 0.0;
+
+    protected $signature = 'capture:status
+        {--json : Print ONE JSON object on stdout and nothing else}
+        {--log : Also write ONE summary line (status, max partition lag, disk free percent) to the application log; the schedule uses this}';
 
     protected $description = 'Shows ingest health (events, events_errors, Kafka consumer and lag, disk, parts). Exit codes: 0 OK, 1 WARN, 2 STALLED or ClickHouse unreachable';
 
@@ -38,7 +44,9 @@ class CaptureStatus extends Command
 Reports the health of HTTP -> Kafka -> ClickHouse ingestion with the ADMIN ClickHouse client (the
 read-only user cannot see system.* or events_errors).
 
-Sections: events, events_errors (last hour), the Kafka consumer (system.kafka_consumers), Kafka lag of
+Sections: events (approximate: row counts come from system.parts, so they include duplicates and rows
+removed by a lightweight DELETE until the next merge; the last-hour figure and the newest timestamp from
+system.part_log; none of them scans posthog.events), events_errors (last hour), the Kafka consumer (system.kafka_consumers), Kafka lag of
 group clickhouse_events (best effort), TOO_MANY_PARTS, disk, active parts, pending mutations, events
 dropped by the normaliser per project (last hour), and a comparison with the previous run (the
 snapshot is kept in the cache under capture-status:last).
@@ -52,11 +60,19 @@ STALLED prints one line `INGEST STALLED: <reasons>` to stderr. Whenever the Kafk
 the same error and stops committing, see the header of docker/clickhouse/users.d/10-ingest-settings.xml.
 
 --json prints exactly one JSON object on stdout (status, exit_code, reasons and one key per section);
-warnings, notes and errors go to stderr.
+warnings, notes and errors go to stderr. When ClickHouse cannot be queried the JSON object has exactly the
+three keys status ("ERROR"), exit_code (2) and reasons (one message).
+
+--log additionally writes one line to the application log (message "capture:status", fields status,
+lag_max_partition, disk_free_percent): info when OK, warning on WARN, error on STALLED or ERROR. The
+scheduler runs `capture:status --log` every minute, so `docker compose logs scheduler worker app` shows a
+trend and an ingest stall without anybody running the command.
 HELP;
 
     public function handle(ClickHouseClient $clickhouse, KafkaLagProbe $probe): int
     {
+        $this->deadline = hrtime(true) / 1e9 + $this->budgetSeconds();
+
         try {
             $data = $this->queryClickHouse($clickhouse);
         } catch (\Throwable $e) {
@@ -83,6 +99,10 @@ HELP;
 
         $report = $this->report($data, $lag, $dropped, $previous, $now, $health, $exit);
 
+        if ($this->option('log')) {
+            $this->logSummary($report);
+        }
+
         if ($this->option('json')) {
             $this->writeRaw(json_encode($report, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR));
         } else {
@@ -101,6 +121,12 @@ HELP;
         return $exit;
     }
 
+    /** Ceiling (seconds) for ALL ClickHouse queries of one run together; the schedule runs the command every minute. */
+    private function budgetSeconds(): int
+    {
+        return max(1, (int) config('capture.status.total_time_budget_seconds'));
+    }
+
     /**
      * Everything ClickHouse knows. Any failure here aborts the command (see clickHouseFailed()).
      *
@@ -108,9 +134,27 @@ HELP;
      */
     private function queryClickHouse(ClickHouseClient $ch): array
     {
-        $q = fn (string $tag, string $sql): array => $ch->select("/* capture:status {$tag} */ {$sql}", settings: ['max_execution_time' => self::QUERY_TIME_LIMIT]);
+        $q = function (string $tag, string $sql) use ($ch): array {
+            $left = (int) floor($this->deadline - hrtime(true) / 1e9);
+            if ($left < 1) {
+                throw new \RuntimeException("the time budget of {$this->budgetSeconds()} s for all queries is used up (before query {$tag})");
+            }
 
-        $events = $q('events', 'SELECT toUnixTimestamp(now()) AS now_ts, count() AS total, countIf(created_at > now() - INTERVAL 1 HOUR) AS last_hour, toUnixTimestamp(max(created_at)) AS newest_ts FROM posthog.events')[0] ?? [];
+            return $ch->select("/* capture:status {$tag} */ {$sql}", settings: ['max_execution_time' => min(self::QUERY_TIME_LIMIT, $left)]);
+        };
+
+        // Cheap by construction: never a scan of posthog.events (it grows without bound and the schedule runs
+        // this every minute). Row totals come from the parts metadata, the last-hour figure and the newest
+        // insert time from system.part_log (NewPart events, 7 days of history, small); all three are
+        // approximations (see the command help).
+        $events = $q('events', "SELECT toUnixTimestamp(now()) AS now_ts, sum(rows) AS total, toUnixTimestamp(max(modification_time)) AS newest_ts FROM system.parts WHERE database = 'posthog' AND `table` = 'events' AND active")[0] ?? [];
+        try {
+            $recent = $q('events_recent', "SELECT sumIf(rows, event_time > now() - INTERVAL 1 HOUR) AS last_hour, toUnixTimestamp(max(event_time)) AS newest_ts FROM system.part_log WHERE database = 'posthog' AND `table` = 'events' AND event_type = 'NewPart' AND event_date >= toDate(now() - INTERVAL 7 DAY)")[0] ?? null;
+        } catch (\Throwable) {
+            // part_log is optional (a log table can be disabled): the last-hour figure is then unknown, the
+            // newest timestamp falls back to the parts metadata. A really sick ClickHouse fails the next query.
+            $recent = null;
+        }
         $errorsCount = $q('errors_count', 'SELECT count() AS c FROM posthog.events_errors WHERE received_at > now() - INTERVAL 1 HOUR')[0] ?? [];
         $errorsTop = $q('errors_top', 'SELECT left(error, 80) AS err, count() AS c, toUnixTimestamp(max(received_at)) AS newest_ts FROM posthog.events_errors WHERE received_at > now() - INTERVAL 1 HOUR GROUP BY err ORDER BY c DESC, newest_ts DESC LIMIT 5');
         $consumers = $q('consumers', "SELECT toUnixTimestamp(last_commit_time) AS last_commit_ts, toUnixTimestamp(last_poll_time) AS last_poll_ts, arrayMap(t -> toUnixTimestamp(t), `exceptions.time`) AS exception_times, `exceptions.text` AS exception_texts, `assignments.current_offset` AS offsets FROM system.kafka_consumers WHERE database = 'posthog' AND `table` = 'kafka_events'");
@@ -124,8 +168,8 @@ HELP;
         return [
             'now_ts' => $nowTs,
             'events_total' => (int) ($events['total'] ?? 0),
-            'events_last_hour' => (int) ($events['last_hour'] ?? 0),
-            'events_newest_ts' => $this->ts($events['newest_ts'] ?? null),
+            'events_last_hour' => $recent === null ? null : (int) ($recent['last_hour'] ?? 0),
+            'events_newest_ts' => $this->ts($recent['newest_ts'] ?? null) ?? $this->ts($events['newest_ts'] ?? null),
             'errors_last_hour' => (int) ($errorsCount['c'] ?? 0),
             'errors_top' => array_map(fn (array $r): array => [
                 'error' => $this->oneLine((string) $r['err']),
@@ -424,7 +468,7 @@ HELP;
         $this->newLine();
         $this->line('Events (posthog.events)');
         $this->line('  total rows:          '.number_format($e['total']));
-        $this->line('  created last hour:   '.number_format($e['last_hour']));
+        $this->line('  created last hour:   '.($e['last_hour'] === null ? 'unknown' : number_format($e['last_hour'])));
         $this->line('  newest created_at:   '.$this->when($e['newest_created_at'], $e['newest_created_age_seconds']));
 
         $this->newLine();
@@ -480,10 +524,43 @@ HELP;
         $this->line('  pending mutations:   '.$ch['pending_mutations']);
     }
 
+    /**
+     * The one-line scheduler log entry: fields only, nothing from the payload (no messages, no hosts, no keys).
+     *
+     * @param  array<string, mixed>  $report
+     */
+    private function logSummary(array $report): void
+    {
+        $lags = array_column((array) $report['kafka_lag']['partitions'], 'lag');
+        $context = [
+            'status' => $report['status'],
+            'lag_max_partition' => $report['kafka_lag']['known'] ? ($lags === [] ? 0 : max($lags)) : null,
+            'disk_free_percent' => $report['clickhouse']['disk']['free_percent'] ?? null,
+        ];
+
+        try {
+            match ($report['status']) {
+                IngestHealth::STATUS_OK => Log::info('capture:status', $context),
+                IngestHealth::STATUS_WARN => Log::warning('capture:status', $context),
+                default => Log::error('capture:status', $context),
+            };
+        } catch (\Throwable) {
+            // a broken log channel must not change the exit code
+        }
+    }
+
     private function clickHouseFailed(\Throwable $e): int
     {
         $message = 'Cannot query ClickHouse ('.class_basename($e).'): '.Str::limit($this->oneLine($e->getMessage()), 300);
         $this->getOutput()->getErrorStyle()->writeln('<fg=red>ERROR: '.OutputFormatter::escape($message).'</>');
+
+        if ($this->option('log')) {
+            try {
+                Log::error('capture:status', ['status' => 'ERROR', 'lag_max_partition' => null, 'disk_free_percent' => null]);
+            } catch (\Throwable) {
+                // see logSummary()
+            }
+        }
 
         if ($this->option('json')) {
             $this->writeRaw(json_encode(['status' => 'ERROR', 'exit_code' => self::ERROR, 'reasons' => [$message]], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE | JSON_THROW_ON_ERROR));
