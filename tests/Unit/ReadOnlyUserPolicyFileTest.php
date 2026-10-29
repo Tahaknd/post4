@@ -161,3 +161,28 @@ it('pins the result shape settings of the ro_insights profile and makes them con
     'query plan is not serialized' => ['serialize_query_plan', '0'],
     'new analyzer' => ['enable_analyzer', '1'],
 ]);
+
+it('pins the spill settings of the ro_insights profile, constant, and bounded in the numbers measured on 25.8', function (string $setting, string $value) {
+    $profile = readOnlyUserXml()->profiles->ro_insights;
+
+    expect((string) $profile->{$setting})->toBe($value)
+        ->and(isset($profile->constraints->{$setting}->const))->toBeTrue("{$setting} must have a <const/> constraint");
+})->with([
+    // 150 MB is empirical: lower values made the 6M event funnel fail again (see the profile comment), do not "tune" it
+    'external group by threshold' => ['max_bytes_before_external_group_by', '150000000'],
+    'ratio form stays off' => ['max_bytes_ratio_before_external_group_by', '0'],
+    'external sort stays off' => ['max_bytes_before_external_sort', '0'],
+    'ratio form of the sort stays off' => ['max_bytes_ratio_before_external_sort', '0'],
+    'temp data per query' => ['max_temporary_data_on_disk_size_for_query', '1073741824'],
+    'temp data per user' => ['max_temporary_data_on_disk_size_for_user', '2147483648'],
+    'free disk guard' => ['min_free_disk_space_for_temporary_data', '2000000000'],
+]);
+
+it('keeps the spill threshold below the memory cap and the disk caps finite', function () {
+    $profile = readOnlyUserXml()->profiles->ro_insights;
+
+    expect((int) $profile->max_bytes_before_external_group_by)->toBeGreaterThan(0)->toBeLessThan((int) $profile->max_memory_usage)
+        ->and((int) $profile->max_temporary_data_on_disk_size_for_query)->toBeGreaterThan(0)
+        ->and((int) $profile->max_temporary_data_on_disk_size_for_user)->toBeGreaterThanOrEqual((int) $profile->max_temporary_data_on_disk_size_for_query)
+        ->and((int) $profile->min_free_disk_space_for_temporary_data)->toBeGreaterThan(0);
+});
