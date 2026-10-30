@@ -40,7 +40,7 @@ const caption = computed(() => `People of each cohort who did the return event, 
 
         <div class="space-y-2">
             <RetentionTable :caption="caption" :result="result" />
-            <p class="text-sm text-muted">Every cell shows its own numbers: the count of people and their share of the cohort. A darker cell is a larger share. A hatched cell with a dash is a period that has not started yet.</p>
+            <p class="text-sm text-muted">Every cell shows its own numbers: the count of people and their share of the cohort. A darker cell is a larger share. A hatched cell with a dash is a period that has not started yet. The Average row pools the cohorts: everyone who came back over everyone in them, so a large cohort weighs more.</p>
         </div>
     </section>
 </template>

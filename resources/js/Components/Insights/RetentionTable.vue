@@ -42,7 +42,7 @@ const CELL = 'min-w-[4.75rem] border-b border-l border-line p-0 text-center alig
 </script>
 
 <template>
-    <div role="group" :aria-label="`${caption}, table`" tabindex="0" class="relative max-h-[36rem] overflow-auto rounded-md border border-line">
+    <div role="group" :aria-label="`${caption}, table`" tabindex="0" class="relative max-h-[36rem] overflow-auto rounded-md border border-line bg-surface">
         <table class="w-max min-w-full border-collapse text-sm" data-testid="retention-table">
             <caption class="px-3 py-2 text-left text-muted">{{ caption }}</caption>
             <thead class="sticky top-0 z-20 bg-surface">
