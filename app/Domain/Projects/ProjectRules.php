@@ -22,7 +22,7 @@ final class ProjectRules
      * name look like another or like nothing; this also rejects emoji ZWJ sequences, a deliberate trade for a
      * simple rule) and the line and paragraph separators U+2028 / U+2029.
      */
-    private const string FORBIDDEN_CHARACTERS = '/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u';
+    public const string FORBIDDEN_CHARACTERS = '/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u';
 
     /**
      * A name as it is stored and compared: whitespace and every Unicode space separator (NBSP, U+2000-200A, U+3000 ...)
