@@ -6,6 +6,7 @@ import PrimaryButton from '@/Components/PrimaryButton.vue';
 import SelectField from '@/Components/SelectField.vue';
 import TextField from '@/Components/TextField.vue';
 import { useFormFocus } from '@/composables/useFormFocus';
+import { groupTimezones } from '@/lib/timezoneGroups';
 
 // `timezones` is the flat list of IANA identifiers the server accepts; it is grouped by region for a native
 // <select> (keyboard type-ahead works, and it needs no script to be accessible).
@@ -19,21 +20,7 @@ const props = defineProps({
 const form = useForm({ name: '', timezone: props.default_timezone });
 const { formRef, alertRef } = useFormFocus(form);
 
-const groups = computed(() => {
-    const byRegion = new Map();
-
-    for (const zone of props.timezones) {
-        const region = zone.includes('/') ? zone.split('/')[0] : 'Other';
-
-        if (!byRegion.has(region)) {
-            byRegion.set(region, []);
-        }
-
-        byRegion.get(region).push(zone);
-    }
-
-    return [...byRegion].map(([label, options]) => ({ label, options }));
-});
+const groups = computed(() => groupTimezones(props.timezones));
 
 function submit() {
     if (form.processing) {
