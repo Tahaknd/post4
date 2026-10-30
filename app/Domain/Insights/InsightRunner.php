@@ -40,6 +40,8 @@ final class InsightRunner
 {
     private const KEY_PREFIX = 'insights:';
 
+    private const DASHBOARD_KEY_PREFIX = 'insights:dash:';
+
     /** Unix time of the last "cache unavailable" warning (per process). */
     private static int $lastCacheWarningAt = 0;
 
@@ -116,6 +118,51 @@ final class InsightRunner
         }
 
         return $this->cacheGet(self::cacheKey($projectId, $query), $query->type(), $down);
+    }
+
+    /**
+     * The result in the DASHBOARD cache, or null. It lives apart from the interactive cache (own key, own TTL
+     * `dashboards.refresh.result_ttl_seconds`, tens of minutes against the interactive 60 s) and carries the time it was
+     * computed, because the reader (a dashboard tile) is shown data of that age and must be able to say so. Written by
+     * saved-insight runs and the scheduled refresh only; fail-open like cached().
+     */
+    public function cachedForDashboard(int $projectId, InsightQuery $query): ?DashboardResult
+    {
+        if ((int) config('dashboards.refresh.result_ttl_seconds') <= 0) {
+            return null;
+        }
+
+        try {
+            $stored = $this->store()->get(self::dashboardKey($projectId, $query));
+            $result = is_array($stored) && is_int($stored['at'] ?? null) ? InsightTypes::result($query->type())::fromArray($stored['result'] ?? null) : null;
+
+            return $result === null ? null : new DashboardResult($result, $stored['at']);
+        } catch (Throwable $e) {
+            $this->warnCache($e);
+
+            return null;
+        }
+    }
+
+    /** Stores a successful result in the dashboard cache (see cachedForDashboard()); never throws. */
+    public function rememberForDashboard(int $projectId, InsightQuery $query, InsightResult $result): void
+    {
+        $ttl = (int) config('dashboards.refresh.result_ttl_seconds');
+        if ($ttl <= 0) {
+            return;
+        }
+
+        try {
+            $this->store()->put(self::dashboardKey($projectId, $query), ['at' => now()->getTimestamp(), 'result' => $result->toArray()], $ttl);
+        } catch (Throwable $e) {
+            $this->warnCache($e);
+        }
+    }
+
+    /** `insights:dash:{type}:{project}:{hash}`. */
+    public static function dashboardKey(int $projectId, InsightQuery $query): string
+    {
+        return self::DASHBOARD_KEY_PREFIX.$query->type().':'.$projectId.':'.$query->hash();
     }
 
     /** `insights:{type}:{project}:{hash}`: the type keeps two kinds of definition apart even if two hashes ever met. */

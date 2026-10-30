@@ -330,7 +330,7 @@ it('is configured for the insights queue with explicit tries and timeout and ari
         ->and($job)->not->toBeInstanceOf(ShouldBeUnique::class);
     expect(fn () => new RunTrendsInsight(0, $runId, [], 1))->toThrow(InvalidArgumentException::class)
         ->and(fn () => new RunTrendsInsight(1, 'not-an-id', [], 1))->toThrow(InvalidArgumentException::class)
-        ->and(fn () => new RunTrendsInsight(1, $runId, [], 0))->toThrow(InvalidArgumentException::class);
+        ->and(fn () => new RunTrendsInsight(1, $runId, [], -1))->toThrow(InvalidArgumentException::class);
 });
 
 it('carries only ids, slot indexes and the canonical array: no object, no key', function () {

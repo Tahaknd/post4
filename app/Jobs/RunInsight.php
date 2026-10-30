@@ -10,6 +10,7 @@ use App\Domain\Insights\InsightTypes;
 use App\Domain\Insights\Query\InvalidInsightQuery;
 use App\Domain\Insights\Runs\InsightGate;
 use App\Domain\Insights\Runs\InsightRunStore;
+use App\Domain\Insights\Runs\StartOptions;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
 use App\Models\Project;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -91,6 +92,12 @@ abstract class RunInsight implements ShouldQueue
 
     public bool $failOnTimeout = true;
 
+    /**
+     * Also store the result in the dashboard result cache (saved-insight runs and the scheduled refresh). A plain property
+     * with a default, not a constructor parameter: a job queued before it existed unserialises with `false`.
+     */
+    public bool $forDashboard = false;
+
     private ?string $hash = null;
 
     /** @param  array<array-key, mixed>  $canonical  InsightQuery::canonical() of this job's type */
@@ -102,8 +109,9 @@ abstract class RunInsight implements ShouldQueue
         public readonly ?int $projectSlot = null,
         public readonly ?int $userSlot = null,
     ) {
-        if ($projectId < 1 || $userId < 1 || ! InsightRunStore::isValidId($runId)) {
-            throw new InvalidArgumentException('An insight run needs positive project and user ids and a valid run id.');
+        // User 0 is the scheduler (InsightRunStarter::SYSTEM_USER_ID): runs nobody asked for in a request.
+        if ($projectId < 1 || $userId < 0 || ! InsightRunStore::isValidId($runId)) {
+            throw new InvalidArgumentException('An insight run needs a positive project id, a user id of 0 (the scheduler) or more, and a valid run id.');
         }
 
         $this->onQueue(self::QUEUE);
@@ -112,15 +120,26 @@ abstract class RunInsight implements ShouldQueue
     /**
      * Queues the run of `$query` on the job class of its type. The payload is ids, slots and the canonical array only.
      */
-    public static function dispatchFor(InsightQuery $query, int $projectId, string $runId, int $userId, ?int $projectSlot, ?int $userSlot): void
+    public static function dispatchFor(InsightQuery $query, int $projectId, string $runId, int $userId, ?int $projectSlot, ?int $userSlot, ?StartOptions $options = null): void
     {
-        $job = match ($query->type()) {
+        $options ??= new StartOptions;
+        $class = match ($query->type()) {
             InsightTypes::TRENDS => RunTrendsInsight::class,
             InsightTypes::FUNNEL => RunFunnelInsight::class,
             InsightTypes::RETENTION => RunRetentionInsight::class,
             default => throw new InvalidArgumentException("No job for insight type '{$query->type()}'"),
         };
-        $job::dispatch($projectId, $runId, $query->canonical(), $userId, $projectSlot, $userSlot);
+
+        $job = new $class($projectId, $runId, $query->canonical(), $userId, $projectSlot, $userSlot);
+        $job->forDashboard = $options->forDashboard;
+        if ($options->queue !== self::QUEUE) {
+            $job->onQueue($options->queue);
+        }
+        if ($options->delaySeconds > 0) {
+            $job->delay($options->delaySeconds);
+        }
+
+        dispatch($job);
     }
 
     /** The registered type this job class runs ({@see InsightTypes}); decides the query class, builder, cache and lock keys. */
@@ -251,7 +270,7 @@ abstract class RunInsight implements ShouldQueue
             }
 
             // Outside the try: a failing run store is an infrastructure problem and propagates (fails the job once).
-            $this->done($runs, $gate, $result, 'query', $started);
+            $this->done($runner, $runs, $gate, $query, $result, 'query', $started);
         } finally {
             $permit?->release();
             $flight->release();
@@ -278,7 +297,7 @@ abstract class RunInsight implements ShouldQueue
     private function finishFromShared(InsightRunner $runner, InsightRunStore $runs, InsightGate $gate, InsightQuery $query, float $started, string $source = 'cache'): bool
     {
         if (($cached = $runner->cached($this->projectId, $query)) !== null) {
-            $this->done($runs, $gate, $cached, $source, $started);
+            $this->done($runner, $runs, $gate, $query, $cached, $source, $started);
 
             return true;
         }
@@ -292,9 +311,13 @@ abstract class RunInsight implements ShouldQueue
         return false;
     }
 
-    private function done(InsightRunStore $runs, InsightGate $gate, InsightResult $result, string $source, float $started): void
+    private function done(InsightRunner $runner, InsightRunStore $runs, InsightGate $gate, InsightQuery $query, InsightResult $result, string $source, float $started): void
     {
         $runs->markDone($this->runId, $result->toArray());
+        if ($this->forDashboard) {
+            // Fail-open and never throws: the run itself is done whatever the dashboard cache does.
+            $runner->rememberForDashboard($this->projectId, $query, $result);
+        }
         $this->releaseAll($gate);
         Log::info('insight run done', [
             'project_id' => $this->projectId,

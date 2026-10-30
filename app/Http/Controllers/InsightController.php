@@ -3,16 +3,16 @@
 namespace App\Http\Controllers;
 
 use App\Domain\Insights\InsightQuery;
-use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
+use App\Domain\Insights\Runs\InsightRunStarter;
 use App\Domain\Insights\Runs\InsightRunStore;
 use App\Http\ApiErrors;
 use App\Http\InsightErrorResponse;
 use App\Http\Requests\Insights\FunnelInsightRequest;
 use App\Http\Requests\Insights\RetentionInsightRequest;
 use App\Http\Requests\Insights\TrendsInsightRequest;
+use App\Http\RunStartResponse;
 use App\Infrastructure\ClickHouse\ClickHouseErrorKind;
-use App\Jobs\RunInsight;
 use App\Models\Project;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
@@ -49,84 +49,28 @@ use Throwable;
  */
 class InsightController extends Controller
 {
-    public function trends(TrendsInsightRequest $request, Project $project, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
+    public function trends(TrendsInsightRequest $request, Project $project, InsightRunStarter $starter): JsonResponse
     {
-        return $this->start($request, $project, $request->definition(), $runner, $runs, $gate);
+        return $this->start($request, $project, $request->definition(), $starter);
     }
 
-    public function funnel(FunnelInsightRequest $request, Project $project, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
+    public function funnel(FunnelInsightRequest $request, Project $project, InsightRunStarter $starter): JsonResponse
     {
-        return $this->start($request, $project, $request->definition(), $runner, $runs, $gate);
+        return $this->start($request, $project, $request->definition(), $starter);
     }
 
-    public function retention(RetentionInsightRequest $request, Project $project, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
+    public function retention(RetentionInsightRequest $request, Project $project, InsightRunStarter $starter): JsonResponse
     {
-        return $this->start($request, $project, $request->definition(), $runner, $runs, $gate);
+        return $this->start($request, $project, $request->definition(), $starter);
     }
 
     /**
-     * The whole flow of starting a run, the same for every insight type: the definition is already validated and built
-     * by the type's request class. 200 with the cached result, else (limits permitting) 202 with a run id.
+     * Asking for a run is the same flow for every insight type and every caller ({@see InsightRunStarter}); this only
+     * turns its outcome into HTTP: 200 with the cached result, 202 with a run id, 429 busy, 503 unavailable.
      */
-    private function start(Request $request, Project $project, InsightQuery $query, InsightRunner $runner, InsightRunStore $runs, InsightGate $gate): JsonResponse
+    private function start(Request $request, Project $project, InsightQuery $query, InsightRunStarter $starter): JsonResponse
     {
-        $user = $this->user($request);
-        $hash = $query->hash();
-
-        // Identical definitions of the same local day share this entry (see TrendsInsightRequest on quantisation).
-        $cached = $runner->cached($project->id, $query);
-        if ($cached !== null) {
-            return response()->json(['status' => InsightRunStore::DONE, 'run_id' => null, 'result' => $cached->toArray()]);
-        }
-
-        $userId = (int) $user->getKey();
-        $runId = InsightRunStore::newId();
-        $projectSlot = null;
-        $userSlot = null;
-        $claimed = false;
-        $created = false;
-
-        try {
-            // Idempotent: a live run of this user for this definition is answered again, nothing new is queued.
-            $existing = $this->liveRun($runs, $gate, $project->id, $userId, $hash);
-            if ($existing !== null) {
-                return $this->queuedResponse($project->id, $existing);
-            }
-
-            $claimed = $gate->claimInflight($project->id, $userId, $hash, $runId);
-            if (! $claimed) {
-                // Lost a race with an identical request that is just being queued.
-                $winner = $gate->inflightRunId($project->id, $userId, $hash);
-
-                return $winner !== null ? $this->queuedResponse($project->id, $winner) : $this->busy('Too many insights of this project are running. Try again in a few seconds.');
-            }
-
-            $userSlot = $gate->acquireUserSlot($userId, $runId);
-            if ($userSlot === null) {
-                $this->discard($runs, $gate, $project->id, $userId, $runId, $hash, $projectSlot, $userSlot, created: false);
-
-                return $this->busy('You have too many insights running. Wait for one to finish, or cancel one, then try again.');
-            }
-
-            $projectSlot = $gate->acquireProjectSlot($project->id, $runId);
-            if ($projectSlot === null) {
-                $this->discard($runs, $gate, $project->id, $userId, $runId, $hash, $projectSlot, $userSlot, created: false);
-
-                return $this->busy('Too many insights of this project are running. Try again in a few seconds.');
-            }
-
-            $runs->create($runId, $query->type(), $project->id, $userId, $hash, $projectSlot, $userSlot);
-            $created = true;
-            RunInsight::dispatchFor($query, $project->id, $runId, $userId, $projectSlot, $userSlot);
-        } catch (Throwable $e) {
-            // Ids and the exception class only: the message of a Redis or queue failure is not for the log of every request.
-            Log::warning('insight run could not be queued', ['project_id' => $project->id, 'exception' => $e::class]);
-            $this->discard($runs, $gate, $project->id, $userId, $runId, $hash, $projectSlot, $userSlot, $created, $claimed);
-
-            return $this->unavailable();
-        }
-
-        return $this->queuedResponse($project->id, $runId);
+        return RunStartResponse::make($project->id, $starter->start($project->id, (int) $this->user($request)->getKey(), $query));
     }
 
     public function show(Request $request, Project $project, string $run, InsightRunStore $runs): JsonResponse
@@ -167,7 +111,7 @@ class InsightController extends Controller
         } catch (Throwable $e) {
             Log::warning('insight run could not be cancelled', ['project_id' => $project->id, 'exception' => $e::class]);
 
-            return $this->unavailable();
+            return RunStartResponse::unavailable();
         }
 
         return response()->noContent();
@@ -190,7 +134,7 @@ class InsightController extends Controller
         } catch (Throwable $e) {
             Log::warning('insight run could not be read', ['project_id' => $project->id, 'exception' => $e::class]);
 
-            return $this->unavailable();
+            return RunStartResponse::unavailable();
         }
 
         abort_if(
@@ -199,65 +143,6 @@ class InsightController extends Controller
         );
 
         return $record;
-    }
-
-    /** The id of a queued or running run this user already has for the definition, else null. */
-    private function liveRun(InsightRunStore $runs, InsightGate $gate, int $projectId, int $userId, string $hash): ?string
-    {
-        $existing = $gate->inflightRunId($projectId, $userId, $hash);
-        if ($existing === null) {
-            return null;
-        }
-
-        $record = $runs->find($existing);
-        if ($record !== null && $record['project_id'] === $projectId && $record['user_id'] === $userId
-            && in_array($record['status'], [InsightRunStore::QUEUED, InsightRunStore::RUNNING], true)) {
-            return $existing;
-        }
-
-        // A key that outlived its run (evicted record, finished without releasing): free it and carry on.
-        $gate->releaseInflight($projectId, $userId, $hash, $existing);
-
-        return null;
-    }
-
-    private function queuedResponse(int $projectId, string $runId): JsonResponse
-    {
-        $pollUrl = route('api.insights.runs.show', ['project' => $projectId, 'run' => $runId], absolute: false);
-
-        return response()
-            ->json(['status' => InsightRunStore::QUEUED, 'run_id' => $runId, 'poll_url' => $pollUrl], 202)
-            ->header('Location', $pollUrl)
-            ->header('Retry-After', (string) config('insights.poll_interval_seconds'));
-    }
-
-    private function busy(string $message): JsonResponse
-    {
-        return InsightErrorResponse::forKind(429, ClickHouseErrorKind::Busy, $message);
-    }
-
-    private function unavailable(): JsonResponse
-    {
-        return InsightErrorResponse::forKind(503, ClickHouseErrorKind::Unavailable, 'Insights are temporarily unavailable. Try again in a moment.');
-    }
-
-    /**
-     * Best effort: everything a half-queued run holds is released now, the TTLs clean up anything that fails.
-     * Nothing is touched that was never taken.
-     */
-    private function discard(InsightRunStore $runs, InsightGate $gate, int $projectId, int $userId, string $runId, string $hash, ?int $projectSlot, ?int $userSlot, bool $created, bool $claimed = true): void
-    {
-        if ($created) {
-            try {
-                $runs->forget($runId);
-            } catch (Throwable) {
-                // expires by itself
-            }
-        }
-        $gate->releaseSlots($projectId, $userId, $runId, $projectSlot, $userSlot);
-        if ($claimed) {
-            $gate->releaseInflight($projectId, $userId, $hash, $runId);
-        }
     }
 
     private function user(Request $request): User
