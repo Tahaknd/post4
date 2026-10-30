@@ -7,14 +7,17 @@ import FunnelChart from '@/Components/Insights/FunnelChart.vue';
 import FunnelSteps from '@/Components/Insights/FunnelSteps.vue';
 import OptionSelect from '@/Components/Insights/OptionSelect.vue';
 import RunControls from '@/Components/Insights/RunControls.vue';
+import SaveInsightControl from '@/Components/Insights/SaveInsightControl.vue';
 import RunResults from '@/Components/Insights/RunResults.vue';
 import WindowControl from '@/Components/Insights/WindowControl.vue';
 import { useEventNames } from '@/composables/useEventNames';
 import { useRunPage } from '@/composables/useRunPage';
+import { useSavedInsightLink } from '@/composables/useSavedInsightLink';
 import { useTouchedFields } from '@/composables/useTouchedFields';
 import { useUrlState } from '@/composables/useUrlState';
 import { decodeDefinition, defaultDefinition, encodeDefinition, formatDuration, mapServerErrors, stepEvent, toRequestBody, validateDefinition } from '@/lib/funnelDefinition';
 import { describeSummary, failureHelp, isEmptyFunnel, isFunnelResult } from '@/lib/funnelFormat';
+import { withoutSaved } from '@/lib/savedInsightLinks';
 
 // The Funnel page. Everything it needs to build a definition (allowed values, limits, defaults) and the API URLs come from
 // the server as props; there is no API key, the API is called with the session. The definition lives in one reactive object
@@ -35,10 +38,26 @@ const props = defineProps({
     defaults: { type: Object, required: true },
     limits: { type: Object, required: true },
     urls: { type: Object, required: true },
+    saving: { type: Object, required: true },
 });
 
-const fromLink = decodeDefinition(window.location.search, props);
+// `saved=<uuid>` is not part of the definition: it says the page edits that saved insight (see useSavedInsightLink).
+const fromLink = decodeDefinition(withoutSaved(window.location.search), props);
 const definition = reactive(fromLink ?? defaultDefinition(props));
+
+// A page opened with `saved` alone fills its form from the stored definition and runs it, like a complete link.
+const savedLink = useSavedInsightLink({
+    type: 'funnel',
+    base: props.saving.api.saved_insights,
+    ownDefinition: fromLink !== null,
+    hydrate: (query) => {
+        const next = decodeDefinition(`?${query}`, props);
+        if (next !== null) {
+            Object.assign(definition, next);
+            nextTick(() => valid.value && start());
+        }
+    },
+});
 
 // One list of suggestions for all the steps: one cache and one request budget.
 const names = useEventNames(props.urls.events, props.limits.max_search_length);
@@ -47,7 +66,7 @@ const validation = computed(() => validateDefinition(definition, props));
 const valid = computed(() => validation.value.ok);
 const body = computed(() => toRequestBody(definition, props));
 
-useUrlState(() => encodeDefinition(definition, props));
+useUrlState(() => savedLink.encode(encodeDefinition(definition, props)));
 
 const { touched, onFocusOut } = useTouchedFields();
 // The steps a refused Run has reported on. A step that is still EMPTY is unfinished, not wrong: leaving it says nothing (a
@@ -194,6 +213,8 @@ const windowHint = computed(() => `Time allowed from a person’s first step to 
 
             <RunControls ref="runButton" label="Run funnel" :busy="busy" :valid="valid" :attempted="attempted" :stage-text="stageText" hint="Fix the highlighted fields to run the funnel." @cancel="cancel" />
         </form>
+
+        <SaveInsightControl type="funnel" :query="() => body" :valid="valid" :saving="saving" :link="savedLink" @invalid="refuse" />
 
         <RunResults :view="view" :status="status" :busy="busy" :stale="stale" noun="funnel" :error="error" :help="help" :idle-copy="IDLE_COPY" :empty-copy="emptyCopy" @retry="start">
             <FunnelChart :result="shown.result" :stale="stale" />

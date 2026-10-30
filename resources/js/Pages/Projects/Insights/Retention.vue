@@ -8,14 +8,17 @@ import PeriodsControl from '@/Components/Insights/PeriodsControl.vue';
 import RetentionChart from '@/Components/Insights/RetentionChart.vue';
 import RetentionEvent from '@/Components/Insights/RetentionEvent.vue';
 import RunControls from '@/Components/Insights/RunControls.vue';
+import SaveInsightControl from '@/Components/Insights/SaveInsightControl.vue';
 import RunResults from '@/Components/Insights/RunResults.vue';
 import SelectField from '@/Components/SelectField.vue';
 import { useEventNames } from '@/composables/useEventNames';
 import { useRunPage } from '@/composables/useRunPage';
+import { useSavedInsightLink } from '@/composables/useSavedInsightLink';
 import { useTouchedFields } from '@/composables/useTouchedFields';
 import { useUrlState } from '@/composables/useUrlState';
 import { ROLES, conditionEvent, copyCondition, decodeDefinition, defaultDefinition, encodeDefinition, mapServerErrors, toRequestBody, validateDefinition } from '@/lib/retentionDefinition';
 import { describeSummary, failureHelp, isEmptyRetention, isRetentionResult, periodNoun, typeHelp } from '@/lib/retentionFormat';
+import { withoutSaved } from '@/lib/savedInsightLinks';
 import { groupTimezones } from '@/lib/timezoneGroups';
 
 // The Retention page. Everything it needs to build a definition (allowed values, limits, defaults) and the API URLs come from
@@ -37,10 +40,26 @@ const props = defineProps({
     defaults: { type: Object, required: true },
     limits: { type: Object, required: true },
     urls: { type: Object, required: true },
+    saving: { type: Object, required: true },
 });
 
-const fromLink = decodeDefinition(window.location.search, props);
+// `saved=<uuid>` is not part of the definition: it says the page edits that saved insight (see useSavedInsightLink).
+const fromLink = decodeDefinition(withoutSaved(window.location.search), props);
 const definition = reactive(fromLink ?? defaultDefinition(props));
+
+// A page opened with `saved` alone fills its form from the stored definition and runs it, like a complete link.
+const savedLink = useSavedInsightLink({
+    type: 'retention',
+    base: props.saving.api.saved_insights,
+    ownDefinition: fromLink !== null,
+    hydrate: (query) => {
+        const next = decodeDefinition(`?${query}`, props);
+        if (next !== null) {
+            Object.assign(definition, next);
+            nextTick(() => valid.value && start());
+        }
+    },
+});
 
 // One list of suggestions for both events: one cache and one request budget.
 const names = useEventNames(props.urls.events, props.limits.max_search_length);
@@ -49,7 +68,7 @@ const validation = computed(() => validateDefinition(definition, props));
 const valid = computed(() => validation.value.ok);
 const body = computed(() => toRequestBody(definition, props));
 
-useUrlState(() => encodeDefinition(definition, props));
+useUrlState(() => savedLink.encode(encodeDefinition(definition, props)));
 
 const { touched, onFocusOut } = useTouchedFields();
 // The events a refused Run has reported on. An event that is still EMPTY is unfinished, not wrong: leaving it says nothing (a
@@ -253,6 +272,8 @@ const sameId = useId();
 
             <RunControls ref="runButton" label="Run retention" :busy="busy" :valid="valid" :attempted="attempted" :stage-text="stageText" hint="Fix the highlighted fields to run retention." @cancel="cancel" />
         </form>
+
+        <SaveInsightControl type="retention" :query="() => body" :valid="valid" :saving="saving" :link="savedLink" @invalid="refuse" />
 
         <RunResults :view="view" :status="status" :busy="busy" :stale="stale" noun="retention table" :error="error" :help="help" :idle-copy="IDLE_COPY" :empty-copy="emptyCopy" @retry="start">
             <RetentionChart :result="shown.result" :stale="stale" />

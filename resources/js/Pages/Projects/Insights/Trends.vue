@@ -9,8 +9,10 @@ import FilterList from '@/Components/Insights/FilterList.vue';
 import IntervalSelect from '@/Components/Insights/IntervalSelect.vue';
 import MetricSelect from '@/Components/Insights/MetricSelect.vue';
 import ResultState from '@/Components/Insights/ResultState.vue';
+import SaveInsightControl from '@/Components/Insights/SaveInsightControl.vue';
 import TrendsChart from '@/Components/Insights/TrendsChart.vue';
 import { useInsightRun } from '@/composables/useInsightRun';
+import { useSavedInsightLink } from '@/composables/useSavedInsightLink';
 import { useTouchedFields } from '@/composables/useTouchedFields';
 import { useUrlState } from '@/composables/useUrlState';
 import {
@@ -22,6 +24,7 @@ import {
     toRequestBody,
     validateDefinition,
 } from '@/lib/trendsDefinition';
+import { withoutSaved } from '@/lib/savedInsightLinks';
 import { formatNumber, isEmptyResult, total } from '@/lib/trendsFormat';
 
 // The Trends page. Everything it needs to build a definition (allowed values, limits, defaults) and the API URLs come
@@ -39,9 +42,24 @@ const props = defineProps({
     defaults: { type: Object, required: true },
     limits: { type: Object, required: true },
     urls: { type: Object, required: true },
+    saving: { type: Object, required: true },
 });
 
-const definition = reactive(decodeDefinition(window.location.search, props) ?? defaultDefinition(props.defaults));
+// `saved=<uuid>` is not part of the definition: it says the page edits that saved insight (see useSavedInsightLink).
+const fromLink = decodeDefinition(withoutSaved(window.location.search), props);
+const definition = reactive(fromLink ?? defaultDefinition(props.defaults));
+
+const savedLink = useSavedInsightLink({
+    type: 'trends',
+    base: props.saving.api.saved_insights,
+    ownDefinition: fromLink !== null,
+    hydrate: (query) => {
+        const next = decodeDefinition(`?${query}`, props);
+        if (next !== null) {
+            Object.assign(definition, next);
+        }
+    },
+});
 
 const run = useInsightRun(props.urls.trends, props.urls.runs);
 
@@ -83,7 +101,7 @@ watch(
 );
 
 // ---------------------------------------------------------------- the query string follows the definition
-useUrlState(() => encodeDefinition(definition, props.defaults));
+useUrlState(() => savedLink.encode(encodeDefinition(definition, props.defaults)));
 
 // ---------------------------------------------------------------- when a field's message may appear
 const { touched, onFocusOut } = useTouchedFields();
@@ -233,6 +251,8 @@ function reload() {
 
             <p v-if="errors.general" role="alert" class="rounded-md border border-danger px-3 py-2 text-sm text-danger" data-testid="general-error">{{ errors.general }}</p>
         </form>
+
+        <SaveInsightControl type="trends" :query="() => body" :valid="runnable" :saving="saving" :link="savedLink" />
 
         <!-- Always in the DOM: a live region only announces text that is inserted into one that already exists. -->
         <div class="sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="status">{{ status }}</div>
