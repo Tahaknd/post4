@@ -228,7 +228,7 @@ defineExpose({ refresh: () => request(true), focusMove, focusTitle: () => root.v
             <Link v-if="openUrl && canRepair(insight) && !broken" :href="openUrl" :class="SmallButtonClass" :aria-label="`Open ${insight.name}`">Open</Link>
             <button ref="earlier" type="button" :class="SmallButtonClass" :aria-disabled="canEarlier ? undefined : 'true'" :aria-label="`Move earlier: ${insight.name}`" @click="canEarlier && emit('move', -1)">Move earlier</button>
             <button ref="later" type="button" :class="SmallButtonClass" :aria-disabled="canLater ? undefined : 'true'" :aria-label="`Move later: ${insight.name}`" @click="canLater && emit('move', 1)">Move later</button>
-            <button type="button" :class="SmallButtonClass" :aria-label="`Remove ${insight.name} from the dashboard`" @click="emit('remove')">Remove from dashboard</button>
+            <button type="button" :class="SmallButtonClass" :aria-label="`Remove from dashboard: ${insight.name}`" @click="emit('remove')">Remove from dashboard</button>
         </footer>
     </article>
 </template>
