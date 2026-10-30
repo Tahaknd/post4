@@ -11,6 +11,8 @@ import { describeFunnel, orderLabel, summaryItems } from '@/lib/funnelFormat';
 const props = defineProps({
     result: { type: Object, required: true },
     stale: { type: Boolean, default: false },
+    // A dashboard tile: the headline numbers and a shorter plot; the full table is on the Funnel page.
+    compact: { type: Boolean, default: false },
 });
 
 const id = useId();
@@ -21,7 +23,17 @@ const caption = computed(() => `People who reached each step, ${orderLabel(props
 </script>
 
 <template>
-    <section :aria-labelledby="`${id}-heading`" class="space-y-4" data-testid="funnel-result">
+    <section v-if="compact" class="space-y-3" data-testid="funnel-result">
+        <LazyChart kind="funnel" :steps="result.steps" :description="description" dense />
+        <dl class="grid grid-cols-2 gap-2" data-testid="funnel-summary">
+            <div v-for="item in items" :key="item.label" class="rounded-md border border-line bg-surface px-2.5 py-1.5">
+                <dt class="text-xs text-muted">{{ item.label }}</dt>
+                <dd class="font-semibold tabular-nums">{{ item.value }}</dd>
+            </div>
+        </dl>
+    </section>
+
+    <section v-else :aria-labelledby="`${id}-heading`" class="space-y-4" data-testid="funnel-result">
         <div class="space-y-2">
             <h2 :id="`${id}-heading`" class="text-lg font-semibold tracking-tight">Funnel result</h2>
             <dl class="grid grid-cols-2 gap-3 sm:grid-cols-4" data-testid="funnel-summary">

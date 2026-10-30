@@ -14,6 +14,8 @@ echarts.use([BarChart, GridComponent, TooltipComponent, AriaComponent]);
 const props = defineProps({
     steps: { type: Array, required: true },
     description: { type: String, required: true },
+    // A dashboard tile: a plot of a fixed, shorter height (the tile reserves the room).
+    dense: { type: Boolean, default: false },
 });
 
 const el = ref(null);
@@ -30,10 +32,10 @@ onMounted(() => {
 });
 onBeforeUnmount(() => narrow?.removeEventListener('change', setCompact));
 
-useEChart(el, ({ theme, reducedMotion }) => buildFunnelOption({ steps: props.steps, theme, reducedMotion, description: props.description, compact: compact.value }));
+useEChart(el, ({ theme, reducedMotion }) => buildFunnelOption({ steps: props.steps, theme, reducedMotion, description: props.description, compact: compact.value || props.dense }));
 
 // One row of 52 px per step, so the bars keep their size however many steps there are.
-const height = computed(() => `${props.steps.length * 52 + 24}px`);
+const height = computed(() => (props.dense ? '11rem' : `${props.steps.length * 52 + 24}px`));
 </script>
 
 <template>

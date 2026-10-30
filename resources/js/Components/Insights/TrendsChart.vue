@@ -16,6 +16,8 @@ const props = defineProps({
     // The result is out of date (a new one is loading, or the form is unfinished): only the PLOT is dimmed. Dimming text
     // would drop its contrast below what is readable.
     stale: { type: Boolean, default: false },
+    // A dashboard tile: the plot and the total only (no type switch, no table); the table is on the Trends page.
+    compact: { type: Boolean, default: false },
 });
 
 const id = useId();
@@ -39,7 +41,21 @@ const TYPES = [
 </script>
 
 <template>
-    <section :aria-labelledby="`${id}-heading`" class="space-y-4">
+    <section v-if="compact" class="space-y-3" data-testid="trends-result">
+        <LazyChart :labels="labels" :series="drawn" chart-type="line" :description="description" dense />
+        <dl class="grid grid-cols-2 gap-2">
+            <div class="rounded-md border border-line bg-surface px-2.5 py-1.5">
+                <dt class="text-xs text-muted">{{ unique ? 'Sum of the values' : 'Total' }}</dt>
+                <dd class="font-semibold tabular-nums" data-testid="chart-total">{{ formatNumber(grandTotal) }}</dd>
+            </div>
+            <div class="rounded-md border border-line bg-surface px-2.5 py-1.5">
+                <dt class="text-xs text-muted">Series</dt>
+                <dd class="font-semibold tabular-nums">{{ result.series.length }}</dd>
+            </div>
+        </dl>
+    </section>
+
+    <section v-else :aria-labelledby="`${id}-heading`" class="space-y-4">
         <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
                 <h2 :id="`${id}-heading`" class="text-lg font-semibold tracking-tight">{{ caption }}</h2>

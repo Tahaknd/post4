@@ -15,6 +15,8 @@ const props = defineProps({
     labels: { type: Array, required: true },
     points: { type: Array, required: true },
     description: { type: String, required: true },
+    // A dashboard tile: a shorter plot (the tile reserves the room).
+    dense: { type: Boolean, default: false },
 });
 
 const el = ref(null);
@@ -23,5 +25,5 @@ useEChart(el, ({ theme, reducedMotion }) => buildRetentionOption({ labels: props
 </script>
 
 <template>
-    <div ref="el" role="img" :aria-label="description" class="h-64 w-full sm:h-80" data-testid="chart" />
+    <div ref="el" role="img" :aria-label="description" :class="dense ? 'h-44 w-full' : 'h-64 w-full sm:h-80'" data-testid="chart" />
 </template>

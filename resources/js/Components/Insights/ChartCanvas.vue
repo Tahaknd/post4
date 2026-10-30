@@ -17,6 +17,8 @@ const props = defineProps({
     series: { type: Array, required: true },
     chartType: { type: String, required: true },
     description: { type: String, required: true },
+    // A dashboard tile: a shorter plot (the tile reserves the room).
+    dense: { type: Boolean, default: false },
 });
 
 const el = ref(null);
@@ -34,5 +36,5 @@ useEChart(el, ({ theme, reducedMotion }) =>
 </script>
 
 <template>
-    <div ref="el" role="img" :aria-label="description" class="h-72 w-full sm:h-96" data-testid="chart" />
+    <div ref="el" role="img" :aria-label="description" :class="dense ? 'h-44 w-full' : 'h-72 w-full sm:h-96'" data-testid="chart" />
 </template>
