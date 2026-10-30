@@ -107,5 +107,6 @@ async function update() {
         </div>
     </div>
 
-    <SaveInsightDialog :open="open" :type="type" :query="query" :saving="saving" :suggested-name="editing ? saved.name : ''" :title="editing ? 'Save as new insight' : 'Save insight'" @close="open = false" @saved="onSaved" />
+    <!-- Mounted only while it is open: a closed dialog is still in the DOM, and its labels would be found by anything that looks for a field on the page. -->
+    <SaveInsightDialog v-if="open" :open="open" :type="type" :query="query" :saving="saving" :suggested-name="editing ? saved.name : ''" :title="editing ? 'Save as new insight' : 'Save insight'" @close="open = false" @saved="onSaved" />
 </template>
