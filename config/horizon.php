@@ -102,6 +102,9 @@ return [
         'redis:default' => 60,
         // Insight runs normally start within a second; a minute in the queue means both workers are busy.
         'redis:insights' => 60,
+        // The scheduled dashboard refresh (config/dashboards.php) waits behind the interactive queue by design; a run
+        // that has not started after half an hour means the workers are saturated for good.
+        'redis:insights-refresh' => 1800,
         // A purge waits on a ClickHouse mutation and releases itself every 30 s, so a few minutes is normal.
         'redis:maintenance' => 600,
     ],
@@ -237,13 +240,17 @@ return [
         // slow chart never delays the default or maintenance work. EXACTLY two processes: the read-only ClickHouse
         // user is shared by every tenant and its profile allows max_concurrent_queries_for_user = 3, so 2 < 3
         // leaves one slot for the interactive event-name list of the UI (Task 3.7). Raising maxProcesses to 3 or
-        // more would make the third query fail with "busy" (kind 202). `balance` simple keeps both running.
+        // more would make the third query fail with "busy" (kind 202).
+        // Two queues in PRIORITY order (`balance` false: every process serves the queues in the order listed): `insights`
+        // is what a person waits for, `insights-refresh` is the scheduled dashboard refresh and only runs when no
+        // interactive job is waiting. It shares the two workers and the cap of one running query per project, so a
+        // refresh can delay a chart by at most the query that is already running, never by the queue behind it.
         // The job timeout (45 s) stays below the Redis queue's retry_after (90 s); the job's own $tries (it
         // releases itself while waiting) overrides the `tries` of the supervisor.
         'supervisor-insights' => [
             'connection' => 'redis',
-            'queue' => ['insights'],
-            'balance' => 'simple',
+            'queue' => ['insights', 'insights-refresh'],
+            'balance' => false,
             'maxProcesses' => 2,
             'minProcesses' => 2,
             'maxTime' => 3600,

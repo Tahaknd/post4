@@ -12,11 +12,14 @@ function supervisor(string $environment, string $name): array
 it('runs a supervisor for the insights queue in every environment with exactly two processes', function (string $environment) {
     $options = supervisor($environment, 'supervisor-insights');
 
-    expect($options['queue'])->toBe([RunTrendsInsight::QUEUE])->toBe(['insights'])
+    // interactive first, the scheduled dashboard refresh second: the order is the priority
+    expect($options['queue'])->toBe([RunTrendsInsight::QUEUE, 'insights-refresh'])->toBe(['insights', 'insights-refresh'])
+        ->and(config('dashboards.refresh.queue'))->toBe('insights-refresh')
         ->and($options['connection'])->toBe('redis')
         ->and($options['maxProcesses'])->toBe(2)
         ->and($options['minProcesses'])->toBe(2)
-        ->and($options['balance'])->toBe('simple')
+        // false = every process serves the queues in the order listed, so a refresh never waits ahead of a chart
+        ->and($options['balance'])->toBeFalse()
         // Two workers < max_concurrent_queries_for_user = 3, which every tenant shares.
         ->and($options['maxProcesses'])->toBeLessThan(3)
         ->and($options['tries'])->toBe(1)
@@ -40,12 +43,12 @@ it('gives every queue its own supervisor so the insights workers never serve oth
         }
     }
 
-    expect($queues)->toBe(['default' => ['supervisor-1'], 'maintenance' => ['supervisor-maintenance'], 'insights' => ['supervisor-insights']])
+    expect($queues)->toBe(['default' => ['supervisor-1'], 'maintenance' => ['supervisor-maintenance'], 'insights' => ['supervisor-insights'], 'insights-refresh' => ['supervisor-insights']])
         ->and(PurgeProjectEvents::QUEUE)->toBe('maintenance');
 });
 
 it('watches the insights queue for long waits', function () {
-    expect(config('horizon.waits'))->toHaveKey('redis:insights');
+    expect(config('horizon.waits'))->toHaveKey('redis:insights')->toHaveKey('redis:insights-refresh');
 });
 
 it('pins the insight capacity defaults that the worker arithmetic relies on', function () {
