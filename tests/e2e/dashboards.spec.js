@@ -46,7 +46,7 @@ const problems = [];
 // Set while a test provokes errors on purpose: those are not problems.
 let provoking = false;
 
-const ids = {};
+const ids = { bulk: [] };
 
 test.beforeAll(async ({ browser }) => {
     if (!email || !password) {
@@ -422,7 +422,7 @@ test('removes a tile without deleting its saved insight, and adds it again from 
     await page.goto(boardUrl());
     await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Entrants7');
 
-    await page.getByRole('button', { name: `Remove ${FUNNEL_NAME} from the dashboard` }).click();
+    await page.getByRole('button', { name: `Remove from dashboard: ${FUNNEL_NAME}` }).click();
     await expect.poll(titles).toEqual([TRENDS_NAME, RETENTION_NAME]);
     await expect(page.getByTestId('status')).toHaveText(`Removed ${FUNNEL_NAME} from the dashboard. The saved insight is kept.`);
     expect((await savedInsights()).some((item) => item.id === ids.funnel)).toBe(true);
@@ -506,6 +506,319 @@ test('a tile that needs review explains why, is never run, and is repaired from 
 
     await page.goto(boardUrl());
     await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Converted4');
+});
+
+
+test('opens a saved insight in its page with the form filled in, and Update saved insight replaces its definition', async () => {
+    // from the saved insight list: Open leads to the page with saved=<uuid> only, the page fills the form from the stored definition
+    await page.goto(`${base}/saved-insights`);
+    await page.getByRole('link', { name: `Open ${RETENTION_NAME}`, exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`${base}/insights/retention\\?.*saved=${ids.retention}`));
+    await expect(page.getByTestId('saved-editing')).toContainText(`Editing the saved insight “${RETENTION_NAME}”.`);
+    await expect(page.getByTestId('retention-summary')).toContainText('People in cohorts7');
+    await expect(page.getByRole('combobox', { name: 'Cohort event', exact: true })).toHaveValue(signup);
+    await expect(page.getByLabel('Number of periods')).toHaveValue('3');
+    // the address carries the definition in the page's own keys, and still the saved key
+    await expect(page).toHaveURL(new RegExp(`from=${day(-3)}&to=${day(-1)}|from=${day(-3)}.*to=${day(-1)}`));
+
+    // a trends insight keeps "Last 7 days" as a preset in the form
+    await page.goto(`${base}/insights/trends?saved=${ids.trends}`);
+    await expect(page.getByTestId('chart-total')).toContainText('8');
+    await expect(page.getByLabel('Date range')).toHaveValue('last_7_days');
+
+    // Update saved insight replaces the definition
+    await page.goto(`${base}/insights/retention?saved=${ids.retention}`);
+    await expect(page.getByTestId('retention-summary')).toContainText('People in cohorts7');
+    await page.getByLabel('Number of periods').fill('4');
+    await page.getByRole('button', { name: 'Update saved insight' }).click();
+    await expect(page.getByTestId('save-status')).toContainText(`Updated “${RETENTION_NAME}”.`);
+    const detail = (await api('GET', `/api/projects/${projectId}/saved-insights/${ids.retention}`)).json.data;
+    expect(detail.query.periods).toBe(4);
+    expect(detail.date.preset).toBeNull();
+
+    // Save as new insight: the dialog starts from the name of the saved one and makes another insight
+    await page.getByRole('button', { name: 'Save as new insight…' }).click();
+    await expect(dialog()).toHaveAccessibleName('Save as new insight');
+    await expect(dialog().getByLabel('Name')).toHaveValue(RETENTION_NAME);
+    await dialog().getByLabel('Name').fill(`${RETENTION_NAME} copy`);
+    await dialog().getByRole('button', { name: 'Save as new insight' }).click();
+    await expect(dialog()).toBeHidden();
+    await expect(page.getByTestId('saved-editing')).toContainText(`${RETENTION_NAME} copy`);
+    expect((await savedInsights()).filter((item) => item.name.startsWith(RETENTION_NAME))).toHaveLength(2);
+    const copy = (await savedInsights()).find((item) => item.name === `${RETENTION_NAME} copy`);
+    await api('DELETE', `/api/projects/${projectId}/saved-insights/${copy.id}`);
+
+    // a link to an insight that does not exist, or one of another type, is said so and does not break the page
+    await page.goto(`${base}/insights/funnel?saved=${ids.trends}`);
+    await expect(page.getByTestId('saved-note')).toContainText('of another type');
+    provoking = true; // the API answers that one with a 404, on purpose
+    try {
+        await page.goto(`${base}/insights/funnel?saved=0197a3b2-1c4d-7e5f-8a6b-7c8d9e0f1a2b`);
+        await expect(page.getByTestId('saved-note')).toContainText('no longer exists');
+    } finally {
+        provoking = false;
+    }
+});
+
+test('manages the saved insights: filter by type and text, rename, delete with a confirmation, and page through a long list', async () => {
+    await page.goto(`${base}/saved-insights`);
+    const rows = page.getByTestId('saved-insight-row');
+    await expect(rows).toHaveCount(3);
+    await expect(page.getByTestId('saved-insights-table').getByRole('columnheader')).toHaveText(['Name', 'Type', 'State', 'Updated', 'Created by', 'Actions']);
+
+    await page.getByLabel('Type').selectOption('funnel');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText(FUNNEL_NAME);
+    await page.getByLabel('Type').selectOption('');
+    await page.getByLabel('Search').fill('VISITORS');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText(RETENTION_NAME);
+    await page.getByLabel('Search').fill('no such insight');
+    await expect(page.getByTestId('state-no-match')).toBeVisible();
+    await page.getByLabel('Search').fill('');
+    await expect(rows).toHaveCount(3);
+
+    // rename: the dialog starts from the stored name; the description may be set
+    const renameButton = page.getByRole('button', { name: `Rename ${TRENDS_NAME}` });
+    await renameButton.click();
+    await expect(dialog()).toHaveAccessibleName('Rename saved insight');
+    await expect(dialog().getByLabel('Name')).toHaveValue(TRENDS_NAME);
+    await page.keyboard.press('Escape');
+    await expect(renameButton).toBeFocused();
+    await renameButton.click();
+    await dialog().getByLabel('Name').fill('');
+    await dialog().getByRole('button', { name: 'Save' }).click();
+    await expect(dialog().getByText('Enter a name.')).toBeVisible();
+    await dialog().getByLabel('Name').fill('Signups, last 7 days');
+    await dialog().getByLabel('Description').fill('Renamed in a test');
+    await dialog().getByRole('button', { name: 'Save' }).click();
+    await expect(dialog()).toBeHidden();
+    await expect(page.getByTestId('status')).toHaveText('Renamed the saved insight to Signups, last 7 days.');
+    await expect(rows.filter({ hasText: 'Signups, last 7 days' })).toContainText('Renamed in a test');
+    expect((await api('GET', `/api/projects/${projectId}/saved-insights/${ids.trends}`)).json.data.name).toBe('Signups, last 7 days');
+
+    // delete: Cancel is focused first, Escape leaves it, the confirm deletes
+    const made = (await api('POST', `/api/projects/${projectId}/saved-insights`, { name: 'Throwaway', type: 'trends', query: { events: [signup], date_preset: 'last_7_days' } })).json.data;
+    await page.reload();
+    await page.getByRole('button', { name: 'Delete Throwaway' }).click();
+    await expect(dialog()).toHaveAccessibleName('Delete this saved insight?');
+    await expect(dialog().getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(dialog()).toBeHidden();
+    await expect(rows.filter({ hasText: 'Throwaway' })).toHaveCount(1);
+    await page.getByRole('button', { name: 'Delete Throwaway' }).click();
+    await dialog().getByRole('button', { name: 'Delete saved insight' }).click();
+    await expect(dialog()).toBeHidden();
+    await expect(rows.filter({ hasText: 'Throwaway' })).toHaveCount(0);
+    await expect(page.getByTestId('status')).toHaveText('Deleted the saved insight Throwaway.');
+    expect((await api('GET', `/api/projects/${projectId}/saved-insights/${made.id}`)).status).toBe(404);
+
+    // twenty-one more make a second page (20 a page)
+    for (let n = 1; n <= 21; n++) {
+        const made = await api('POST', `/api/projects/${projectId}/saved-insights`, { name: `Bulk ${String(n).padStart(2, '0')}`, type: 'trends', query: { events: [signup], date_preset: 'last_7_days', filters: [{ key: 'plan', operator: 'equals', value: `v${n}` }] } });
+        ids.bulk.push(made.json.data.id);
+    }
+    await page.reload();
+    await expect(rows).toHaveCount(20);
+    await expect(page.getByTestId('pager-text')).toHaveText('Showing 1 to 20 of 24');
+    await page.getByRole('button', { name: 'Next' }).click();
+    await expect(rows).toHaveCount(4);
+    await expect(page.getByTestId('pager-text')).toHaveText('Showing 21 to 24 of 24');
+    await expect(page.getByRole('button', { name: 'Next' })).toHaveAttribute('aria-disabled', 'true');
+    await page.getByRole('button', { name: 'Previous' }).click();
+    await expect(rows).toHaveCount(20);
+});
+
+test('dashboards: create from the list, rename, delete with a confirmation, rename and delete from the dashboard itself', async () => {
+    await page.goto(`${base}/dashboards`);
+    const createButton = page.getByRole('button', { name: 'New dashboard' });
+    await createButton.click();
+    await expect(dialog()).toHaveAccessibleName('New dashboard');
+    await expect(dialog().getByLabel('Name')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(createButton).toBeFocused();
+    await createButton.click();
+    await dialog().getByRole('button', { name: 'Create dashboard' }).click();
+    await expect(dialog().getByText('Enter a name.')).toBeVisible();
+    await dialog().getByLabel('Name').fill('Scratch board');
+    await dialog().getByLabel('Description').fill('To be deleted');
+    await dialog().getByRole('button', { name: 'Create dashboard' }).click();
+    // creating opens it: an empty dashboard says what to do
+    await expect(page.getByRole('heading', { name: 'Scratch board', level: 1 })).toBeVisible();
+    await expect(page.getByTestId('state-empty')).toContainText('This dashboard has no tiles yet');
+    await expect(page.getByTestId('dashboard-description')).toHaveText('To be deleted');
+
+    // rename it from its page
+    await page.getByRole('button', { name: 'Rename', exact: true }).click();
+    await expect(dialog().getByLabel('Name')).toHaveValue('Scratch board');
+    await dialog().getByLabel('Name').fill('Scratch board 2');
+    await dialog().getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByRole('heading', { name: 'Scratch board 2', level: 1 })).toBeVisible();
+    await expect(page).toHaveTitle(/Scratch board 2/);
+
+    // delete it from the list, with the confirmation
+    await page.goto(`${base}/dashboards`);
+    const cards = page.getByTestId('dashboard-card');
+    // the board and the one just created
+    await expect(cards).toHaveCount(2);
+    await page.getByRole('button', { name: 'Rename Scratch board 2' }).click();
+    await dialog().getByLabel('Name').fill('Scratch board 3');
+    await dialog().getByRole('button', { name: 'Save' }).click();
+    await expect(cards.filter({ hasText: 'Scratch board 3' })).toHaveCount(1);
+    await page.getByRole('button', { name: 'Delete Scratch board 3' }).click();
+    await expect(dialog()).toHaveAccessibleName('Delete this dashboard?');
+    await expect(dialog().getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(cards.filter({ hasText: 'Scratch board 3' })).toHaveCount(1);
+    await page.getByRole('button', { name: 'Delete Scratch board 3' }).click();
+    await dialog().getByRole('button', { name: 'Delete dashboard' }).click();
+    await expect(cards.filter({ hasText: 'Scratch board 3' })).toHaveCount(0);
+    await expect(page.getByTestId('status')).toHaveText('Deleted the dashboard Scratch board 3.');
+
+    // the saved insights of a deleted dashboard stay; a deleted saved insight leaves its tiles
+    expect((await savedInsights()).length).toBeGreaterThanOrEqual(24);
+});
+
+test('has no serious accessibility violations in the light and the dark scheme, with dialogs open', async () => {
+    for (const scheme of ['light', 'dark']) {
+        await page.emulateMedia({ colorScheme: scheme });
+
+        await page.goto(boardUrl());
+        await expect(summary(RETENTION_NAME, 'retention-summary')).toContainText('Cohorts3');
+        await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Entrants7');
+        await expect(summary('Signups, last 7 days', 'chart-total')).toHaveText('8');
+        expect(await seriousViolations(), `dashboard, ${scheme}`).toEqual([]);
+
+        await page.getByRole('button', { name: 'Add tile' }).first().click();
+        await expect(dialog()).toBeVisible();
+        expect(await seriousViolations(), `add tile dialog, ${scheme}`).toEqual([]);
+        await page.keyboard.press('Escape');
+
+        await page.goto(`${base}/dashboards`);
+        await expect(page.getByTestId('dashboard-card').first()).toBeVisible();
+        expect(await seriousViolations(), `dashboards, ${scheme}`).toEqual([]);
+
+        await page.goto(`${base}/saved-insights`);
+        await expect(page.getByTestId('saved-insight-row').first()).toBeVisible();
+        expect(await seriousViolations(), `saved insights, ${scheme}`).toEqual([]);
+
+        await page.goto(`${base}/insights/funnel?saved=${ids.funnel}`);
+        await expect(page.getByTestId('saved-editing')).toBeVisible();
+        await page.getByRole('button', { name: 'Save as new insight…' }).click();
+        await expect(dialog()).toBeVisible();
+        expect(await seriousViolations(), `save dialog, ${scheme}`).toEqual([]);
+        await page.keyboard.press('Escape');
+    }
+    await page.emulateMedia({ colorScheme: 'light' });
+});
+
+test('works on a narrow screen: one column of tiles and nothing scrolls sideways', async () => {
+    await page.setViewportSize({ width: 375, height: 800 });
+    try {
+        for (const url of [boardUrl(), `${base}/dashboards`, `${base}/saved-insights`, `${base}/insights/trends?saved=${ids.trends}`]) {
+            await page.goto(url);
+            await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+            await page.waitForTimeout(800);
+            const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+            expect(overflow, url).toBeLessThanOrEqual(0);
+        }
+
+        await page.goto(boardUrl());
+        await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Entrants7');
+        const lefts = await page.getByTestId('dashboard-tile').evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().left)));
+        expect(new Set(lefts).size).toBe(1);
+        expect(await seriousViolations()).toEqual([]);
+
+        await page.getByRole('button', { name: 'Add tile' }).first().click();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+        await page.keyboard.press('Escape');
+    } finally {
+        await page.setViewportSize({ width: 1280, height: 720 });
+    }
+});
+
+test('never runs more than three tiles at once, and only the tiles that are in view', async () => {
+    test.setTimeout(300_000);
+    const many = (await api('POST', `/api/projects/${projectId}/dashboards`, { name: 'Many tiles' })).json.data;
+    for (const id of ids.bulk.slice(0, 12)) {
+        expect((await api('POST', `/api/projects/${projectId}/dashboards/${many.id}/tiles`, { saved_insight_id: id })).status).toBe(201);
+    }
+
+    // A tile that is told "busy" (429: the user's 60 runs a minute) asks again after Retry-After, so the NUMBER of POSTs may be above
+    // the number of tiles; what is counted is the distinct tiles that asked, and the most POSTs that were in flight at once.
+    let inflight = 0;
+    let peak = 0;
+    const asked = new Set();
+    const freshAsked = new Set();
+    const isRun = (request) => request.method() === 'POST' && /saved-insights\/[0-9a-f-]{36}\/run$/.test(request.url());
+    const begin = (request) => {
+        if (isRun(request)) {
+            asked.add(request.url());
+            peak = Math.max(peak, ++inflight);
+            if (request.postDataJSON()?.fresh === true) {
+                freshAsked.add(request.url());
+            }
+        }
+    };
+    const end = (request) => isRun(request) && inflight--;
+    page.on('request', begin);
+    page.on('requestfinished', end);
+    page.on('requestfailed', end);
+    // a slow answer, so that runs that would overlap really do
+    await page.route('**/saved-insights/*/run', async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        await route.continue();
+    });
+
+    try {
+        // a normal window: the tiles below the fold do not ask until they come into view
+        await page.goto(`${base}/dashboards/${many.id}`);
+        await expect(page.getByTestId('dashboard-tile')).toHaveCount(12);
+        await expect.poll(() => asked.size).toBeGreaterThanOrEqual(3);
+        await page.waitForTimeout(4000);
+        expect(asked.size).toBeLessThan(12);
+        expect(asked.size).toBeLessThanOrEqual(6);
+        expect(peak).toBeLessThanOrEqual(3);
+        const early = asked.size;
+        await page.getByTestId('dashboard-tile').last().scrollIntoViewIfNeeded();
+        await expect.poll(() => asked.size, { timeout: 60_000 }).toBe(12);
+        expect(early).toBeLessThan(12);
+        expect(peak).toBeLessThanOrEqual(3);
+        // the bulk insights filter on a plan nobody has: their tiles settle as `empty`, which is as finished as `result`
+        await expect(page.locator('[data-testid="dashboard-tile"][data-state="result"], [data-testid="dashboard-tile"][data-state="empty"]')).toHaveCount(12, { timeout: 90_000 });
+
+        // everything in view at once and a refresh of all of it: still three at a time, all 12 asked fresh
+        await page.setViewportSize({ width: 1280, height: 4200 });
+        peak = 0;
+        await page.getByRole('button', { name: 'Refresh all' }).click();
+        await expect.poll(() => freshAsked.size, { timeout: 90_000 }).toBe(12);
+        expect(peak).toBeLessThanOrEqual(3);
+        await expect(page.getByTestId('status')).toContainText('refreshed.', { timeout: 60_000 });
+    } finally {
+        await page.setViewportSize({ width: 1280, height: 720 });
+        await page.unroute('**/saved-insights/*/run');
+        page.off('request', begin);
+        page.off('requestfinished', end);
+        page.off('requestfailed', end);
+    }
+    ids.many = many.id;
+});
+
+test('deletes the dashboards, which keeps their saved insights', async () => {
+    await page.goto(boardUrl());
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+    await page.getByRole('button', { name: 'Delete dashboard' }).click();
+    await expect(dialog()).toHaveAccessibleName('Delete this dashboard?');
+    await expect(dialog().getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await dialog().getByRole('button', { name: 'Delete dashboard' }).click();
+    await expect(page).toHaveURL(new RegExp(`${base}/dashboards$`));
+    await expect(page.getByTestId('dashboard-card').filter({ hasText: BOARD })).toHaveCount(0);
+
+    await api('DELETE', `/api/projects/${projectId}/dashboards/${ids.many}`);
+    await page.reload();
+    await expect(page.getByTestId('state-empty')).toContainText('No dashboards yet');
+    expect((await api('GET', `/api/projects/${projectId}/dashboards/${ids.board}`)).status).toBe(404);
+    expect((await savedInsights()).some((item) => item.id === ids.funnel)).toBe(true);
 });
 
 test('had no console errors and no failed requests so far', async () => {
