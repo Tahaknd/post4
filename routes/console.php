@@ -22,3 +22,17 @@ Schedule::call(fn () => Artisan::call('capture:status', ['--log' => true]))
 
 // Events of project ids that no longer exist in Postgres (late Kafka events, failed purges, --keep-events).
 Schedule::command('events:sweep-orphans')->dailyAt('03:30')->withoutOverlapping();
+
+// Keeps the saved insights of recently viewed dashboards warm (App\Domain\Dashboards\Refresh\DashboardRefresh): queues low
+// priority runs, never queries ClickHouse itself. Like capture:status it runs IN the scheduler process (Schedule::call), so its
+// one summary line reaches `docker compose logs scheduler`. A tick only queues, so it is quick; a crashed one releases the
+// overlap mutex after 10 minutes. Off with DASHBOARDS_REFRESH_ENABLED=false (then it is not even registered); the interval is
+// DASHBOARDS_REFRESH_INTERVAL_MINUTES (1 to 59).
+if ((bool) config('dashboards.refresh.enabled')) {
+    $dashboardRefreshMinutes = max(1, min(59, (int) config('dashboards.refresh.interval_minutes')));
+
+    Schedule::call(fn () => Artisan::call('dashboards:refresh', ['--log' => true]))
+        ->name('dashboards:refresh')
+        ->cron("*/{$dashboardRefreshMinutes} * * * *")
+        ->withoutOverlapping(10);
+}

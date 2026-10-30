@@ -13,6 +13,8 @@ use App\Domain\Capture\KafkaLagProbe;
 use App\Domain\Capture\NoFlagsEvaluator;
 use App\Domain\Capture\PayloadDecoder;
 use App\Domain\Capture\PersonLagProbe;
+use App\Domain\Dashboards\Refresh\ClickHouseHealth;
+use App\Domain\Dashboards\Refresh\QueueBacklog;
 use App\Domain\Insights\Events\EventNames;
 use App\Domain\Insights\InsightRunner;
 use App\Domain\Insights\Runs\InsightGate;
@@ -22,6 +24,7 @@ use App\Infrastructure\ClickHouse\ClickHouseMigrator;
 use App\Infrastructure\ClickHouse\ClickHouseReads;
 use App\Infrastructure\ClickHouse\ProjectScopedReader;
 use App\Infrastructure\ClickHouse\ReadOnlyClickHouseClient;
+use App\Infrastructure\ClickHouse\ReadOnlyHealthProbe;
 use App\Infrastructure\ClickHouse\RoSettings;
 use App\Infrastructure\Kafka\Identity\MessageSource;
 use App\Infrastructure\Kafka\Identity\RdKafkaMessageSource;
@@ -32,6 +35,7 @@ use App\Infrastructure\Kafka\RdKafkaIdentityLagProbe;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
 use App\Infrastructure\Kafka\RdKafkaPersonLagProbe;
 use App\Infrastructure\Kafka\RdKafkaTopicDepthProbe;
+use App\Infrastructure\Queue\InsightQueueBacklog;
 use App\Models\Dashboard;
 use App\Models\DashboardTile;
 use App\Models\Project;
@@ -82,6 +86,9 @@ class AppServiceProvider extends ServiceProvider
             ->needs(CacheRepository::class)
             ->give(fn () => Cache::store((string) config('insights.cache_store')));
         $this->app->singleton(InsightRunner::class);
+        // The scheduled dashboard refresh (App\Domain\Dashboards\Refresh\DashboardRefresh) asks these two before it queues anything.
+        $this->app->bind(ClickHouseHealth::class, ReadOnlyHealthProbe::class);
+        $this->app->bind(QueueBacklog::class, InsightQueueBacklog::class);
         $this->app->bind(InsightRunStore::class);
         $this->app->bind(InsightGate::class);
 
