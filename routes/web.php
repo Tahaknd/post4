@@ -3,6 +3,8 @@
 use App\Domain\Insights\Runs\InsightRunStore;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\RegisterController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\DashboardTileController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InsightController;
 use App\Http\Controllers\InsightEventsController;
@@ -90,6 +92,14 @@ Route::middleware(['auth', 'auth.session', 'api.no-store'])
         Route::delete('/saved-insights/{insight}', [SavedInsightController::class, 'destroy'])->name('saved-insights.destroy')->middleware('throttle.user:dashboards.write');
         Route::post('/saved-insights/{insight}/run', [SavedInsightController::class, 'run'])->name('saved-insights.run')->middleware('throttle.user:insights.run');
 
+        Route::get('/dashboards', [DashboardController::class, 'index'])->name('dashboards.index')->middleware('throttle.user:dashboards.read');
+        Route::post('/dashboards', [DashboardController::class, 'store'])->name('dashboards.store')->middleware('throttle.user:dashboards.write');
+        Route::get('/dashboards/{dashboard}', [DashboardController::class, 'show'])->name('dashboards.show')->middleware('throttle.user:dashboards.read');
+        Route::patch('/dashboards/{dashboard}', [DashboardController::class, 'update'])->name('dashboards.update')->middleware('throttle.user:dashboards.write');
+        Route::delete('/dashboards/{dashboard}', [DashboardController::class, 'destroy'])->name('dashboards.destroy')->middleware('throttle.user:dashboards.write');
+        Route::post('/dashboards/{dashboard}/tiles', [DashboardTileController::class, 'store'])->name('dashboards.tiles.store')->middleware('throttle.user:dashboards.write');
+        Route::put('/dashboards/{dashboard}/tiles/order', [DashboardTileController::class, 'order'])->name('dashboards.tiles.order')->middleware('throttle.user:dashboards.write');
+        Route::delete('/dashboards/{dashboard}/tiles/{tile}', [DashboardTileController::class, 'destroy'])->name('dashboards.tiles.destroy')->middleware('throttle.user:dashboards.write');
     });
 
 // Every other method on an `api/` path that no route above takes (a malformed `{project}` segment, a wrong verb) is a

@@ -5,6 +5,7 @@ use App\Domain\Insights\Trends\TrendsQuery;
 use App\Http\ApiErrors;
 use App\Jobs\RunInsight;
 use App\Jobs\RunTrendsInsight;
+use App\Models\Dashboard;
 use App\Models\Project;
 use App\Models\SavedInsight;
 use App\Models\User;
@@ -567,4 +568,15 @@ it('throttles writes and reads separately per user', function () {
     $other = User::factory()->create();
     $this->project->users()->attach($other);
     $this->actingAs($other)->getJson(siUrl($this->project))->assertOk();
+});
+
+it('removes the insight from its dashboards when it is deleted through the API', function () {
+    $made = siMake($this->member, $this->project);
+    $dashboard = $this->actingAs($this->member)->postJson("/api/projects/{$this->project->id}/dashboards", ['name' => 'D'])->assertCreated()->json('data');
+    $this->actingAs($this->member)->postJson("/api/projects/{$this->project->id}/dashboards/{$dashboard['id']}/tiles", ['saved_insight_id' => $made['id']])->assertCreated();
+
+    $this->actingAs($this->member)->deleteJson(siUrl($this->project, $made['id']))->assertNoContent();
+
+    expect($this->actingAs($this->member)->getJson("/api/projects/{$this->project->id}/dashboards/{$dashboard['id']}")->json('data.tiles'))->toBe([])
+        ->and(Dashboard::query()->count())->toBe(1);
 });
