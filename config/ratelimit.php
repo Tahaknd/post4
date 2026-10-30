@@ -23,5 +23,9 @@ return [
         // The event picker asks while someone types (debounced, answered from a per-project cache): generous, but a
         // script cannot hammer ClickHouse's one spare slot.
         'insights.events' => ['limit' => 120, 'window_seconds' => 60],
+        // Saved insights and dashboards: a dashboard page reads one dashboard and runs every tile (those runs are
+        // `insights.run`); writes are rare and hand-made.
+        'dashboards.read' => ['limit' => 300, 'window_seconds' => 60],
+        'dashboards.write' => ['limit' => 60, 'window_seconds' => 60],
     ],
 ];

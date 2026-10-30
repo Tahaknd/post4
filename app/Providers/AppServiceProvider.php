@@ -32,7 +32,10 @@ use App\Infrastructure\Kafka\RdKafkaIdentityLagProbe;
 use App\Infrastructure\Kafka\RdKafkaLagProbe;
 use App\Infrastructure\Kafka\RdKafkaPersonLagProbe;
 use App\Infrastructure\Kafka\RdKafkaTopicDepthProbe;
+use App\Models\Dashboard;
+use App\Models\DashboardTile;
 use App\Models\Project;
+use App\Models\SavedInsight;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
@@ -188,6 +191,33 @@ class AppServiceProvider extends ServiceProvider
             abort_if($user === null, 404);
 
             return Project::query()->visibleTo($user)->whereKey($value)->firstOrFail();
+        });
+
+        // Saved insights, dashboards and tiles are addressed by UUID (never the auto-increment id) and resolved INSIDE the
+        // already bound project / dashboard: one of another project is a 404, exactly like a missing one. A segment that is
+        // not a UUID matches no route at all (a plain 404).
+        $uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+        Route::pattern('insight', $uuid);
+        Route::pattern('dashboard', $uuid);
+        Route::pattern('tile', $uuid);
+
+        Route::bind('insight', function (string $value, \Illuminate\Routing\Route $route): SavedInsight {
+            $project = $route->parameter('project');
+            abort_unless($project instanceof Project, 404);
+
+            return SavedInsight::query()->where('project_id', $project->getKey())->where('uuid', $value)->firstOrFail();
+        });
+        Route::bind('dashboard', function (string $value, \Illuminate\Routing\Route $route): Dashboard {
+            $project = $route->parameter('project');
+            abort_unless($project instanceof Project, 404);
+
+            return Dashboard::query()->where('project_id', $project->getKey())->where('uuid', $value)->firstOrFail();
+        });
+        Route::bind('tile', function (string $value, \Illuminate\Routing\Route $route): DashboardTile {
+            $dashboard = $route->parameter('dashboard');
+            abort_unless($dashboard instanceof Dashboard, 404);
+
+            return DashboardTile::query()->where('dashboard_id', $dashboard->getKey())->where('uuid', $value)->firstOrFail();
         });
     }
 

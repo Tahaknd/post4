@@ -54,14 +54,18 @@ final class ApiErrors
     }
 
     /**
-     * The requests that carry the user's definition (one POST per insight type): strings must reach the domain exactly as sent, so the
-     * framework's TrimStrings and ConvertEmptyStringsToNull are skipped for it only (every other API endpoint trims
-     * and null-checks what it needs by hand).
+     * The requests that carry the user's definition (one POST per insight type, and saving or re-defining a saved insight,
+     * which carries the same body under `query`): strings must reach the domain exactly as sent, so the framework's
+     * TrimStrings and ConvertEmptyStringsToNull are skipped for them only (every other API endpoint trims and null-checks
+     * what it needs by hand; the saved insight requests trim the name and description themselves).
      */
     public static function keepsStringsExact(Request $request): bool
     {
-        return $request->isMethod('POST')
-            && preg_match('#\Aapi/projects/[0-9]{1,18}/insights/('.implode('|', array_map('preg_quote', InsightTypes::keys())).')\z#', $request->path()) === 1;
+        $path = $request->path();
+
+        return ($request->isMethod('POST') && preg_match('#\Aapi/projects/[0-9]{1,18}/insights/('.implode('|', array_map('preg_quote', InsightTypes::keys())).')\z#', $path) === 1)
+            || ($request->isMethod('POST') && preg_match('#\Aapi/projects/[0-9]{1,18}/saved-insights\z#', $path) === 1)
+            || ($request->isMethod('PATCH') && preg_match('#\Aapi/projects/[0-9]{1,18}/saved-insights/[0-9a-f-]{36}\z#', $path) === 1);
     }
 
     /**

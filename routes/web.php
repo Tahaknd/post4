@@ -8,6 +8,7 @@ use App\Http\Controllers\InsightController;
 use App\Http\Controllers\InsightEventsController;
 use App\Http\Controllers\ProjectController;
 use App\Http\Controllers\ProjectInsightsController;
+use App\Http\Controllers\SavedInsightController;
 use App\Http\Middleware\EncryptHistoryWhenSecure;
 use App\Http\Middleware\EnsureRegistrationOpen;
 use Illuminate\Support\Facades\Route;
@@ -72,6 +73,23 @@ Route::middleware(['auth', 'auth.session', 'api.no-store'])
         Route::delete('/runs/{run}', [InsightController::class, 'cancel'])->name('runs.cancel')
             ->where('run', InsightRunStore::ID_ROUTE_PATTERN)
             ->middleware('throttle.user:insights.cancel');
+    });
+
+// Saved insights and dashboards (Milestone 6). Same session, CSRF, `auth`, JSON errors and project binding as above; the
+// `{insight}`, `{dashboard}` and `{tile}` segments are UUIDs (Route::pattern in AppServiceProvider) bound INSIDE the project
+// (a foreign one is a 404, and so is anything that is not a uuid). Reads and writes have their own per-user throttle family;
+// running a saved insight shares the budget of `insights.run` with running one by hand.
+Route::middleware(['auth', 'auth.session', 'api.no-store'])
+    ->prefix('api/projects/{project}')
+    ->name('api.')
+    ->group(function (): void {
+        Route::get('/saved-insights', [SavedInsightController::class, 'index'])->name('saved-insights.index')->middleware('throttle.user:dashboards.read');
+        Route::post('/saved-insights', [SavedInsightController::class, 'store'])->name('saved-insights.store')->middleware('throttle.user:dashboards.write');
+        Route::get('/saved-insights/{insight}', [SavedInsightController::class, 'show'])->name('saved-insights.show')->middleware('throttle.user:dashboards.read');
+        Route::patch('/saved-insights/{insight}', [SavedInsightController::class, 'update'])->name('saved-insights.update')->middleware('throttle.user:dashboards.write');
+        Route::delete('/saved-insights/{insight}', [SavedInsightController::class, 'destroy'])->name('saved-insights.destroy')->middleware('throttle.user:dashboards.write');
+        Route::post('/saved-insights/{insight}/run', [SavedInsightController::class, 'run'])->name('saved-insights.run')->middleware('throttle.user:insights.run');
+
     });
 
 // Every other method on an `api/` path that no route above takes (a malformed `{project}` segment, a wrong verb) is a
