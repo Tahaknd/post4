@@ -47,7 +47,9 @@ const CLIENT_ERRORS = {
     unexpected: { kind: 'unexpected', message: 'Something unexpected happened. Try again.', retryable: true, retry_after_seconds: null },
 };
 
-export const IDLE_STATE = Object.freeze({ phase: 'idle', stage: null, notice: null, result: null, error: null, fieldErrors: null });
+// `computedAt` and `source` (ISO time the result was computed, `dashboard_cache` | `cache`) are set only by a saved insight run that
+// the server answered at once with a stored result (POST saved-insights/{id}/run, 200); they are null for every other result.
+export const IDLE_STATE = Object.freeze({ phase: 'idle', stage: null, notice: null, result: null, error: null, fieldErrors: null, computedAt: null, source: null });
 
 export class InsightRunClient {
     #postUrl;
@@ -173,8 +175,9 @@ export class InsightRunClient {
         }
 
         const next = { ...this.#state, ...patch };
-        // The stage belongs to a run in progress only.
-        this.#state = next.phase === 'loading' ? next : { ...next, stage: null };
+        // The stage belongs to a run in progress only, and the stored-result stamp to a result that was answered at once.
+        const stamped = next.phase === 'done' ? next : { ...next, computedAt: null, source: null };
+        this.#state = next.phase === 'loading' ? stamped : { ...stamped, stage: null };
         this.#onChange(this.#state);
     }
 
@@ -269,7 +272,7 @@ export class InsightRunClient {
             const { status, json } = answer;
 
             if (status === 200 && json?.status === 'done' && json.result) {
-                return this.#done(json.result);
+                return this.#done(json.result, { computedAt: typeof json.computed_at === 'string' ? json.computed_at : null, source: typeof json.source === 'string' ? json.source : null });
             }
             if (status === 202) {
                 const path = this.#runPath(json?.poll_url);
@@ -409,9 +412,9 @@ export class InsightRunClient {
         return RUN_ID_PATTERN.test(parsed.pathname.slice(this.#runsUrl.length)) ? parsed.pathname : null;
     }
 
-    #done(result) {
+    #done(result, stamp = { computedAt: null, source: null }) {
         this.#runUrl = null;
-        this.#set({ phase: 'done', notice: null, result, error: null, fieldErrors: null });
+        this.#set({ phase: 'done', notice: null, result, error: null, fieldErrors: null, ...stamp });
     }
 
     #fail(error) {

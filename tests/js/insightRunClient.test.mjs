@@ -624,3 +624,33 @@ test('run() again after a cancel starts a fresh run, and a run waiting for the P
     assert.deepEqual(posts(calls).map((call) => call.body), [{ n: 1 }, { n: 3 }]);
     assert.equal(last().phase, 'done');
 });
+
+test('a stored result answered at once carries its computed_at and source; every other result carries none', async () => {
+    const { client, clock, last } = setup((call) => (call.method === 'POST' ? json(200, { status: 'done', run_id: null, result: RESULT, source: 'dashboard_cache', computed_at: '2026-10-30T12:00:00+00:00' }) : json(404, {})));
+
+    client.run({ fresh: false });
+    await clock.advance(10);
+    assert.equal(last().phase, 'done');
+    assert.equal(last().computedAt, '2026-10-30T12:00:00+00:00');
+    assert.equal(last().source, 'dashboard_cache');
+
+    client.reset();
+    assert.equal(last().computedAt, null);
+    assert.equal(last().source, null);
+});
+
+test('a polled result and a plain 200 have no stamp', async () => {
+    const { client, clock, last } = setup((call) => {
+        if (call.method === 'POST') {
+            return json(202, { status: 'queued', run_id: RUN_A, poll_url: url(RUN_A) });
+        }
+
+        return json(200, { status: 'done', run_id: RUN_A, result: RESULT });
+    });
+
+    client.run({});
+    await clock.advance(5000);
+    assert.equal(last().phase, 'done');
+    assert.equal(last().computedAt, null);
+    assert.equal(last().source, null);
+});
