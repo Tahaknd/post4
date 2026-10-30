@@ -132,10 +132,18 @@ async function seriousViolations() {
 
 /** A call of the JSON API as the signed-in user (session cookie and the XSRF header of the cookie). */
 async function api(method, url, data) {
-    const cookie = (await page.context().cookies()).find((item) => item.name === 'XSRF-TOKEN');
-    const response = await page.request.fetch(url, { method, data, headers: { Accept: 'application/json', 'X-XSRF-TOKEN': decodeURIComponent(cookie?.value ?? '') } });
+    for (let attempt = 0; ; attempt++) {
+        const cookie = (await page.context().cookies()).find((item) => item.name === 'XSRF-TOKEN');
+        const response = await page.request.fetch(url, { method, data, headers: { Accept: 'application/json', 'X-XSRF-TOKEN': decodeURIComponent(cookie?.value ?? '') } });
 
-    return { status: response.status(), json: response.status() === 204 ? null : await response.json() };
+        // the writes of a test are fast; a throttled one waits as long as the server says and tries again
+        if (response.status() === 429 && attempt < 5) {
+            await page.waitForTimeout(Number(response.headers()['retry-after'] ?? 5) * 1000 + 250);
+            continue;
+        }
+
+        return { status: response.status(), json: response.status() === 204 ? null : await response.json() };
+    }
 }
 
 async function savedInsights() {
@@ -255,6 +263,249 @@ test('saves a Retention insight with absolute dates: an absolute range stays abs
     const detail = (await api('GET', `/api/projects/${projectId}/saved-insights/${saved.id}`)).json.data;
     expect(detail.query.range).toEqual({ from: `${day(-3)}T00:00:00.000Z`, to: `${day(0)}T00:00:00.000Z` });
     expect((await api('GET', `/api/projects/${projectId}/dashboards/${ids.board}`)).json.data.tiles_count).toBe(3);
+});
+
+
+const boardUrl = () => `${base}/dashboards/${ids.board}`;
+const summary = (name, id) => tile(name).getByTestId(id);
+
+/** The sum of the layout shifts of the page since it was opened (the browser's own measure, without input-caused ones). */
+async function layoutShift() {
+    return page.evaluate(() => window.__shift ?? 0);
+}
+
+test('lists the dashboard in the navigation and on the dashboards page', async () => {
+    await page.addInitScript(() => {
+        window.__shift = 0;
+        try {
+            new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    if (!entry.hadRecentInput) {
+                        window.__shift += entry.value;
+                    }
+                }
+            }).observe({ type: 'layout-shift', buffered: true });
+        } catch {
+            // a browser without layout-shift entries: the test then measures nothing
+        }
+    });
+
+    await page.goto(base);
+    await expect(page.getByRole('heading', { name: 'Dashboards', exact: true })).toBeVisible();
+    await page.getByRole('navigation').getByRole('link', { name: 'Dashboards' }).click();
+    await expect(page).toHaveURL(new RegExp(`${base}/dashboards$`));
+    await expect(page.getByRole('navigation').getByRole('link', { name: 'Dashboards' })).toHaveAttribute('aria-current', 'page');
+
+    const card = page.getByTestId('dashboard-card').filter({ hasText: BOARD });
+    await expect(card).toHaveCount(1);
+    await expect(card.getByTestId('tile-count')).toHaveText('3 tiles');
+    await expect(card).toContainText('Last viewed');
+    await card.getByRole('link', { name: BOARD }).click();
+    await expect(page).toHaveURL(new RegExp(`${base}/dashboards/${ids.board}$`));
+});
+
+test('shows every tile in position order with the exact numbers of its insight, when it was computed, and no layout shift', async () => {
+    await page.goto(boardUrl());
+    await expect(page.getByRole('heading', { name: BOARD, level: 1 })).toBeVisible();
+    await expect(page.getByTestId('tile-title')).toHaveCount(3);
+    expect(await titles()).toEqual([TRENDS_NAME, FUNNEL_NAME, RETENTION_NAME]);
+
+    await expect(summary(TRENDS_NAME, 'chart-total')).toHaveText('8');
+    await expect(tile(TRENDS_NAME).getByTestId('chart').locator('svg')).toBeVisible();
+    await expect(tile(TRENDS_NAME).getByTestId('type-badge')).toHaveText('Trends');
+
+    await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Entrants7');
+    await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Converted4');
+    await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Overall conversion57.14%');
+    await expect(tile(FUNNEL_NAME).getByTestId('chart')).toHaveAttribute('aria-label', new RegExp(`1\\. ${signup}: 7; 2\\. ${visit}: 4\\.`));
+
+    await expect(summary(RETENTION_NAME, 'retention-summary')).toContainText('Cohorts3');
+    await expect(summary(RETENTION_NAME, 'retention-summary')).toContainText('People in cohorts7');
+    await expect(summary(RETENTION_NAME, 'retention-summary')).toContainText('Average, day 142.86%');
+    await expect(tile(RETENTION_NAME).getByTestId('type-badge')).toHaveText('Retention');
+
+    // "Updated 5 minutes ago": the relative time, with the exact moment in `datetime` and in the title
+    for (const name of [TRENDS_NAME, FUNNEL_NAME, RETENTION_NAME]) {
+        const updated = summary(name, 'tile-updated');
+        await expect(updated).toContainText(/^Updated (just now|\d+ minutes? ago)$/);
+        await expect(updated.locator('time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/);
+        await expect(updated.locator('time')).toHaveAttribute('title', /\d{4}/);
+    }
+
+    // every tile has the same reserved height, whatever it shows
+    const heights = await page.getByTestId('dashboard-tile').evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().height)));
+    expect(new Set(heights).size).toBe(1);
+    expect(heights[0]).toBeGreaterThanOrEqual(528);
+    expect(await layoutShift()).toBeLessThan(0.1);
+});
+
+test('refreshes one tile with fresh: true and the whole dashboard through the same queue', async () => {
+    await page.goto(boardUrl());
+    await expect(summary(TRENDS_NAME, 'chart-total')).toHaveText('8');
+    await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Entrants7');
+    await expect(summary(RETENTION_NAME, 'retention-summary')).toContainText('Cohorts3');
+
+    const bodies = [];
+    const onRequest = (request) => request.method() === 'POST' && /saved-insights\/[0-9a-f-]{36}\/run$/.test(request.url()) && bodies.push({ url: request.url(), body: request.postDataJSON() });
+    page.on('request', onRequest);
+    try {
+        await page.getByRole('button', { name: `Refresh ${TRENDS_NAME}` }).click();
+        await expect(page.getByTestId('status')).toHaveText(`${TRENDS_NAME} refreshed.`);
+        expect(bodies).toEqual([{ url: expect.stringContaining(ids.trends), body: { fresh: true } }]);
+        await expect(summary(TRENDS_NAME, 'chart-total')).toHaveText('8');
+
+        bodies.length = 0;
+        await page.getByRole('button', { name: 'Refresh all' }).click();
+        await expect(page.getByTestId('status')).toHaveText('Refreshing every tile.');
+        await expect.poll(() => bodies.length).toBe(3);
+        expect(bodies.every((item) => item.body.fresh === true)).toBe(true);
+        expect(new Set(bodies.map((item) => item.url)).size).toBe(3);
+        await expect(page.getByTestId('status')).toContainText('refreshed.');
+    } finally {
+        page.off('request', onRequest);
+    }
+});
+
+test('moves tiles earlier and later with the keyboard, keeps focus, saves the order, and reloads when the order is stale', async () => {
+    await page.goto(boardUrl());
+    await expect(summary(RETENTION_NAME, 'retention-summary')).toContainText('Cohorts3');
+    const later = (name) => page.getByRole('button', { name: `Move later: ${name}` });
+    const earlier = (name) => page.getByRole('button', { name: `Move earlier: ${name}` });
+
+    await expect(earlier(TRENDS_NAME)).toHaveAttribute('aria-disabled', 'true');
+    await expect(later(RETENTION_NAME)).toHaveAttribute('aria-disabled', 'true');
+
+    const puts = [];
+    page.on('request', (request) => request.method() === 'PUT' && puts.push(request.postDataJSON()));
+
+    await later(TRENDS_NAME).focus();
+    await page.keyboard.press('Enter');
+    await expect.poll(titles).toEqual([FUNNEL_NAME, TRENDS_NAME, RETENTION_NAME]);
+    await expect(page.getByTestId('status')).toHaveText(`${TRENDS_NAME} moved later, now position 2 of 3.`);
+    await expect(later(TRENDS_NAME)).toBeFocused();
+
+    await page.keyboard.press('Enter');
+    await expect.poll(titles).toEqual([FUNNEL_NAME, RETENTION_NAME, TRENDS_NAME]);
+    // it reached the end: focus moved to the twin button, which is still usable
+    await expect(later(TRENDS_NAME)).toHaveAttribute('aria-disabled', 'true');
+    await expect(earlier(TRENDS_NAME)).toBeFocused();
+    await expect.poll(() => puts.length).toBe(2);
+    expect(puts[1].tiles).toHaveLength(3);
+
+    // the order is saved: a reload shows it, the API has it
+    await page.reload();
+    await expect.poll(titles).toEqual([FUNNEL_NAME, RETENTION_NAME, TRENDS_NAME]);
+    const stored = (await api('GET', `/api/projects/${projectId}/dashboards/${ids.board}`)).json.data.tiles.map((item) => item.saved_insight.name);
+    expect(stored).toEqual([FUNNEL_NAME, RETENTION_NAME, TRENDS_NAME]);
+
+    // back to the first order, again by keyboard
+    await earlier(TRENDS_NAME).focus();
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Enter');
+    await expect.poll(titles).toEqual([TRENDS_NAME, FUNNEL_NAME, RETENTION_NAME]);
+
+    // a stale order (the server answers 422): the page reloads the dashboard instead of guessing
+    provoking = true;
+    try {
+        await page.route('**/tiles/order', (route) => route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ message: 'x', error: { kind: 'validation', message: 'x', retryable: false, retry_after_seconds: null }, errors: { tiles: ['tiles must be the current set.'] } }) }), { times: 1 });
+        await later(TRENDS_NAME).focus();
+        await page.keyboard.press('Enter');
+        await expect(page.getByTestId('status')).toContainText('changed elsewhere');
+        await expect.poll(titles).toEqual([TRENDS_NAME, FUNNEL_NAME, RETENTION_NAME]);
+    } finally {
+        await page.unroute('**/tiles/order');
+        provoking = false;
+    }
+});
+
+test('removes a tile without deleting its saved insight, and adds it again from the picker', async () => {
+    await page.goto(boardUrl());
+    await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Entrants7');
+
+    await page.getByRole('button', { name: `Remove ${FUNNEL_NAME} from the dashboard` }).click();
+    await expect.poll(titles).toEqual([TRENDS_NAME, RETENTION_NAME]);
+    await expect(page.getByTestId('status')).toHaveText(`Removed ${FUNNEL_NAME} from the dashboard. The saved insight is kept.`);
+    expect((await savedInsights()).some((item) => item.id === ids.funnel)).toBe(true);
+
+    await page.getByRole('button', { name: 'Add tile' }).first().click();
+    await expect(dialog()).toBeVisible();
+    await expect(dialog()).toHaveAccessibleName('Add a tile');
+    await expect(dialog().getByLabel('Search saved insights')).toBeFocused();
+    // only what is not on the dashboard is offered, and it can be searched
+    await expect(dialog().getByTestId('picker-list').getByRole('listitem')).toHaveCount(1);
+    await dialog().getByLabel('Search saved insights').fill('zzz nothing');
+    await expect(dialog().getByTestId('picker-empty')).toHaveText('No saved insight matches.');
+    await dialog().getByLabel('Search saved insights').fill('signup to');
+    await dialog().getByRole('button', { name: `Add ${FUNNEL_NAME}` }).click();
+    await expect(dialog().getByRole('status')).toHaveText(`Added ${FUNNEL_NAME} to the dashboard.`);
+    await dialog().getByLabel('Search saved insights').fill('');
+    await expect(dialog().getByTestId('picker-empty')).toHaveText('Every saved insight is already on this dashboard.');
+    await dialog().getByRole('button', { name: 'Done' }).click();
+    await expect(dialog()).toBeHidden();
+
+    await expect.poll(titles).toEqual([TRENDS_NAME, RETENTION_NAME, FUNNEL_NAME]);
+    await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Entrants7');
+    // back in the first order for the next tests
+    await page.getByRole('button', { name: `Move earlier: ${FUNNEL_NAME}` }).focus();
+    await page.keyboard.press('Enter');
+    await expect.poll(titles).toEqual([TRENDS_NAME, FUNNEL_NAME, RETENTION_NAME]);
+});
+
+/** Stores a definition that no longer passes the rules of its type (an `outdated_version`), the way a future release would leave it. */
+function corrupt(insightId) {
+    const code = `$i = App\\Models\\SavedInsight::where('uuid', '${insightId}')->firstOrFail(); $q = $i->query; $q['v'] = 99; $i->query = $q; $i->query_version = 99; $i->save(); echo 'ok';`;
+    try {
+        return execFileSync('docker', ['compose', 'exec', '-T', 'app', 'php', 'artisan', 'tinker', '--execute', code], { cwd: process.cwd(), stdio: 'pipe', timeout: 60_000 }).toString().includes('ok');
+    } catch {
+        return false;
+    }
+}
+
+test('a tile that needs review explains why, is never run, and is repaired from its editor page', async () => {
+    test.skip(!corrupt(ids.funnel), 'needs `docker compose exec app php artisan tinker` to store a definition that no longer validates (there is no API for it)');
+
+    const runs = [];
+    const onRequest = (request) => request.method() === 'POST' && /saved-insights\/[0-9a-f-]{36}\/run$/.test(request.url()) && runs.push(request.url());
+    page.on('request', onRequest);
+    try {
+        await page.goto(boardUrl());
+        await expect(summary(TRENDS_NAME, 'chart-total')).toHaveText('8');
+        await expect(summary(RETENTION_NAME, 'retention-summary')).toContainText('Cohorts3');
+        const broken = summary(FUNNEL_NAME, 'tile-needs-review');
+        await expect(broken).toBeVisible();
+        await expect(broken).toContainText('Needs review');
+        await expect(broken).toContainText('older version');
+        expect(runs.some((url) => url.includes(ids.funnel))).toBe(false);
+        expect(runs).toHaveLength(2);
+        await expect(page.getByRole('button', { name: `Refresh ${FUNNEL_NAME}` })).toHaveCount(0);
+    } finally {
+        page.off('request', onRequest);
+    }
+
+    // the list of saved insights says so too
+    await page.goto(`${base}/saved-insights`);
+    const row = page.getByTestId('saved-insight-row').filter({ hasText: FUNNEL_NAME });
+    await expect(row.getByTestId('state-badge')).toHaveText(/Needs review/);
+    await expect(row.getByTestId('review-reason')).toContainText('older version');
+    await expect(row.getByRole('link', { name: `Open to repair ${FUNNEL_NAME}` })).toBeVisible();
+
+    // "Open to repair" opens the Funnel page with the stored definition in the form, and Update repairs it
+    await page.goto(boardUrl());
+    await page.getByRole('link', { name: `Open ${FUNNEL_NAME} to repair` }).click();
+    await expect(page).toHaveURL(new RegExp(`${base}/insights/funnel\\?.*saved=${ids.funnel}`));
+    await expect(page.getByTestId('saved-needs-review')).toContainText('Needs review');
+    await expect(page.getByRole('combobox', { name: 'Step 1 event' })).toHaveValue(signup);
+    await expect(page.getByRole('combobox', { name: 'Step 2 event' })).toHaveValue(visit);
+    await expect(page.getByTestId('funnel-summary')).toContainText('Entrants7');
+
+    await page.getByRole('button', { name: 'Update saved insight' }).click();
+    await expect(page.getByTestId('save-status')).toContainText(`Updated “${FUNNEL_NAME}”.`);
+    await expect(page.getByTestId('saved-needs-review')).toHaveCount(0);
+    const repaired = (await savedInsights()).find((item) => item.id === ids.funnel);
+    expect(repaired.state).toEqual({ status: 'ok', reason: null, migrated: false });
+
+    await page.goto(boardUrl());
+    await expect(summary(FUNNEL_NAME, 'funnel-summary')).toContainText('Converted4');
 });
 
 test('had no console errors and no failed requests so far', async () => {
