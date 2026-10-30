@@ -29,6 +29,8 @@
         </include>
     </source>
     <php>
+        <!-- The suite runs in one process and its peak sat at the image's 256M limit; give the test run headroom. -->
+        <ini name="memory_limit" value="768M"/>
         <env name="APP_ENV" value="testing" force="true"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
