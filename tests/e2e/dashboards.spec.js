@@ -58,7 +58,8 @@ test.beforeAll(async ({ browser }) => {
         // A report-only Content-Security-Policy violation is logged by Chrome as an INFO message, so match the text (see demo.spec.js).
         if (/Content Security Policy|\[Report Only\]/i.test(message.text())) {
             problems.push(`csp violation: ${message.text()}`);
-        } else if (message.type() === 'error' && !provoking) {
+        } else if (message.type() === 'error' && !provoking && !/status of 429 /.test(message.text())) {
+            // the browser logs every 429 itself; the response handler below accepts 429 as the busy/throttle answer
             problems.push(`console: ${message.text()}`);
         }
     });
@@ -780,7 +781,11 @@ test('never runs more than three tiles at once, and only the tiles that are in v
         expect(asked.size).toBeLessThanOrEqual(6);
         expect(peak).toBeLessThanOrEqual(3);
         const early = asked.size;
-        await page.getByTestId('dashboard-tile').last().scrollIntoViewIfNeeded();
+        // scrolling to the last tile alone would skip the rows between: bring every tile into view in turn
+        for (const tileLocator of await page.getByTestId('dashboard-tile').all()) {
+            await tileLocator.scrollIntoViewIfNeeded();
+            await page.waitForTimeout(150);
+        }
         await expect.poll(() => asked.size, { timeout: 60_000 }).toBe(12);
         expect(early).toBeLessThan(12);
         expect(peak).toBeLessThanOrEqual(3);
