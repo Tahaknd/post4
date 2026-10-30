@@ -9,12 +9,14 @@ import RetentionChart from '@/Components/Insights/RetentionChart.vue';
 import RetentionEvent from '@/Components/Insights/RetentionEvent.vue';
 import RunControls from '@/Components/Insights/RunControls.vue';
 import RunResults from '@/Components/Insights/RunResults.vue';
+import SelectField from '@/Components/SelectField.vue';
 import { useEventNames } from '@/composables/useEventNames';
 import { useRunPage } from '@/composables/useRunPage';
 import { useTouchedFields } from '@/composables/useTouchedFields';
 import { useUrlState } from '@/composables/useUrlState';
 import { ROLES, conditionEvent, copyCondition, decodeDefinition, defaultDefinition, encodeDefinition, mapServerErrors, toRequestBody, validateDefinition } from '@/lib/retentionDefinition';
 import { describeSummary, failureHelp, isEmptyRetention, isRetentionResult, periodNoun, typeHelp } from '@/lib/retentionFormat';
+import { groupTimezones } from '@/lib/timezoneGroups';
 
 // The Retention page. Everything it needs to build a definition (allowed values, limits, defaults) and the API URLs come from
 // the server as props; there is no API key, the API is called with the session. The definition lives in one reactive object
@@ -169,7 +171,7 @@ const errors = computed(() => {
 });
 
 // ---------------------------------------------------------------- the words around the controls
-const timezones = computed(() => props.options.timezones.map((zone) => ({ value: zone, label: zone })));
+const timezones = computed(() => groupTimezones(props.options.timezones));
 const noun = computed(() => periodNoun(definition.period));
 const typeText = computed(() => typeHelp(definition.type));
 const periodsHint = computed(() => `${props.limits.min_periods} to ${props.limits.max_periods}: how many ${noun.value}s after the cohort ${noun.value} each cohort is followed.`);
@@ -236,11 +238,11 @@ const sameId = useId();
                 <OptionSelect v-model="definition.period" label="Period" name="period" :options="options.periods" :hint="periodHint" :error="errors.period" />
                 <PeriodsControl v-model="definition.periods" :hint="periodsHint" :error="errors.periods" />
                 <OptionSelect v-model="definition.type" label="Retention type" name="retention_type" :options="options.retention_types" :hint="typeText" :error="errors.type" />
-                <OptionSelect
+                <SelectField
                     v-model="definition.timezone"
                     label="Time zone"
                     name="timezone"
-                    :options="timezones"
+                    :groups="timezones"
                     :hint="`Where days, weeks and months begin. The project’s zone is ${project.timezone}.`"
                     :error="errors.timezone"
                 />
@@ -252,7 +254,7 @@ const sameId = useId();
             <RunControls ref="runButton" label="Run retention" :busy="busy" :valid="valid" :attempted="attempted" :stage-text="stageText" hint="Fix the highlighted fields to run retention." @cancel="cancel" />
         </form>
 
-        <RunResults :view="view" :status="status" :busy="busy" :stale="stale" noun="retention" :error="error" :help="help" :idle-copy="IDLE_COPY" :empty-copy="emptyCopy" @retry="start">
+        <RunResults :view="view" :status="status" :busy="busy" :stale="stale" noun="retention table" :error="error" :help="help" :idle-copy="IDLE_COPY" :empty-copy="emptyCopy" @retry="start">
             <RetentionChart :result="shown.result" :stale="stale" />
         </RunResults>
     </div>
