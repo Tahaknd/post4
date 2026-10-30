@@ -64,6 +64,7 @@ onBeforeUnmount(() => {
         ref="dialog"
         :aria-labelledby="titleId"
         :aria-describedby="descriptionId"
+        aria-modal="true"
         class="m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-md border border-line-strong bg-surface p-6 text-fg backdrop:bg-black/60"
         @close="released"
     >
