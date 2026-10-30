@@ -112,6 +112,25 @@ function destroy() {
             </div>
         </section>
 
+        <section aria-labelledby="dashboards-heading" class="space-y-3">
+            <h2 id="dashboards-heading" class="text-lg font-semibold tracking-tight">Dashboards</h2>
+            <p class="text-sm text-muted">Save the insights you build and keep them side by side on a dashboard that stays up to date.</p>
+            <div class="flex flex-wrap gap-3">
+                <Link
+                    :href="urls.dashboards"
+                    class="inline-flex items-center justify-center rounded-md bg-accent px-4 py-2 font-medium text-accent-fg hover:bg-accent-hover"
+                >
+                    Open Dashboards
+                </Link>
+                <Link
+                    :href="urls.saved_insights"
+                    class="inline-flex items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2 font-medium text-fg hover:bg-canvas"
+                >
+                    Saved insights
+                </Link>
+            </div>
+        </section>
+
         <section aria-labelledby="key-heading" class="space-y-3">
             <h2 id="key-heading" class="text-lg font-semibold tracking-tight">API key</h2>
             <p class="text-sm text-muted">Events must carry this key. Keep it out of public repositories.</p>

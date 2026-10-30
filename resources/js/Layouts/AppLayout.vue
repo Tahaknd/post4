@@ -18,6 +18,10 @@ const onFunnel = computed(() => funnelUrl.value !== null && page.url.split('?')[
 const retentionUrl = computed(() => page.props.retentionUrl ?? null);
 const onRetention = computed(() => retentionUrl.value !== null && page.url.split('?')[0] === retentionUrl.value);
 
+// The dashboards of the project on screen: the list, one dashboard and the saved insights belong to this link.
+const dashboardsUrl = computed(() => page.props.dashboardsUrl ?? null);
+const onDashboards = computed(() => dashboardsUrl.value !== null && (page.url.split('?')[0] === dashboardsUrl.value || page.url.startsWith(`${dashboardsUrl.value}/`) || page.url.split('?')[0] === dashboardsUrl.value.replace(/dashboards$/, 'saved-insights')));
+
 // The primary navigation exists for signed-in users only.
 const navItems = [{ label: 'Home', href: HOME_URL }];
 
@@ -46,6 +50,8 @@ function logout() {
             <Link v-if="trendsUrl" :href="trendsUrl" class="text-muted hover:text-fg" :class="onTrends ? 'font-medium text-fg' : ''" :aria-current="onTrends ? 'page' : undefined">Trends</Link>
             <Link v-if="funnelUrl" :href="funnelUrl" class="text-muted hover:text-fg" :class="onFunnel ? 'font-medium text-fg' : ''" :aria-current="onFunnel ? 'page' : undefined">Funnel</Link>
             <Link v-if="retentionUrl" :href="retentionUrl" class="text-muted hover:text-fg" :class="onRetention ? 'font-medium text-fg' : ''" :aria-current="onRetention ? 'page' : undefined">Retention</Link>
+
+            <Link v-if="dashboardsUrl" :href="dashboardsUrl" class="text-muted hover:text-fg" :class="onDashboards ? 'font-medium text-fg' : ''" :aria-current="onDashboards ? 'page' : undefined">Dashboards</Link>
 
             <!-- Horizon is a separate Laravel page, not an Inertia one: a plain link, shown to administrators only. -->
             <a v-if="user.is_admin" :href="HORIZON_URL" class="text-muted hover:text-fg">Horizon</a>

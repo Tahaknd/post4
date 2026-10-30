@@ -4,6 +4,7 @@ use App\Domain\Insights\Runs\InsightRunStore;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\RegisterController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\DashboardPagesController;
 use App\Http\Controllers\DashboardTileController;
 use App\Http\Controllers\HomeController;
 use App\Http\Controllers\InsightController;
@@ -49,6 +50,9 @@ Route::middleware(['auth', 'auth.session', EncryptHistoryWhenSecure::class])->gr
         Route::get('/{project}/insights/trends', [ProjectInsightsController::class, 'trends'])->name('projects.insights.trends');
         Route::get('/{project}/insights/funnel', [ProjectInsightsController::class, 'funnel'])->name('projects.insights.funnel');
         Route::get('/{project}/insights/retention', [ProjectInsightsController::class, 'retention'])->name('projects.insights.retention');
+        Route::get('/{project}/dashboards', [DashboardPagesController::class, 'index'])->name('projects.dashboards.index');
+        Route::get('/{project}/dashboards/{dashboard}', [DashboardPagesController::class, 'show'])->name('projects.dashboards.show');
+        Route::get('/{project}/saved-insights', [DashboardPagesController::class, 'savedInsights'])->name('projects.saved-insights.index');
         Route::put('/{project}/api-key', [ProjectController::class, 'rotateKey'])->name('projects.rotate-key')->middleware('throttle.user:projects.rotate');
         Route::delete('/{project}', [ProjectController::class, 'destroy'])->name('projects.destroy')->middleware('throttle.user:projects.delete');
     });

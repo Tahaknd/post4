@@ -22,6 +22,7 @@ use App\Domain\Insights\Trends\BreakdownColumn;
 use App\Domain\Insights\Trends\Interval;
 use App\Domain\Insights\Trends\Metric;
 use App\Domain\Insights\Trends\TrendsQuery;
+use App\Http\DashboardLinks;
 use App\Models\Project;
 use DateTimeZone;
 use Illuminate\Support\Facades\Gate;
@@ -83,10 +84,12 @@ class ProjectInsightsController extends Controller
             'urls' => [
                 'trends' => route('api.insights.trends', $project, absolute: false),
                 // The base of every run URL (`…/runs/`): the client accepts a poll URL only when it is this plus a run id.
-                'runs' => self::runsBase($project),
+                'runs' => DashboardLinks::runsBase($project),
                 'events' => route('api.insights.events', $project, absolute: false),
                 'project' => route('projects.show', $project, absolute: false),
             ],
+            // Where "Save insight" talks to, and where "Open dashboard" leads (server-built paths).
+            'saving' => DashboardLinks::for($project),
         ]);
     }
 
@@ -128,10 +131,12 @@ class ProjectInsightsController extends Controller
             ],
             'urls' => [
                 'funnel' => route('api.insights.funnel', $project, absolute: false),
-                'runs' => self::runsBase($project),
+                'runs' => DashboardLinks::runsBase($project),
                 'events' => route('api.insights.events', $project, absolute: false),
                 'project' => route('projects.show', $project, absolute: false),
             ],
+            // Where "Save insight" talks to, and where "Open dashboard" leads (server-built paths).
+            'saving' => DashboardLinks::for($project),
         ]);
     }
 
@@ -173,19 +178,13 @@ class ProjectInsightsController extends Controller
             ],
             'urls' => [
                 'retention' => route('api.insights.retention', $project, absolute: false),
-                'runs' => self::runsBase($project),
+                'runs' => DashboardLinks::runsBase($project),
                 'events' => route('api.insights.events', $project, absolute: false),
                 'project' => route('projects.show', $project, absolute: false),
             ],
+            // Where "Save insight" talks to, and where "Open dashboard" leads (server-built paths).
+            'saving' => DashboardLinks::for($project),
         ]);
-    }
-
-    /** `/api/projects/{id}/insights/runs/`, taken from the route itself (a run id placeholder is cut off again). */
-    private static function runsBase(Project $project): string
-    {
-        $placeholder = str_repeat('0', 32);
-
-        return str_replace($placeholder, '', route('api.insights.runs.show', ['project' => $project, 'run' => $placeholder], absolute: false));
     }
 
     private static function presetLabel(DatePreset $preset): string
